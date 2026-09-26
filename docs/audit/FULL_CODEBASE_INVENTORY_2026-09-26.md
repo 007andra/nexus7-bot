@@ -39,6 +39,8 @@ RUNTIME_REACHABLE: `IMPORT` = loaded at bootstrap; `LAZY` = reachable through a 
 | bot/binance_cross_portfolio_stress.py | 453 | VENUE_BINANCE | IMPORT | 2 | no | engine, runtime_overlays | KEEP |  |
 | bot/binance_protection_failclosed.py | 314 | VENUE_BINANCE | IMPORT | 2 | no | runtime_bootstrap | KEEP |  |
 | bot/capital_flow_reconciliation.py | 365 | CORE | IMPORT | 1 | no | pilot_live_runtime | KEEP |  |
+| bot/cash_flow_admin.py | 111 | OPERATOR_CLI | CLI (`python -m bot.cash_flow_admin`) | 0 | no | — | KEEP | added by the cash-flow-adjusted drawdown fix |
+| bot/cash_flow_ledger.py | 939 | CORE | IMPORT | 2 | no | capital_flow_reconciliation, cash_flow_admin | KEEP | external cash-flow authority (TWR drawdown) |
 | bot/ci_deploy_gate.py | 144 | CORE | NONE | 1 | no | — | DEPRECATE | Railway prod config has no pre-deploy command and checkSuites=false (read-only check 2026-09-26): gate not in use; keep until operator decides to re-enable |
 | bot/conditional_stop_lifecycle.py | 633 | CORE | LAZY | 1 | no | native_stop_repair, protection_readiness | KEEP |  |
 | bot/conditional_stop_protection.py | 253 | CORE | IMPORT | 2 | no | binance_protection_failclosed, conditional_stop_lifecycle, durable_partial_exit, initial_reconciliation … | KEEP |  |
@@ -316,6 +318,8 @@ RUNTIME_REACHABLE: `IMPORT` = loaded at bootstrap; `LAZY` = reachable through a 
 | tests/test_bluegreen_ownership_handoff.py | 81 | TEST | — | self | no | — | KEEP |  |
 | tests/test_canonical_http_readiness.py | 318 | TEST | — | self | no | — | KEEP |  |
 | tests/test_capital_flow_reconciliation.py | 304 | TEST | — | self | no | — | KEEP |  |
+| tests/test_cash_flow_adjusted_drawdown.py | 585 | TEST | — | self | no | — | KEEP |  |
+| tests/test_cash_flow_cas_postgres.py | 49 | TEST | — | self | no | — | KEEP | real PostgreSQL (CI `TEST_POSTGRES_DSN`) |
 | tests/test_chaos.py | 175 | TEST | — | self | no | — | KEEP |  |
 | tests/test_ci_deploy_gate.py | 132 | TEST | — | self | no | — | KEEP |  |
 | tests/test_conditional_stop_protection.py | 194 | TEST | — | self | no | — | KEEP |  |
