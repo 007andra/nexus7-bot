@@ -114,6 +114,8 @@ _RE_RISK_BLOCK = re.compile(
     rf"^\[(?P<tag>[A-Z0-9_]+)\].*\bsymbol={_SYM}\b.*\bresult=BLOCK\b(?!ED)"
 )
 _RE_RISK_BLOCK_ALT = re.compile(rf"^\[(?P<tag>[A-Z0-9_]+)\] result=BLOCK symbol={_SYM}\b")
+_RE_ADJUSTED_EQUITY = re.compile(r"^\[ADJUSTED_EQUITY\] (?P<body>.*)$")
+_RE_KV = re.compile(r"(?P<key>[a-z_]+)=(?P<value>\S+)")
 _RE_GLOBAL_PAUSE = re.compile(r"^(?:⏸️ Scan pulado|🚫 ENTRADAS BLOQUEADAS|🚫 SCAN_SUSPENSO)")
 
 
@@ -125,6 +127,7 @@ class MarketRadar:
         self._lock = threading.Lock()
         self._entries: dict[str, RadarEntry] = {}
         self._global_note: tuple[str, float] | None = None
+        self._account: tuple[dict, float] | None = None
         self.parse_errors = 0
 
     # ── ingestion ────────────────────────────────────────────────
@@ -148,6 +151,12 @@ class MarketRadar:
 
     def _observe(self, msg: str) -> None:
         if msg.startswith("[MARKET_RADAR"):
+            return
+        m = _RE_ADJUSTED_EQUITY.search(msg)
+        if m:
+            fields = {k.group("key"): k.group("value") for k in _RE_KV.finditer(m.group("body"))}
+            with self._lock:
+                self._account = (fields, self._clock())
             return
         for rx, state, reason in _RULES:
             m = rx.search(msg)
@@ -232,6 +241,14 @@ class MarketRadar:
                                        entry.observed_at if entry else now))
         return sort_rows(rows)
 
+    def account(self, *, stale_s: float) -> dict | None:
+        """Latest cash-flow-adjusted account view ([ADJUSTED_EQUITY]), if fresh."""
+        with self._lock:
+            account = self._account
+        if account is None or self._clock() - account[1] > stale_s:
+            return None
+        return dict(account[0])
+
     def global_note(self, *, stale_s: float) -> str | None:
         with self._lock:
             note = self._global_note
@@ -256,8 +273,46 @@ def _age(seconds: float) -> str:
     return f"{seconds // 3600}h"
 
 
+def _num(fields: dict, key: str) -> float | None:
+    raw = str(fields.get(key, "N/A")).rstrip("%")
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value == value else None
+
+
+def account_lines(account: dict | None) -> list[str]:
+    """Equity / performance HWM / external flows / trading drawdown / limit.
+
+    Only the cash-flow-adjusted drawdown is shown as drawdown. A gross figure
+    caused by an external flow is never presented as trading drawdown.
+    """
+    if not account:
+        return ["Conta: `sem dado recente de drawdown ajustado`"]
+    equity = _num(account, "equity")
+    hwm = _num(account, "performance_hwm")
+    limit = str(account.get("drawdown_limit", "N/A"))
+    applied = int(_num(account, "external_flows_applied") or 0)
+    applied_net = _num(account, "external_flows_net") or 0.0
+    pending = int(_num(account, "pending_flows") or 0)
+    pending_net = _num(account, "pending_net") or 0.0
+    lines = [
+        f"Equity: *{'N/A' if equity is None else f'{equity:.4f}'} USDT*",
+        f"Performance HWM: *{'N/A' if hwm is None else f'{hwm:.4f}'}*",
+        f"Fluxos externos: *{applied} reconciliado(s), líquido {applied_net:+.4f} USDT*",
+    ]
+    if account.get("status") == "RECONCILED" and pending == 0:
+        lines.append(f"Drawdown de trading: *{account.get('trading_drawdown', 'N/A')}* (limite {limit})")
+    else:
+        lines.append(f"⚠️ Fluxos pendentes: *{pending}, líquido {pending_net:+.4f} USDT* — entradas bloqueadas")
+        lines.append(f"Drawdown de trading: *N/A* (reconciliação pendente; limite {limit})")
+    return lines
+
+
 def render(rows, *, now: float, min_score: int, open_count: int,
-           global_note: str | None = None, max_chars: int = _SAFE_MAX_CHARS) -> str:
+           global_note: str | None = None, max_chars: int = _SAFE_MAX_CHARS,
+           account: dict | None = None, show_account: bool = False) -> str:
     """Telegram Markdown text; the table sits in a code block (no escaping issues)."""
     ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     lines = []
@@ -274,6 +329,7 @@ def render(rows, *, now: float, min_score: int, open_count: int,
         f"Acima do score mínimo ({min_score}): *{above}*\n"
         f"NEXUS APPROVE: *{approved}*\n"
         f"Posições abertas: *{open_count}*\n"
+        + ("".join(f"{line}\n" for line in account_lines(account)) if show_account else "")
         + (f"Status: `{global_note.replace('`', '')}`\n" if global_note else "")
         + f"Timestamp UTC: `{ts}`\n"
         "_Somente observabilidade — não altera decisões nem ordens._"
@@ -344,6 +400,8 @@ def build_message(engine, radar: MarketRadar = RADAR, *, now: float | None = Non
         min_score=int(cfg.MIN_ENTRY_SCORE),
         open_count=len(opened),
         global_note=radar.global_note(stale_s=stale_s),
+        account=radar.account(stale_s=stale_s),
+        show_account=True,
     )
 
 

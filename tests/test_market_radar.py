@@ -310,6 +310,58 @@ if __name__ == "__main__":
 class SourceLogShapeAnchorTests(unittest.TestCase):
     """The radar parses existing log lines; fail loudly if their format drifts."""
 
+    # ── cash-flow-adjusted account block ─────────────────────────────────
+    _RECONCILED = (
+        "[ADJUSTED_EQUITY] status=RECONCILED equity=5.8410 performance_hwm=6.4258 "
+        "trading_drawdown=9.10% unadjusted_drawdown=N/A drawdown_limit=10.00% "
+        "external_flows_applied=1 external_flows_net=-4.0000 pending_flows=0 "
+        "pending_net=0.0000 execution_effect=NONE"
+    )
+    _PENDING = (
+        "[ADJUSTED_EQUITY] status=UNRECONCILED equity=5.8410 performance_hwm=10.8262 "
+        "trading_drawdown=N/A unadjusted_drawdown=46.05% drawdown_limit=10.00% "
+        "external_flows_applied=0 external_flows_net=0.0000 pending_flows=3 "
+        "pending_net=-4.0000 execution_effect=BLOCK_NEW_ENTRY"
+    )
+
+    def _account_text(self, line, advance=0.0):
+        clock = _Clock()
+        radar = mr.MarketRadar(clock=clock)
+        radar.observe(line)
+        clock.t += advance
+        return mr.render(
+            [], now=clock.t, min_score=60, open_count=0,
+            account=radar.account(stale_s=900.0), show_account=True,
+        )
+
+    def test_account_block_shows_trading_drawdown_after_reconciled_withdrawal(self):
+        text = self._account_text(self._RECONCILED)
+        self.assertIn("Equity: *5.8410 USDT*", text)
+        self.assertIn("Performance HWM: *6.4258*", text)
+        self.assertIn("Fluxos externos: *1 reconciliado(s), líquido -4.0000 USDT*", text)
+        self.assertIn("Drawdown de trading: *9.10%* (limite 10.00%)", text)
+        self.assertNotIn("46", text)
+        self.assertNotIn("10.8262", text)
+
+    def test_account_block_pending_flow_never_labels_gross_as_trading(self):
+        text = self._account_text(self._PENDING)
+        self.assertIn("Drawdown de trading: *N/A*", text)
+        self.assertIn("Fluxos pendentes: *3, líquido -4.0000 USDT*", text)
+        self.assertIn("entradas bloqueadas", text)
+        self.assertNotIn("46.05", text)
+
+    def test_account_block_expires(self):
+        text = self._account_text(self._RECONCILED, advance=901.0)
+        self.assertIn("sem dado recente de drawdown ajustado", text)
+        self.assertNotIn("9.10%", text)
+
+    def test_adjusted_equity_log_format_matches_ledger(self):
+        source = (ROOT / "bot" / "cash_flow_ledger.py").read_text(encoding="utf-8")
+        self.assertIn('"[ADJUSTED_EQUITY] status=%s equity=%.4f performance_hwm=%s trading_drawdown=%s "', source)
+        for key in ("drawdown_limit=%s", "external_flows_applied=%d", "external_flows_net=%.4f",
+                    "pending_flows=%d", "pending_net=%.4f"):
+            self.assertIn(key, source)
+
     def test_canonical_log_formats_still_present(self):
         read = lambda p: (ROOT / "bot" / p).read_text(encoding="utf-8")  # noqa: E731
         strategy, engine = read("strategy.py"), read("engine.py")
