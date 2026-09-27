@@ -241,7 +241,7 @@ class BinanceClient:
         (IntegrityGuard, diagnostics). There is deliberately no setter: the
         only writer is ``_handle_ws_message`` via ``market_data_health``.
         """
-        health = self.__dict__.get("market_data_health")
+        health = getattr(self, "market_data_health", None)
         return health.last_update_wall if health is not None else 0.0
 
     def __init__(self):
