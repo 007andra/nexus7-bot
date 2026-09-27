@@ -83,15 +83,9 @@ def install(TradingEngine, log) -> None:
     )
     if exchange_runtime.is_kucoin():
         cross_target_policy.install(cross_risk_hardening, log)
-    else:
-        # PilotGuard gate 11 reads client._last_ws_update. Binance already
-        # consumes public WS ticker/kline events, but did not publish that
-        # freshness timestamp. Bridge the existing canonical WS handler into
-        # the guard contract without changing the 120s fail-closed threshold.
-        from bot import binance_public_ws_freshness
-        from bot import binance
-
-        binance_public_ws_freshness.install(binance.BinanceClient, log)
+    # Binance public market-data freshness is native to BinanceClient
+    # (market_data_health, written by the /market websocket handler) and read
+    # by PilotGuard gate 11; no overlay may wrap or duplicate it.
 
     operator_runtime_policy.install(TradingEngine, policy_log_throttle.wrap(log))
     final_sizing_invariants.install(core_engine, pilot_cap, log)

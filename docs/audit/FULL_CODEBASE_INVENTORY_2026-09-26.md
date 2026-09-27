@@ -114,6 +114,7 @@ RUNTIME_REACHABLE: `IMPORT` = loaded at bootstrap; `LAZY` = reachable through a 
 | bot/logger.py | 214 | CORE | IMPORT | 3 | no | atomic_key_value, backtest, binance, binance_accounting_evidence … | KEEP |  |
 | bot/market_data.py | 1002 | CORE | IMPORT | 1 | no | derivatives_news_freshness_hardening, engine, news_context_hardening, score | KEEP |  |
 | bot/market_data_integrity.py | 324 | CORE | IMPORT | 4 | no | nexus_decision_consistency, nexus_oos_real_replay_corrected, runtime_bootstrap, runtime_overlays | KEEP |  |
+| bot/market_data_health.py | 121 | CORE | IMPORT | 2 | no | binance, pilot | KEEP | canonical public market-data freshness authority (gate 11) |
 | bot/market_radar.py | 388 | OBSERVABILITY | IMPORT | 1 | no | operator_runtime_policy, runtime_overlays | KEEP |  |
 | bot/market_risk_binance_fallback.py | 212 | VENUE_BINANCE | IMPORT | 2 | no | runtime_bootstrap | KEEP |  |
 | bot/market_risk_coverage_observability.py | 133 | OBSERVABILITY | IMPORT | 1 | no | runtime_overlays | KEEP |  |
@@ -407,6 +408,7 @@ RUNTIME_REACHABLE: `IMPORT` = loaded at bootstrap; `LAZY` = reachable through a 
 | tests/test_margin_reconciliation.py | 348 | TEST | — | self | no | — | KEEP |  |
 | tests/test_market_data_integrity.py | 155 | TEST | — | self | no | — | KEEP |  |
 | tests/test_market_radar.py | 329 | TEST | — | self | no | — | KEEP |  |
+| tests/test_market_data_freshness_authority.py | 391 | TEST | — | self | no | — | KEEP |  |
 | tests/test_market_risk_binance_fallback.py | 94 | TEST | — | self | no | — | KEEP |  |
 | tests/test_market_risk_coverage_observability.py | 121 | TEST | — | self | no | — | KEEP |  |
 | tests/test_market_risk_intelligence.py | 24 | TEST | — | self | no | — | KEEP |  |
@@ -476,6 +478,8 @@ RUNTIME_REACHABLE: `IMPORT` = loaded at bootstrap; `LAZY` = reachable through a 
 | tests/test_pilot_live_runtime.py | 430 | TEST | — | self | no | — | KEEP |  |
 | tests/test_pilot_minimum.py | 83 | TEST | — | self | no | — | KEEP |  |
 | tests/test_pilot_mode.py | 248 | TEST | — | self | no | — | KEEP |  |
+| tests/test_pilot_market_data_runtime_bridge.py | 86 | TEST | — | self | no | — | KEEP | real bootstrap in child process |
+| tests/binance_ws_runtime_harness.py | 222 | TEST_SUPPORT | module run by tests | test_pilot_market_data_runtime_bridge | no | — | KEEP | LIVE-shaped harness, network-guarded |
 | tests/test_pilot_notional_sizing.py | 61 | TEST | — | self | no | — | KEEP |  |
 | tests/test_pilot_paper_isolation.py | 37 | TEST | — | self | no | — | KEEP |  |
 | tests/test_pilot_readiness_observability.py | 55 | TEST | — | self | no | — | KEEP |  |

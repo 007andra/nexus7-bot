@@ -7,6 +7,7 @@ from typing import List
 
 from bot.logger import log
 from bot.financial_state import FinancialStateInvalid, validate_financial_state
+from bot.market_data_health import MarketDataHealth
 
 PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "true"
 PILOT_RELEASE_TOKEN = "I_APPROVE_TWO_LIVE_PILOT_ORDERS"
@@ -25,6 +26,61 @@ PILOT_MAX_CONCURRENT_POSITIONS = 2
 MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = 2
 PILOT_MAX_NEW_POSITIONS_SESSION = MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION
 PILOT_MAX_MARKET_DATA_AGE_S = float(os.environ.get("PILOT_MAX_MARKET_DATA_AGE_S", "120"))
+
+
+_MARKET_CHECK_LOG_INTERVAL_S = 60.0
+_market_check_log_state = {"key": None, "at": 0.0}
+
+
+def market_data_blockers(client) -> List[str]:
+    """Gate 11: public market-data freshness from the canonical authority.
+
+    Binance clients own a ``MarketDataHealth`` (monotonic, written only by the
+    public websocket handler after a validated event). Legacy clients (KuCoin,
+    test doubles) keep the historical ``_last_ws_update`` contract unchanged.
+    Both paths fail closed: never received -> BLOCK, older than the limit ->
+    BLOCK. The limit is ``PILOT_MAX_MARKET_DATA_AGE_S`` (unchanged, 120 s).
+    """
+    limit = PILOT_MAX_MARKET_DATA_AGE_S
+    health = getattr(client, "market_data_health", None)
+    if isinstance(health, MarketDataHealth):
+        ok, reason, age = health.check(limit)
+        _log_market_check(client, health, ok, reason, age)
+        if ok:
+            return []
+        if reason == "no_market_data":
+            return ["11_MARKET_DATA: nenhum dado de mercado recebido (reason=no_market_data)"]
+        if reason == "stale_market_data":
+            return [
+                f"11_MARKET_DATA: dado com {age:.0f}s "
+                f"(máx {limit:.0f}s) reason=stale_market_data"
+            ]
+        return [f"11_MARKET_DATA: frescor inválido reason={reason}"]
+
+    last_ws = float(getattr(client, "_last_ws_update", 0) or 0)
+    if last_ws <= 0:
+        return ["11_MARKET_DATA: nenhum dado de mercado recebido"]
+    age = time.time() - last_ws
+    if age > limit:
+        return [f"11_MARKET_DATA: dado com {age:.0f}s (máx {limit:.0f}s)"]
+    return []
+
+
+def _log_market_check(client, health, ok, reason, age) -> None:
+    result = "PASS" if ok else "BLOCK"
+    key = (result, reason, health.instance_id)
+    now = time.monotonic()
+    state = _market_check_log_state
+    if key == state["key"] and now - state["at"] < _MARKET_CHECK_LOG_INTERVAL_S:
+        return
+    state["key"], state["at"] = key, now
+    log.info(
+        "[PILOT_MARKET_DATA_CHECK] client_type=%s.%s client_instance=%s "
+        "last_ws_update=%.3f age_s=%s limit_s=%.0f result=%s reason=%s",
+        type(client).__module__, type(client).__qualname__, health.instance_id,
+        health.last_update_wall, "NA" if age is None else f"{age:.1f}",
+        PILOT_MAX_MARKET_DATA_AGE_S, result, reason,
+    )
 
 
 @dataclass
@@ -168,16 +224,7 @@ class PilotGuard:
             elif getattr(ai_decision, "execution_allowed", None) is not True:
                 r.append("10_AI: NEXUS AI não aprovou a entrada")
 
-            last_ws = float(getattr(client, "_last_ws_update", 0) or 0)
-            if last_ws <= 0:
-                r.append("11_MARKET_DATA: nenhum dado de mercado recebido")
-            else:
-                age = time.time() - last_ws
-                if age > PILOT_MAX_MARKET_DATA_AGE_S:
-                    r.append(
-                        f"11_MARKET_DATA: dado com {age:.0f}s "
-                        f"(máx {PILOT_MAX_MARKET_DATA_AGE_S:.0f}s)"
-                    )
+            r.extend(market_data_blockers(client))
 
             if symbol and symbol in inst:
                 meta = inst[symbol]

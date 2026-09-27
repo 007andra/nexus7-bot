@@ -34,6 +34,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from bot.execution_capability import assert_exchange_mutation_allowed
 from bot.logger import log
+from bot.market_data_health import MarketDataHealth
 from bot.order_state import OrderState, InvalidTransition
 
 
@@ -139,6 +140,16 @@ REST_BASE = os.environ.get(
 WS_BASE = os.environ.get(
     "BINANCE_FAPI_WS_BASE", "wss://fstream.binance.com"
 ).rstrip("/")
+# Binance split the USD-M websocket base URL into routed entry points
+# (/public, /market, /private). Connections without a routed path receive only
+# /public streams (book ticker/depth); kline and 24hrTicker are /market streams
+# and are never pushed on an unrouted connection -- the socket opens and stays
+# silent. Legacy unrouted URLs were decommissioned on 2026-04-23.
+WS_MARKET_BASE = f"{WS_BASE}/market"
+# A healthy /market combined stream pushes kline/ticker frames every second.
+# A connection that delivers no frame at all for this long is dead or
+# misrouted: reconnect and say so (freshness is never advanced by this).
+PUBLIC_WS_SILENCE_RECONNECT_S = 90.0
 
 TAKER_FEE = float(os.environ.get("TAKER_FEE", "0.0005"))
 MAKER_FEE = float(os.environ.get("MAKER_FEE", "0.0002"))
@@ -222,6 +233,17 @@ class BinanceClient:
     product_name = "USD-M Futures"
     STALE_MULTIPLIER = 3
 
+    @property
+    def _last_ws_update(self) -> float:
+        """Read-only legacy view of ``market_data_health`` (wall clock).
+
+        Kept for readers written against the historical client contract
+        (IntegrityGuard, diagnostics). There is deliberately no setter: the
+        only writer is ``_handle_ws_message`` via ``market_data_health``.
+        """
+        health = getattr(self, "market_data_health", None)
+        return health.last_update_wall if health is not None else 0.0
+
     def __init__(self):
         self._session: Optional[aiohttp.ClientSession] = None
         self._time_offset_ms = 0
@@ -232,6 +254,12 @@ class BinanceClient:
         self._ob_cache: dict = {}
         self._stale_logged: dict = {}
         self._ws_tasks: set = set()
+        # Single canonical public market-data freshness authority for this
+        # client. PilotGuard gate 11 reads this exact object (see bot.pilot).
+        self.market_data_health = MarketDataHealth()
+        self._public_ws_errors = 0
+        self._public_ws_error_logged_at = 0.0
+        self._market_data_summary_at = 0.0
         self._private_ws_task = None
         self._listen_key = ""
         self._rate_lock = asyncio.Lock()
@@ -1706,10 +1734,13 @@ class BinanceClient:
                     f"{lower}@kline_"
                     f"{INTERVAL_MAP[interval]}"
                 )
+        # kline/24hrTicker are /market streams: they must use the routed
+        # /market entry point or Binance never pushes them.
         url = (
-            f"{WS_BASE}/stream?streams="
+            f"{WS_MARKET_BASE}/stream?streams="
             + "/".join(streams)
         )
+        health = self.market_data_health
         retry = 1.0
         while True:
             try:
@@ -1720,27 +1751,82 @@ class BinanceClient:
                     close_timeout=5,
                     max_queue=2048,
                 ) as websocket:
+                    epoch = health.mark_connected()
+                    log.info(
+                        "[MARKET_DATA_AUTHORITY] source=public_ws event=connected "
+                        "route=/market streams=%d epoch=%d client_instance=%s "
+                        "freshness_advanced=false",
+                        len(streams), epoch, health.instance_id,
+                    )
                     retry = 1.0
-                    async for raw in websocket:
+                    frames = websocket.__aiter__()
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(
+                                frames.__anext__(),
+                                timeout=PUBLIC_WS_SILENCE_RECONNECT_S,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            log.warning(
+                                "[MARKET_DATA_AUTHORITY] source=public_ws "
+                                "event=silent_stream silence_s=%.0f route=/market "
+                                "action=reconnect freshness_advanced=false",
+                                PUBLIC_WS_SILENCE_RECONNECT_S,
+                            )
+                            break
                         try:
                             message = json.loads(raw)
                             await self._handle_ws_message(
                                 message
                             )
                         except Exception as exc:
-                            log.debug(
-                                "Binance public WS parse: %s",
-                                exc,
-                            )
+                            self._note_public_ws_error(exc)
             except asyncio.CancelledError:
+                health.mark_disconnected()
                 raise
             except Exception as exc:
                 log.warning(
                     "Binance public WS reconnect: %s",
                     type(exc).__name__,
                 )
-                await asyncio.sleep(retry)
-                retry = min(30.0, retry * 2)
+            health.mark_disconnected()
+            await asyncio.sleep(retry)
+            retry = min(30.0, retry * 2)
+
+    def _note_public_ws_error(self, exc: Exception) -> None:
+        """Rate-limited visibility for frames the handler could not process."""
+        self._public_ws_errors += 1
+        now = time.monotonic()
+        if now - self._public_ws_error_logged_at >= 60.0:
+            self._public_ws_error_logged_at = now
+            log.warning(
+                "[MARKET_DATA_AUTHORITY] source=public_ws event=frame_error "
+                "error=%s errors_total=%d freshness_advanced=false",
+                type(exc).__name__, self._public_ws_errors,
+            )
+
+    def _record_public_market_event(self, event: str, symbol: str) -> None:
+        health = self.market_data_health
+        if not health.record_public_event(event, symbol):
+            return
+        now = time.monotonic()
+        snap = None
+        if health.snapshot()["events_this_connection"] == 1 or (
+            now - self._market_data_summary_at >= 300.0
+        ):
+            self._market_data_summary_at = now
+            snap = health.snapshot()
+        if snap is not None:
+            log.info(
+                "[MARKET_DATA_AUTHORITY] source=public_ws client_type=%s.%s "
+                "client_instance=%s event=%s symbol=%s last_ws_update=%.3f "
+                "age_ms=0 epoch=%d events_total=%d",
+                type(self).__module__, type(self).__qualname__,
+                health.instance_id, event, symbol, snap["last_update_wall"],
+                snap["connection_epoch"], snap["events_total"],
+            )
 
     async def _handle_ws_message(self, message: dict):
         data = (
@@ -1775,6 +1861,8 @@ class BinanceClient:
                 cache[-1] = row
             else:
                 cache.append(row)
+            # Only after the validated event mutated the cache.
+            self._record_public_market_event(event, symbol)
             return
 
         if event == "24hrTicker":
@@ -1793,6 +1881,7 @@ class BinanceClient:
                     data.get("q", 0) or 0
                 ),
             }
+            self._record_public_market_event(event, symbol)
 
     async def _listen_key_request(self, method: str):
         if not API_KEY:

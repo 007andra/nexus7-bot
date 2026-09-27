@@ -183,6 +183,25 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
                 getattr(ExchangeClient, "exchange_name", "") == "binance",
             )
         )
+        # PilotGuard gate 11 reads BinanceClient.market_data_health, written
+        # only by the native public WS handler on the routed /market stream.
+        # Any late wrapper/overlay of that handler (a second writer) or an
+        # unrouted stream URL (silent socket) is startup drift.
+        from bot import binance as binance_runtime
+
+        items.append(
+            ContractItem(
+                "binance._handle_ws_message",
+                ExchangeClient._handle_ws_message,
+                "binance.py",
+            )
+        )
+        markers.append(
+            MarkerItem(
+                "binance.public_market_data_route",
+                binance_runtime.WS_MARKET_BASE.endswith("/market"),
+            )
+        )
 
     items = tuple(items)
     markers = tuple(markers)
