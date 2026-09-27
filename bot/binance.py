@@ -35,6 +35,11 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from bot.execution_capability import assert_exchange_mutation_allowed
 from bot.logger import log
 from bot.market_data_health import MarketDataHealth
+from bot.private_stream_health import (
+    PRIVATE_ROUTE,
+    PrivateStreamHealth,
+    mask_listen_key,
+)
 from bot.order_state import OrderState, InvalidTransition
 
 
@@ -146,6 +151,13 @@ WS_BASE = os.environ.get(
 # and are never pushed on an unrouted connection -- the socket opens and stays
 # silent. Legacy unrouted URLs were decommissioned on 2026-04-23.
 WS_MARKET_BASE = f"{WS_BASE}/market"
+# User-data (listenKey) streams are /private traffic under the same split:
+# wss://fstream.binance.com/private/ws/<listenKey>. The legacy unrouted
+# /ws/<listenKey> still completes the handshake and answers ping/pong but no
+# longer pushes ORDER_TRADE_UPDATE / ACCOUNT_UPDATE / ALGO_UPDATE.
+WS_PRIVATE_BASE = f"{WS_BASE}{PRIVATE_ROUTE}"
+# Binance: listenKey valid 60 min, keepalive (PUT) recommended every ~30 min.
+LISTEN_KEY_KEEPALIVE_S = 30 * 60.0
 # A healthy /market combined stream pushes kline/ticker frames every second.
 # A connection that delivers no frame at all for this long is dead or
 # misrouted: reconnect and say so (freshness is never advanced by this).
@@ -257,6 +269,11 @@ class BinanceClient:
         # Single canonical public market-data freshness authority for this
         # client. PilotGuard gate 11 reads this exact object (see bot.pilot).
         self.market_data_health = MarketDataHealth()
+        # Single canonical private/user-data stream health authority, read by
+        # the LIVE preflight and PilotGuard gate 14 (see bot.pilot).
+        self.private_stream_health = PrivateStreamHealth()
+        self._private_ws_errors = 0
+        self._private_ws_error_logged_at = 0.0
         self._public_ws_errors = 0
         self._public_ws_error_logged_at = 0.0
         self._market_data_summary_at = 0.0
@@ -1924,48 +1941,101 @@ class BinanceClient:
         )
         return self._private_ws_task
 
+    def private_stream_url(self, listen_key: str) -> str:
+        """Official Binance USD-M user-data stream URL (routed /private)."""
+        return f"{WS_PRIVATE_BASE}/ws/{listen_key}"
+
     async def _private_ws_loop(self):
+        health = self.private_stream_health
         retry = 1.0
         while True:
             keepalive = None
+            health.mark_connecting()
             try:
-                data = await self._listen_key_request(
-                    "POST"
-                )
+                try:
+                    data = await self._listen_key_request("POST")
+                except Exception as exc:
+                    text = str(exc)
+                    if any(code in text for code in ("HTTP 401", "HTTP 403", "-2014", "-2015")):
+                        health.mark_auth_failed(type(exc).__name__)
+                        log.critical(
+                            "[PRIVATE_STREAM] event=auth_failed error=%s "
+                            "action=BLOCK_NEW_ENTRIES retry_s=%.0f",
+                            type(exc).__name__, retry,
+                        )
+                    raise
                 listen_key = str(
-                    data.get("listenKey", "")
+                    (data or {}).get("listenKey", "") or ""
                 )
                 if not listen_key:
                     raise RuntimeError(
                         "empty Binance listenKey"
                     )
                 self._listen_key = listen_key
-
-                async def ping_loop():
-                    while True:
-                        await asyncio.sleep(30 * 60)
-                        await self._listen_key_request(
-                            "PUT"
-                        )
-
-                keepalive = asyncio.create_task(
-                    ping_loop()
-                )
+                health.mark_listen_key_confirmed()
 
                 async with websockets.connect(
-                    f"{WS_BASE}/ws/{listen_key}",
+                    self.private_stream_url(listen_key),
                     ping_interval=180,
                     ping_timeout=600,
                     close_timeout=5,
                     max_queue=2048,
                 ) as websocket:
+                    epoch = health.mark_connected(PRIVATE_ROUTE)
+                    log.warning(
+                        "[PRIVATE_STREAM] event=connected route=%s epoch=%d "
+                        "listen_key=%s reconcile_required=true",
+                        PRIVATE_ROUTE, epoch, mask_listen_key(listen_key),
+                    )
                     retry = 1.0
+
+                    async def keepalive_loop():
+                        while True:
+                            await asyncio.sleep(LISTEN_KEY_KEEPALIVE_S)
+                            try:
+                                await self._listen_key_request("PUT")
+                                health.mark_listen_key_confirmed()
+                            except Exception as exc:
+                                # Never keep a stream whose key may expire
+                                # silently: force a fresh POST + reconnect.
+                                health.mark_keepalive_failed(type(exc).__name__)
+                                log.warning(
+                                    "[PRIVATE_STREAM] event=keepalive_failed error=%s "
+                                    "action=reconnect",
+                                    type(exc).__name__,
+                                )
+                                await websocket.close()
+                                return
+
+                    keepalive = asyncio.create_task(keepalive_loop())
                     async for raw in websocket:
-                        message = json.loads(raw)
-                        await self._handle_private_order_event(
-                            message
-                        )
+                        try:
+                            message = json.loads(raw)
+                        except (TypeError, ValueError) as exc:
+                            self._note_private_ws_error(exc, reconcile=False)
+                            continue
+                        if not isinstance(message, dict):
+                            self._note_private_ws_error(
+                                TypeError("non-object frame"), reconcile=False
+                            )
+                            continue
+                        if str(message.get("e", "")).lower() == "listenkeyexpired":
+                            health.record_event("listenKeyExpired", message.get("E"))
+                            health.require_reconciliation("listen_key_expired")
+                            log.warning(
+                                "[PRIVATE_STREAM] event=listenKeyExpired action=reconnect"
+                            )
+                            break
+                        try:
+                            await self._handle_private_order_event(
+                                message
+                            )
+                        except Exception as exc:
+                            # A private event we failed to apply may be a
+                            # missed fill: REST must reconcile before trust.
+                            self._note_private_ws_error(exc, reconcile=True)
             except asyncio.CancelledError:
+                health.mark_disconnected("cancelled")
                 if keepalive:
                     keepalive.cancel()
                 raise
@@ -1974,11 +2044,27 @@ class BinanceClient:
                     "Binance private WS reconnect: %s",
                     type(exc).__name__,
                 )
-                await asyncio.sleep(retry)
-                retry = min(30.0, retry * 2)
             finally:
                 if keepalive:
                     keepalive.cancel()
+            health.mark_disconnected("stream_ended")
+            await asyncio.sleep(retry)
+            retry = min(30.0, retry * 2)
+
+    def _note_private_ws_error(self, exc: Exception, *, reconcile: bool) -> None:
+        self._private_ws_errors += 1
+        if reconcile:
+            self.private_stream_health.require_reconciliation(
+                f"handler_error:{type(exc).__name__}"
+            )
+        now = time.monotonic()
+        if now - self._private_ws_error_logged_at >= 60.0:
+            self._private_ws_error_logged_at = now
+            log.warning(
+                "[PRIVATE_STREAM] event=frame_error error=%s errors_total=%d "
+                "reconcile_required=%s",
+                type(exc).__name__, self._private_ws_errors, str(reconcile).lower(),
+            )
 
     async def _handle_private_order_event(
         self, message: dict
@@ -1989,9 +2075,15 @@ class BinanceClient:
         event = str(message.get("e", "") or "").upper()
         if event == "ALGO_UPDATE":
             self._handle_private_algo_event(message)
+            self.private_stream_health.record_event(event, message.get("E"))
             return
         if event != "ORDER_TRADE_UPDATE":
+            # ACCOUNT_UPDATE / TRADE_LITE / ACCOUNT_CONFIG_UPDATE / MARGIN_CALL
+            # prove event delivery only; REST stays the position/balance
+            # authority, so they never mutate order state here.
+            self.private_stream_health.record_event(event, message.get("E"))
             return
+        self.private_stream_health.record_event(event, message.get("E"))
 
         order = message.get("o", {})
         if not isinstance(order, dict):
@@ -2069,7 +2161,7 @@ class BinanceClient:
             "CANCELED": OrderState.CANCELLED,
             "EXPIRED": OrderState.CANCELLED,
             "EXPIRED_IN_MATCH": OrderState.CANCELLED,
-            "REJECTED": OrderState.FAILED,
+            "REJECTED": OrderState.REJECTED,
         }.get(status)
 
         if (

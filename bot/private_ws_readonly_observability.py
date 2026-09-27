@@ -160,8 +160,9 @@ async def run(client, instruments, log) -> bool:
 
     setattr(client, "_prelive_private_ws_probe_ok", ws_ok)
     log.info(
-        "[PRIVATE_WS_READONLY_PROBE] result=%s symbol=%s authenticated=true "
-        "subscription_ack=%s execution_effect=NONE",
+        "[PRIVATE_WS_READONLY_PROBE] result=%s symbol=%s transport_probe=%s "
+        "scope=handshake_and_ping_only event_delivery_authority=private_stream_health "
+        "execution_effect=NONE",
         "PASS" if ws_ok else "FAIL",
         symbol,
         str(ws_ok).lower(),

@@ -190,6 +190,48 @@ def _entry_drawdown_allows(engine, log) -> bool:
     return False
 
 
+async def _private_stream_ready(engine, log) -> tuple[bool, str]:
+    """Live private-stream truth for new exposure (Binance user-data stream).
+
+    After any (re)connect/disconnect/handler error the stream may have missed
+    events, so it is trusted again only after an authenticated REST
+    reconciliation pass completed for the current connection: the exposure
+    read (positions + open orders) in this same preflight AND the durable
+    order reconciliation by clientOrderId. WS absence never implies that an
+    order or fill does not exist. Clients without the authority (KuCoin/test
+    doubles) keep the historical behaviour.
+    """
+    from bot.private_stream_health import PrivateStreamHealth
+
+    health = getattr(engine.client, "private_stream_health", None)
+    if not isinstance(health, PrivateStreamHealth):
+        return True, "not_applicable"
+    snap = health.snapshot()
+    if snap["reconcile_required"] and snap["state"] == "CONNECTED":
+        epoch = snap["connection_epoch"]
+        exposure_verified = bool(
+            getattr(engine.client, "_prelive_account_exposure_verified", False)
+        )
+        orders_converged = False
+        try:
+            from bot.durable_live_reconciliation import reconcile_pending
+
+            orders_converged = bool(await reconcile_pending(engine, min_interval_s=0.0))
+        except Exception as exc:
+            log.warning(
+                "[PRIVATE_STREAM] event=reconcile_failed error=%s action=BLOCK_NEW_ENTRIES",
+                type(exc).__name__,
+            )
+        if exposure_verified and orders_converged and health.mark_reconciled(epoch):
+            log.warning(
+                "[PRIVATE_STREAM] event=reconciled epoch=%d source=REST "
+                "exposure_verified=true orders_converged=true",
+                epoch,
+            )
+    ok, reason = health.check()
+    return ok, reason
+
+
 async def _run_readonly_preflight(engine, log, *, probe_private_ws: bool) -> bool:
     from bot import private_ws_readonly_observability as prelive
 
@@ -200,14 +242,17 @@ async def _run_readonly_preflight(engine, log, *, probe_private_ws: bool) -> boo
         private_ws_ok = bool(getattr(engine.client, "_prelive_private_ws_probe_ok", False))
         ready = bool(exposure_clear and private_ws_ok)
 
+    stream_ok, stream_reason = await _private_stream_ready(engine, log)
+    ready = bool(ready and stream_ok)
     engine._pilot_live_prelive_ready = ready
     log.warning(
         "[PILOT_LIVE_PREFLIGHT] result=%s exposure_verified=%s exposure_clear=%s "
-        "private_ws=%s",
+        "private_ws=%s private_stream=%s",
         "PASS" if ready else "BLOCKED",
         getattr(engine.client, "_prelive_account_exposure_verified", False),
         getattr(engine.client, "_prelive_account_exposure_clear", False),
         getattr(engine.client, "_prelive_private_ws_probe_ok", False),
+        stream_reason,
     )
     return ready
 
