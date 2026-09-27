@@ -163,6 +163,33 @@ class ProfessionalRiskAdapter:
             unrealized_pnl=current.unrealized_pnl,
         ))
 
+    def _log_sizing_decomposition(self, symbol, entry, stop, instruments, risk_pct,
+                                  fee_rate, slippage) -> None:
+        """Explain a zero stop-risk quantity. Observability only: any failure
+        here is swallowed and can never change the sizing result."""
+        try:
+            from bot.sizing_decomposition import decompose, format_log
+
+            capital = self._v3.capital
+            detail = decompose(
+                info=instruments.get(symbol) or {},
+                equity=capital.equity,
+                available=capital.available_collateral,
+                entry=entry,
+                stop=stop,
+                risk_pct=risk_pct,
+                leverage=float(cfg.LEVERAGE),
+                max_margin_pct=float(getattr(cfg, "MAX_MARGIN_PCT", 0.80)),
+                fee_rate_per_side=fee_rate,
+                slippage_pct=slippage,
+            )
+            log.warning(format_log(symbol, detail))
+        except Exception as exc:  # noqa: BLE001 - telemetry must never affect sizing
+            log.warning(
+                "[SIZING_DECOMPOSITION] symbol=%s result=UNAVAILABLE error=%s decision_effect=NONE",
+                symbol, type(exc).__name__,
+            )
+
     def size(self, symbol: str, entry: float, instruments: dict,
              size_mult: float = 1.0, open_positions: dict | None = None) -> float:
         """Return stop-risk-sized base quantity or fail closed with zero.
@@ -222,6 +249,11 @@ class ProfessionalRiskAdapter:
                 sizing.required_margin, sizing.binding_constraint,
                 fee_rate * 1e4, expected_slippage * 1e4, plan.cost_snapshot_id,
             )
+            if float(sizing.qty) <= 0:
+                self._log_sizing_decomposition(
+                    key, float(entry), plan.stop, instruments, effective_risk_pct,
+                    fee_rate, expected_slippage,
+                )
             return float(sizing.qty)
         except Exception as exc:
             log.critical(
