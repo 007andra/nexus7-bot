@@ -56,14 +56,36 @@ class FakeBinanceWs:
     def __aiter__(self):
         return self._frames()
 
+    async def ping(self):
+        # Protocol ping/pong works on every path, routed or not: it proves
+        # transport only, never that /private events can be delivered.
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(None)
+        return fut
+
+    async def close(self):
+        self.queue.put_nowait(_DISCONNECT)
+
+    def _delivers(self, frame) -> bool:
+        try:
+            event = json.loads(frame)
+        except (TypeError, ValueError):
+            return self.path.startswith(("/market/", "/private/"))
+        data = event.get("data", event) if isinstance(event, dict) else {}
+        kind = data.get("e") if isinstance(data, dict) else None
+        if kind in {"kline", "24hrTicker"}:
+            return self.path.startswith("/market/")
+        # user-data events (ORDER_TRADE_UPDATE, ACCOUNT_UPDATE, ALGO_UPDATE,
+        # TRADE_LITE, listenKeyExpired, ...) are /private traffic.
+        return self.path.startswith("/private/")
+
     async def _frames(self):
-        routed_market = self.path.startswith("/market/")
         while True:
             frame = await self.queue.get()
             if frame is _DISCONNECT:
                 raise ConnectionError("fake server closed connection")
-            if not routed_market:
-                continue  # /market data is never pushed on unrouted paths
+            if not self._delivers(frame):
+                continue  # routed-path rule: never pushed on this connection
             yield frame
 
 
@@ -76,6 +98,16 @@ def kline_frame(symbol: str = "SUIUSDT", interval: str = "15m") -> str:
             "k": {"t": 1790473500000, "i": interval, "o": "1.0", "h": "1.1",
                   "l": "0.9", "c": "1.05", "v": "100"},
         },
+    })
+
+
+def order_update_frame(client_oid: str, status: str, *, order_id: str = "9001",
+                       symbol: str = "SUIUSDT", filled: str = "0", avg: str = "0") -> str:
+    return json.dumps({
+        "e": "ORDER_TRADE_UPDATE", "E": int(time.time() * 1000), "T": int(time.time() * 1000),
+        "o": {"s": symbol, "c": client_oid, "S": "BUY", "o": "MARKET", "q": "10",
+              "X": status, "x": "TRADE" if "FILLED" in status else status,
+              "i": int(order_id), "z": filled, "ap": avg, "l": filled},
     })
 
 
@@ -155,9 +187,12 @@ async def _scenario(name: str) -> dict:
         reasons = engine.pilot.evaluate(engine, engine.client, "SUIUSDT", _Decision())
         return [r for r in reasons if r.startswith("11_MARKET_DATA")]
 
+    steps: dict = {}
+    if name.startswith("private"):
+        return await _private_scenario(name, client, engine, binance, steps)
+
     await client.start_websocket(["SUIUSDT", "NEARUSDT"], intervals=["15"])
     await _wait_connections(1)
-    steps: dict = {}
 
     if name == "fresh_public_market_data":
         steps["before_any_frame"] = gate()
@@ -204,6 +239,64 @@ async def _scenario(name: str) -> dict:
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    return out
+
+
+async def _private_scenario(name, client, engine, binance, steps) -> dict:
+    import builtins
+
+    from bot.order_state import OrderState
+    from bot.prelive_readonly_probe import _private_ws_probe
+
+    keys = iter(f"lk{n:04d}" + "x" * 56 for n in range(1, 100))
+
+    async def fake_listen_key(method):
+        # POST issues/returns the active key; PUT keeps it alive. Never real.
+        return {"listenKey": next(keys)} if method == "POST" else {}
+
+    client._listen_key_request = fake_listen_key
+    steps["probe_result"] = await _private_ws_probe(client, "ETHUSDT")
+    probe_url = FakeBinanceWs.connections[-1].url
+    FakeBinanceWs.connections.clear()
+
+    task = engine.client.start_private_websocket(engine.orders, ["SUIUSDT"])
+    steps["private_task_started"] = task is not None
+    await _wait_connections(1)
+    order, _ = engine.orders.get_or_create("bgx7-harness-0001", "SUIUSDT", "Buy", 10.0)
+    order.transition(OrderState.SUBMITTING, source="REST")
+    order.transition(OrderState.SUBMITTED, order_id="9001", source="REST")
+    engine.orders.index_order_id("9001", order.client_oid)
+    conn = FakeBinanceWs.connections[-1]
+    conn.push(order_update_frame(order.client_oid, "PARTIALLY_FILLED", filled="4", avg="1.05"))
+    conn.push(order_update_frame(order.client_oid, "FILLED", filled="10", avg="1.05"))
+    await _settle()
+    steps["order_state_after_ws_fill"] = order.state.value
+
+    health = getattr(client, "private_stream_health", None)
+    snap = health.snapshot() if health is not None else None
+    out = {
+        "scenario": name,
+        "bootstrap_installed": bool(getattr(builtins, "_nexus_runtime_bootstrap_installed", False)),
+        "client_type": f"{type(client).__module__}.{type(client).__qualname__}",
+        "engine_client_is_client": engine.client is client,
+        "private_urls": [c.url.rsplit("/", 1)[0] if "/ws/" in c.url else c.url.split("?")[0]
+                         for c in FakeBinanceWs.connections],
+        "probe_url_prefix": probe_url.rsplit("/", 1)[0] if "/ws/" in probe_url else probe_url.split("?")[0],
+        "private_handler_qualname": binance.BinanceClient._handle_private_order_event.__qualname__,
+        "private_health": None if snap is None else {
+            k: snap[k] for k in ("state", "events_total", "last_event", "route")
+        },
+        "private_health_is_shared": (
+            health is not None
+            and getattr(engine.client, "private_stream_health", None) is health
+        ),
+        "steps": steps,
+    }
+    tasks = [t for t in (getattr(client, "_private_ws_task", None),) if t]
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    out["private_task_cancelled_cleanly"] = all(t.done() for t in tasks)
     return out
 
 
