@@ -33,6 +33,9 @@ def run_private_harness(scenario: str = "private_fill") -> tuple[dict, str]:
         "BINANCE_API_SECRET": "dummy-secret-not-real",
         "MIN_ENTRY_SCORE": "60",
         "NEXUS_MIN_SCORE": "60",
+        # The log assertions below need WARNING-level lines regardless of the
+        # parent runner's LOG_LEVEL.
+        "LOG_LEVEL": "INFO",
         "PYTHONPATH": str(ROOT),
     })
     proc = subprocess.run(
