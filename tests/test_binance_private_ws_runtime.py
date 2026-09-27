@@ -68,6 +68,20 @@ class BinancePrivateStreamRuntimeReproduction(unittest.TestCase):
         self.assertNotIn("lk0001" + "x" * 56, output)
         self.assertNotIn("dummy-secret-not-real", output)
 
+    def test_private_reconnect_requires_reconciliation_in_real_runtime(self):
+        result, output = run_private_harness("private_reconnect")
+        steps = result["steps"]
+        self.assertEqual(steps["order_state_after_ws_fill"], "FILLED", result)
+        self.assertEqual(steps["check_before_drop"], [False, "reconcile_required"], result)
+        self.assertEqual(steps["epoch_after_reconnect"], 2, result)
+        self.assertEqual(steps["check_after_reconnect"], [False, "reconcile_required"], result)
+        self.assertEqual(steps["order_state_after_reconnect"], "FILLED", result)
+        self.assertEqual(len(result["private_urls"]), 2, result)
+        for url in result["private_urls"]:
+            self.assertEqual(url, "wss://fstream.binance.com/private/ws")
+        self.assertIn("[PRIVATE_STREAM] event=connected route=/private epoch=2", output)
+        self.assertNotIn("lk0002" + "x" * 56, output)
+
 
 if __name__ == "__main__":
     unittest.main()

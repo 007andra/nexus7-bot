@@ -273,6 +273,17 @@ async def _private_scenario(name, client, engine, binance, steps) -> dict:
     steps["order_state_after_ws_fill"] = order.state.value
 
     health = getattr(client, "private_stream_health", None)
+    if name == "private_reconnect" and health is not None:
+        steps["check_before_drop"] = list(health.check())
+        conn.push(_DISCONNECT)
+        for _ in range(400):
+            if len(FakeBinanceWs.connections) >= 2 and health.state == "CONNECTED":
+                break
+            await asyncio.sleep(0.01)
+        await _settle()
+        steps["epoch_after_reconnect"] = health.connection_epoch
+        steps["check_after_reconnect"] = list(health.check())
+        steps["order_state_after_reconnect"] = order.state.value
     snap = health.snapshot() if health is not None else None
     out = {
         "scenario": name,
