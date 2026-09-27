@@ -202,6 +202,21 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
                 binance_runtime.WS_MARKET_BASE.endswith("/market"),
             )
         )
+        # The private user-data stream must run on the routed /private path
+        # and its native handler must not be replaced by a late overlay.
+        items.append(
+            ContractItem(
+                "binance._handle_private_order_event",
+                ExchangeClient._handle_private_order_event,
+                "binance.py",
+            )
+        )
+        markers.append(
+            MarkerItem(
+                "binance.private_user_data_route",
+                binance_runtime.WS_PRIVATE_BASE.endswith("/private"),
+            )
+        )
 
     items = tuple(items)
     markers = tuple(markers)
