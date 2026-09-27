@@ -35,23 +35,51 @@ def run_harness(scenario: str = "fresh_public_market_data") -> dict:
         [sys.executable, "-m", "tests.binance_ws_runtime_harness", scenario],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=180,
     )
-    lines = [l for l in proc.stdout.splitlines() if l.startswith("HARNESS_RESULT ")]
+    lines = [line for line in proc.stdout.splitlines() if line.startswith("HARNESS_RESULT ")]
     if proc.returncode != 0 or not lines:
         raise AssertionError(f"harness failed rc={proc.returncode}\n{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}")
     return json.loads(lines[-1][len("HARNESS_RESULT "):])
 
 
 class PilotMarketDataRuntimeBridgeReproduction(unittest.TestCase):
-    def test_incident_fresh_public_market_data_passes_gate_11_in_real_runtime(self):
-        result = run_harness()
+    """Real bootstrap -> real client/engine -> real WS loop -> real PilotGuard."""
+
+    def assert_runtime_wiring(self, result):
         self.assertTrue(result["bootstrap_installed"], result)
         self.assertEqual(result["client_type"], "bot.binance.BinanceClient")
+        # One client instance: the engine (and therefore PilotGuard, which is
+        # called with engine.client) holds the object the WS writes into.
         self.assertTrue(result["engine_client_is_client"], result)
-        # kline/24hrTicker are /market streams: the connection must be routed.
-        self.assertTrue(result["ws_urls"], result)
-        self.assertTrue(all(u.startswith("wss://fstream.binance.com/market/") for u in result["ws_urls"]), result)
-        self.assertEqual(result["market_data_reasons"], [], result)
         self.assertTrue(result["health_is_shared"], result)
+        # The executed handler is the native BinanceClient method: no overlay
+        # replaces or wraps it after bootstrap.
+        self.assertEqual(result["handler_qualname"], "BinanceClient._handle_ws_message")
+        # kline/24hrTicker are /market streams: every connection is routed.
+        self.assertTrue(result["ws_urls"], result)
+        for url in result["ws_urls"]:
+            self.assertEqual(url, "wss://fstream.binance.com/market/stream", result)
+
+    def test_incident_fresh_public_market_data_passes_gate_11_in_real_runtime(self):
+        result = run_harness("fresh_public_market_data")
+        self.assert_runtime_wiring(result)
+        # Connected but no frame yet: still fail-closed.
+        self.assertEqual(
+            result["steps"]["before_any_frame"],
+            ["11_MARKET_DATA: nenhum dado de mercado recebido (reason=no_market_data)"],
+        )
+        # SUIUSDT/NEAR-like approved candidate with fresh public data.
+        self.assertEqual(result["steps"]["after_frames"], [], result)
+        self.assertEqual(result["market_data_reasons"], [], result)
+
+    def test_reconnect_semantics_in_real_runtime(self):
+        result = run_harness("reconnect")
+        self.assert_runtime_wiring(result)
+        self.assertEqual(len(result["ws_urls"]), 2, result)  # real reconnect
+        steps = result["steps"]
+        self.assertEqual(steps["connected_fresh"], [], result)
+        self.assertEqual(len(steps["reconnected_no_frame_stale"]), 1, result)
+        self.assertIn("reason=stale_market_data", steps["reconnected_no_frame_stale"][0])
+        self.assertEqual(steps["reconnected_first_frame"], [], result)
 
 
 if __name__ == "__main__":

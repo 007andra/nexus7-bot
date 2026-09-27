@@ -12,12 +12,12 @@ process (the bootstrap patches classes process-wide). It:
    ``bot.binance``) with a fake that implements Binance's documented USD-M
    base-URL split: connections without a routed path (``/public``,
    ``/market``, ``/private``) receive only /public streams; kline and
-   24hrTicker are /market streams, so an unrouted connection opens and then
-   stays silent (the production symptom);
-5. drives the real ``start_websocket`` / ``_ws_loop`` / handlers and then
-   calls the real ``engine.pilot.evaluate``.
+   24hrTicker are /market streams, so on an unrouted connection they are
+   dropped and the socket stays silent (the production symptom);
+5. drives the real ``start_websocket`` / ``_ws_loop`` / handlers and the real
+   ``engine.pilot.evaluate``.
 
-It prints one JSON line with the result. No credentials are real.
+It prints one ``HARNESS_RESULT`` JSON line. No credentials are real.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ import sys
 import time
 from urllib.parse import parse_qs, urlparse
 
-MARKET_STREAM_SUFFIXES = ("@ticker", "@kline_")
+_DISCONNECT = object()
 
 
 class FakeBinanceWs:
@@ -36,75 +36,67 @@ class FakeBinanceWs:
 
     connections: list = []
 
-    def __init__(self, url: str, script):
+    def __init__(self, url: str):
         self.url = url
         parsed = urlparse(url)
         self.path = parsed.path
         self.streams = parse_qs(parsed.query).get("streams", [""])[0].split("/")
-        self.script = script
-        self.closed = False
+        self.queue: asyncio.Queue = asyncio.Queue()
         FakeBinanceWs.connections.append(self)
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *exc):
-        self.closed = True
         return False
 
-    def _routed_for_market(self) -> bool:
-        return self.path.startswith("/market/")
+    def push(self, frame) -> None:
+        self.queue.put_nowait(frame)
 
     def __aiter__(self):
         return self._frames()
 
     async def _frames(self):
-        market = [s for s in self.streams if s.endswith("@ticker") or "@kline_" in s]
-        if not self._routed_for_market() or not market:
-            # Unrouted legacy URL: Binance accepts the upgrade but pushes no
-            # /market data. The socket simply stays silent.
-            while True:
-                await asyncio.sleep(3600)
-        for frame in self.script(market):
-            if frame == "__DISCONNECT__":
-                raise ConnectionError("fake server closed connection")
-            if frame == "__IDLE__":
-                while True:
-                    await asyncio.sleep(3600)
-            yield frame
-            await asyncio.sleep(0)
+        routed_market = self.path.startswith("/market/")
         while True:
-            await asyncio.sleep(3600)
+            frame = await self.queue.get()
+            if frame is _DISCONNECT:
+                raise ConnectionError("fake server closed connection")
+            if not routed_market:
+                continue  # /market data is never pushed on unrouted paths
+            yield frame
 
 
-def _kline(stream: str) -> str:
-    symbol, _, interval = stream.partition("@kline_")
+def kline_frame(symbol: str = "SUIUSDT", interval: str = "15m") -> str:
+    lower = symbol.lower()
     return json.dumps({
-        "stream": stream,
+        "stream": f"{lower}@kline_{interval}",
         "data": {
-            "e": "kline", "E": int(time.time() * 1000), "s": symbol.upper(),
+            "e": "kline", "E": int(time.time() * 1000), "s": symbol,
             "k": {"t": 1790473500000, "i": interval, "o": "1.0", "h": "1.1",
                   "l": "0.9", "c": "1.05", "v": "100"},
         },
     })
 
 
-def _ticker(stream: str) -> str:
-    symbol = stream.split("@", 1)[0]
+def ticker_frame(symbol: str = "SUIUSDT") -> str:
     return json.dumps({
-        "stream": stream,
-        "data": {"e": "24hrTicker", "s": symbol.upper(), "c": "1.05",
+        "stream": f"{symbol.lower()}@ticker",
+        "data": {"e": "24hrTicker", "s": symbol, "c": "1.05",
                  "b": "1.04", "a": "1.06", "v": "1000", "q": "1050"},
     })
 
 
-def default_script(market_streams):
-    for stream in market_streams:
-        yield _ticker(stream) if stream.endswith("@ticker") else _kline(stream)
-
-
 class _Decision:
     execution_allowed = True
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 1_000.0
+
+    def __call__(self):
+        return self.t
 
 
 def _load_repo_sitecustomize() -> None:
@@ -127,8 +119,25 @@ def _load_repo_sitecustomize() -> None:
     spec.loader.exec_module(module)
 
 
+async def _settle(n: int = 20) -> None:
+    for _ in range(n):
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+
+
+async def _wait_connections(count: int) -> None:
+    for _ in range(400):
+        if len(FakeBinanceWs.connections) >= count:
+            await _settle()
+            return
+        await asyncio.sleep(0.01)
+    raise RuntimeError(f"expected {count} websocket connections")
+
+
 async def _scenario(name: str) -> dict:
     _load_repo_sitecustomize()
+    import builtins
+
     import main_hardened  # noqa: F401  (sitecustomize + runtime bootstrap)
     import main
     from bot import binance
@@ -140,31 +149,61 @@ async def _scenario(name: str) -> dict:
         return None  # REST seeding must never satisfy public WS freshness
 
     client._seed_kline_cache = no_rest_seed
-    binance.websockets.connect = lambda url, **kw: FakeBinanceWs(url, default_script)
+    binance.websockets.connect = lambda url, **kw: FakeBinanceWs(url)
+
+    def gate():
+        reasons = engine.pilot.evaluate(engine, engine.client, "SUIUSDT", _Decision())
+        return [r for r in reasons if r.startswith("11_MARKET_DATA")]
 
     await client.start_websocket(["SUIUSDT", "NEARUSDT"], intervals=["15"])
-    for _ in range(50):
-        await asyncio.sleep(0.01)
+    await _wait_connections(1)
+    steps: dict = {}
 
-    reasons = engine.pilot.evaluate(engine, engine.client, "SUIUSDT", _Decision())
-    market = [r for r in reasons if r.startswith("11_MARKET_DATA")]
+    if name == "fresh_public_market_data":
+        steps["before_any_frame"] = gate()
+        FakeBinanceWs.connections[-1].push(kline_frame())
+        FakeBinanceWs.connections[-1].push(ticker_frame("NEARUSDT"))
+        await _settle()
+        steps["after_frames"] = gate()
+    elif name == "reconnect":
+        clock = _Clock()
+        health = getattr(client, "market_data_health", None)
+        if health is not None:
+            health._monotonic = clock
+        conn = FakeBinanceWs.connections[-1]
+        conn.push(kline_frame())
+        await _settle()
+        steps["connected_fresh"] = gate()
+        conn.push(_DISCONNECT)
+        await _wait_connections(2)  # real _ws_loop reconnect (1s backoff)
+        clock.t += 121.0
+        steps["reconnected_no_frame_stale"] = gate()
+        FakeBinanceWs.connections[-1].push(ticker_frame())
+        await _settle()
+        steps["reconnected_first_frame"] = gate()
+    else:
+        raise SystemExit(f"unknown scenario {name}")
+
     health = getattr(client, "market_data_health", None)
     out = {
         "scenario": name,
-        "bootstrap_installed": bool(getattr(__import__("builtins"), "_nexus_runtime_bootstrap_installed", False)),
+        "bootstrap_installed": bool(getattr(builtins, "_nexus_runtime_bootstrap_installed", False)),
         "client_type": f"{type(client).__module__}.{type(client).__qualname__}",
         "engine_client_is_client": engine.client is client,
         "ws_urls": [c.url.split("?")[0] for c in FakeBinanceWs.connections],
         "handler_qualname": binance.BinanceClient._handle_ws_message.__qualname__,
-        "market_data_reasons": market,
+        "market_data_reasons": gate(),
+        "steps": steps,
         "health_is_shared": (
             health is not None
             and getattr(engine.client, "market_data_health", None) is health
         ),
+        "health_instance": getattr(health, "instance_id", None),
     }
-    for task in list(getattr(client, "_ws_tasks", ())):
+    tasks = list(getattr(client, "_ws_tasks", ()))
+    for task in tasks:
         task.cancel()
-    await asyncio.gather(*list(getattr(client, "_ws_tasks", ())), return_exceptions=True)
+    await asyncio.gather(*tasks, return_exceptions=True)
     return out
 
 
