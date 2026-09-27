@@ -226,3 +226,45 @@ async def rebase_real_account_peak_for_external_flow(
         persisted, rebased_peak, max(0.0, (rebased_peak-current_equity)/rebased_peak)*100.0,
     )
     return rebased_peak
+
+
+def install_reconciled_peak(risk, peak: float, current_equity: float) -> None:
+    """Install a peak already durably committed by ``cash_flow_ledger``.
+
+    The ledger writes HWM + provenance + ledger atomically; this only mirrors
+    the committed value into the in-process cache and risk managers.
+    """
+    peak = _positive_finite(peak, "reconciled equity peak")
+    current_equity = _positive_finite(current_equity, "account equity")
+    setattr(risk, _CACHE_ATTR, peak)
+    _apply_peak(risk, peak, current_equity, allow_lower=True)
+
+
+async def reload_durable_peak(risk, equity: float, *, strict: bool = True) -> float | None:
+    """Drop the in-process HWM cache and reload the durable value.
+
+    Used when the external cash-flow ledger changed outside this process (an
+    operator attestation), so the running process never keeps enforcing a
+    stale, unadjusted HWM nor re-persists it.
+    """
+    equity = _positive_finite(equity, "account equity")
+    old = getattr(risk, _CACHE_ATTR, None)
+    raw = await db.load_key_value(DURABLE_EQUITY_PEAK_KEY, strict=strict)
+    if raw is None:
+        if hasattr(risk, _CACHE_ATTR):
+            setattr(risk, _CACHE_ATTR, None)
+        return None
+    try:
+        peak = _positive_finite(raw, "persisted equity peak")
+    except (TypeError, ValueError) as exc:
+        raise db.PersistenceError("durable equity peak is malformed") from exc
+    _validate_peak_vs_equity(peak, equity)
+    setattr(risk, _CACHE_ATTR, peak)
+    _apply_peak(risk, peak, equity, allow_lower=True)
+    log.warning(
+        "[DURABLE_DRAWDOWN] reload=ledger_changed old_cached_peak=%s peak_equity=%.4f equity=%.4f "
+        "drawdown=%.2f%% execution_effect=NONE",
+        "N/A" if old is None else f"{float(old):.4f}", peak, equity,
+        max(0.0, (peak - equity) / peak) * 100.0,
+    )
+    return peak
