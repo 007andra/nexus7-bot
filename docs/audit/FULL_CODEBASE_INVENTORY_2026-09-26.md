@@ -191,6 +191,7 @@ RUNTIME_REACHABLE: `IMPORT` = loaded at bootstrap; `LAZY` = reachable through a 
 | bot/pre_dispatch_guard.py | 280 | CORE | IMPORT | 2 | no | core_execution_risk, pilot_risk_cap_hardening, shadow_live | KEEP |  |
 | bot/prelive_protection_failclosed.py | 205 | CORE | IMPORT | 1 | no | runtime_bootstrap | KEEP |  |
 | bot/prelive_readonly_probe.py | 153 | CORE | LAZY | 1 | no | private_ws_readonly_observability | KEEP |  |
+| bot/private_stream_health.py | 198 | CORE | IMPORT | 3 | no | binance, pilot, pilot_live_runtime | KEEP | canonical private user-data stream health (gate 14) |
 | bot/pretrade_hardening.py | 72 | HARDENING_OVERLAY | IMPORT | 0 | no | runtime_bootstrap | KEEP |  |
 | bot/private_ws_readonly_observability.py | 169 | OBSERVABILITY | LAZY | 2 | no | pilot_live_runtime, validation_safety_lock | KEEP |  |
 | bot/professional_risk.py | 213 | CORE | IMPORT | 11 | no | account_capital_reader, core_execution_risk, nexus_runtime_engine, pilot_exposure_capacity … | KEEP |  |
@@ -315,6 +316,8 @@ RUNTIME_REACHABLE: `IMPORT` = loaded at bootstrap; `LAZY` = reachable through a 
 | tests/test_binance_external_position_guard.py | 99 | TEST | — | self | no | — | KEEP |  |
 | tests/test_binance_liquidation_safety_50x.py | 98 | TEST | — | self | no | — | KEEP |  |
 | tests/test_binance_protection_failclosed.py | 134 | TEST | — | self | no | — | KEEP |  |
+| tests/test_binance_private_stream_invariants.py | 550 | TEST | — | self | no | — | KEEP |  |
+| tests/test_binance_private_ws_runtime.py | 87 | TEST | — | self | no | — | KEEP | real bootstrap in child process |
 | tests/test_binance_usdm_migration.py | 683 | TEST | — | self | no | — | KEEP |  |
 | tests/test_bluegreen_ownership_handoff.py | 81 | TEST | — | self | no | — | KEEP |  |
 | tests/test_canonical_http_readiness.py | 318 | TEST | — | self | no | — | KEEP |  |

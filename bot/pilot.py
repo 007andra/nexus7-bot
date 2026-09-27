@@ -8,6 +8,7 @@ from typing import List
 from bot.logger import log
 from bot.financial_state import FinancialStateInvalid, validate_financial_state
 from bot.market_data_health import MarketDataHealth
+from bot.private_stream_health import PrivateStreamHealth
 
 PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "true"
 PILOT_RELEASE_TOKEN = "I_APPROVE_TWO_LIVE_PILOT_ORDERS"
@@ -64,6 +65,21 @@ def market_data_blockers(client) -> List[str]:
     if age > limit:
         return [f"11_MARKET_DATA: dado com {age:.0f}s (máx {limit:.0f}s)"]
     return []
+
+
+def private_stream_blockers(client) -> List[str]:
+    """Gate 14 (Binance): live private user-data stream must be event-capable.
+
+    Reads the canonical ``client.private_stream_health``. Clients without it
+    (KuCoin/test doubles) keep the historical registry-only check above.
+    """
+    health = getattr(client, "private_stream_health", None)
+    if not isinstance(health, PrivateStreamHealth):
+        return []
+    ok, reason = health.check()
+    if ok:
+        return []
+    return [f"14_WS: stream privado não apto (reason={reason})"]
 
 
 def _log_market_check(client, health, ok, reason, age) -> None:
@@ -246,6 +262,7 @@ class PilotGuard:
 
             if getattr(client, "_order_registry", None) is None:
                 r.append("14_WS: WS privado de ordens não inicializado")
+            r.extend(private_stream_blockers(client))
 
             n_pos = len(getattr(engine, "positions", {}) or {})
             if n_pos >= PILOT_MAX_CONCURRENT_POSITIONS:
