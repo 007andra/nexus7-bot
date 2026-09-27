@@ -6,7 +6,8 @@ one that actually executes. Anything not listed as the owner is diagnostics.
 | concern | authority (module / symbol) | notes |
 |---|---|---|
 | Venue selection | `bot.exchange` (`EXCHANGE`) | `bot.kucoin` is imported for compatibility wrappers only and never claims KuCoin as venue unless `EXCHANGE=kucoin`. |
-| Market data | `BinanceClient` WS kline/ticker caches + REST (`get_klines`) | closed candles only for pretrade (`pretrade_hardening` drops the forming candle). |
+| Market data | `BinanceClient` WS kline/ticker caches + REST (`get_klines`) | closed candles only for pretrade (`pretrade_hardening` drops the forming candle). Public WS uses the routed `/market` stream (kline/24hrTicker are /market; unrouted URLs receive nothing). |
+| Market-data freshness (PilotGuard 11_MARKET_DATA) | `BinanceClient.market_data_health` (`bot.market_data_health.MarketDataHealth`), written only by the native public WS handler after a validated kline/24hrTicker; read by `pilot.market_data_blockers` | monotonic; never advanced by REST, private WS, reconnect, malformed/unknown frames or handler errors; 120 s limit unchanged; `_last_ws_update` is a read-only view; runtime contract pins the handler and the `/market` route. See `docs/audit/PILOT_MARKET_DATA_RUNTIME_BRIDGE.md`. |
 | Strategy signal | `bot.strategy.Analyzer` → `adaptive_mtf_entry` → `pullback_confirmation_hardening` | strategy `TOTAL_COST` is a signal pre-filter assumption, not the execution cost authority. |
 | Execution cost (fee/slippage/spread/funding) | `bot.execution_cost.ExecutionCostSnapshot` (one per candidate, attached to the signal) | Binance fee from `/fapi/v1/commissionRate`; fallback ≥ 6 bps; funding not in pre-trade cost (explicit). |
 | NEXUS decision (EV / net R:R) | `nexus_ai` via `nexus_live_cost_calibration` (costs = snapshot) | technical-policy R:R uses the same snapshot and is diagnostic only. |
