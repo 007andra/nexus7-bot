@@ -283,6 +283,21 @@ class FreshnessContractTests(unittest.TestCase):
         stale._last_ws_update = time.time() - LIMIT - 5
         self.assertIn("11_MARKET_DATA: dado com", gate(stale)[0])
 
+    def test_runtime_contract_detects_ws_handler_overlay(self):
+        from bot.runtime_contract_guard import ContractItem, verify
+
+        native = binance.BinanceClient._handle_ws_message
+        ok, _ = verify((ContractItem("binance._handle_ws_message", native, "binance.py"),))
+        self.assertTrue(ok)
+
+        async def overlay(self, message):  # a PR #421-style late wrapper
+            return await native(self, message)
+
+        ok, errors = verify((ContractItem("binance._handle_ws_message", overlay, "binance.py"),))
+        self.assertFalse(ok)
+        self.assertIn("binance._handle_ws_message", errors[0])
+        self.assertTrue(binance.WS_MARKET_BASE.endswith("/market"))
+
     def test_public_ws_url_is_routed_to_market(self):
         client = new_client()
         urls = []
