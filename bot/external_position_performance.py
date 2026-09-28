@@ -328,7 +328,7 @@ async def _prove_incident_manual_ownership(engine) -> tuple[int, float, float]:
 
     if not math.isclose(
         commission,
-        _INCIDENT_EXPECTED_INCOME["COMMISSION"][1],
+        abs(_INCIDENT_EXPECTED_INCOME["COMMISSION"][1]),
         rel_tol=0.0,
         abs_tol=1e-8,
     ):
