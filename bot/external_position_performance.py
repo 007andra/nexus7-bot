@@ -24,6 +24,7 @@ from bot import database as db
 from bot import drawdown_persistence as ddp
 from bot import hwm_namespace
 from bot.binance_accounting_evidence import collect_income
+from bot.conditional_stop_protection import _instrument_info, _to_base_size
 from bot.logger import log as default_log
 
 
@@ -42,6 +43,11 @@ _INCIDENT_BAD_HWM = 7.3562
 _INCIDENT_PRE_HWM = 6.4680
 _INCIDENT_POST_EQUITY = 6.0944
 _INCIDENT_NET_EXTERNAL = 0.21172362
+_INCIDENT_EXPECTED_INCOME = {
+    "COMMISSION": (6, -0.21386754),
+    "REALIZED_PNL": (1, 0.45130999),
+    "FUNDING_FEE": (1, -0.02571883),
+}
 _INCIDENT_TOLERANCE = 0.002
 
 
@@ -88,17 +94,62 @@ def _active_exchange_symbols(rows) -> set[str]:
 def _unowned_symbols(engine, rows) -> set[str]:
     """Conservative ownership view for performance-HWM eligibility.
 
-    Explicit external classification always wins. Otherwise a symbol is treated
-    as BGX-owned only when it exists in the engine's local owned-position map.
-    The full guard remains the stronger execution authority.
+    Explicit EXTERNAL classification always wins. A local symbol is accepted as
+    BGX-owned only when exchange side and base quantity remain compatible with
+    the owned local position. Legitimate partial exits may reduce quantity;
+    increases or reversals are quarantined exactly like the execution guard.
     """
-    active = _active_exchange_symbols(rows)
-    local = {str(s).upper() for s in (getattr(engine, "positions", {}) or {})}
+    local_positions = getattr(engine, "positions", {}) or {}
     explicit_external = {
         str(s).upper()
         for s in (getattr(engine, "_external_position_symbols", set()) or set())
     }
-    return {s for s in active if s in explicit_external or s not in local}
+    unowned: set[str] = set()
+
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol", "") or "").upper()
+        try:
+            raw_size = abs(float(row.get("size", 0) or 0))
+        except (TypeError, ValueError):
+            raw_size = 0.0
+        if not symbol or raw_size <= 0:
+            continue
+        if symbol in explicit_external:
+            unowned.add(symbol)
+            continue
+
+        owned = local_positions.get(symbol)
+        if owned is None:
+            unowned.add(symbol)
+            continue
+        try:
+            exchange_base = _to_base_size(
+                raw_size,
+                row.get("sizeUnit", "CONTRACTS"),
+                _instrument_info(engine.client, symbol),
+            )
+            local_qty = abs(float(getattr(owned, "qty", 0) or 0))
+            local_direction = str(getattr(owned, "direction", "") or "").upper()
+            exchange_side = str(row.get("side", "") or "").upper()
+            exchange_direction = {
+                "BUY": "LONG",
+                "SELL": "SHORT",
+            }.get(exchange_side, exchange_side)
+            compatible = (
+                exchange_base > 0
+                and local_qty > 0
+                and exchange_direction == local_direction
+                and exchange_base
+                <= local_qty + max(1e-12, local_qty * 1e-9)
+            )
+        except (AttributeError, TypeError, ValueError):
+            compatible = False
+        if not compatible:
+            unowned.add(symbol)
+
+    return unowned
 
 
 async def _read_positions(engine):
@@ -188,6 +239,10 @@ async def _capture_quarantine(engine, symbols: set[str], log) -> dict:
 
 def _incident_rows(rows: list[dict]) -> tuple[list[dict], float]:
     selected: list[dict] = []
+    by_type = {
+        kind: {"count": 0, "income": 0.0}
+        for kind in _INCIDENT_EXPECTED_INCOME
+    }
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("income row invalid")
@@ -201,8 +256,23 @@ def _incident_rows(rows: list[dict]) -> tuple[list[dict], float]:
             raise ValueError("unsupported incident income type")
         amount = _finite(row.get("income", 0), "income")
         selected.append(row)
+        by_type[kind]["count"] += 1
+        by_type[kind]["income"] += amount
+
     if not selected:
         raise ValueError("incident income evidence missing")
+    for kind, (expected_count, expected_income) in _INCIDENT_EXPECTED_INCOME.items():
+        actual = by_type[kind]
+        if int(actual["count"]) != int(expected_count):
+            raise ValueError(f"incident {kind} count mismatch")
+        if not math.isclose(
+            float(actual["income"]),
+            float(expected_income),
+            rel_tol=0.0,
+            abs_tol=1e-8,
+        ):
+            raise ValueError(f"incident {kind} income mismatch")
+
     return selected, sum(float(row.get("income", 0) or 0) for row in selected)
 
 
