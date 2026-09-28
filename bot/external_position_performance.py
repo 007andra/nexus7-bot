@@ -23,7 +23,13 @@ import time
 from bot import database as db
 from bot import drawdown_persistence as ddp
 from bot import hwm_namespace
-from bot.binance_accounting_evidence import collect_income
+from bot.binance_accounting_evidence import (
+    _load_registry,
+    classify_trade_origin,
+    collect_income,
+    collect_orders,
+    collect_user_trades,
+)
 from bot.conditional_stop_protection import _instrument_info, _to_base_size
 from bot.logger import log as default_log
 
@@ -276,6 +282,67 @@ def _incident_rows(rows: list[dict]) -> tuple[list[dict], float]:
     return selected, sum(float(row.get("income", 0) or 0) for row in selected)
 
 
+async def _prove_incident_manual_ownership(engine) -> tuple[int, float, float]:
+    """Require independent exchange + durable proof that ATOM fills were manual."""
+    registry = await _load_registry()
+    for item in registry:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").upper().removesuffix("M")
+        client_oid = str(item.get("client_oid") or "")
+        if symbol == _INCIDENT_SYMBOL and client_oid.startswith("bgx7-"):
+            raise db.PersistenceError(
+                "BGX durable ATOM order conflicts with external incident repair"
+            )
+
+    trades = await collect_user_trades(
+        engine.client, _INCIDENT_SYMBOL, _INCIDENT_START_MS, _INCIDENT_END_MS
+    )
+    orders = await collect_orders(
+        engine.client, _INCIDENT_SYMBOL, _INCIDENT_START_MS, _INCIDENT_END_MS
+    )
+    if len(trades) < 2:
+        raise db.PersistenceError("external incident user-trade evidence incomplete")
+
+    order_map = {
+        str(row.get("orderId")): row
+        for row in orders
+        if isinstance(row, dict) and row.get("orderId") is not None
+    }
+    commission = 0.0
+    realized = 0.0
+    for trade in trades:
+        order = order_map.get(str(trade.get("orderId")))
+        origin, _reason = classify_trade_origin(trade, order, registry)
+        if origin != "MANUAL_EXTERNAL":
+            raise db.PersistenceError(
+                "external incident ownership is not provably manual"
+            )
+        asset = str(trade.get("commissionAsset") or "").upper()
+        if asset != "USDT":
+            raise db.PersistenceError(
+                "external incident commission asset is not USDT"
+            )
+        commission += _finite(trade.get("commission", 0), "trade commission")
+        realized += _finite(trade.get("realizedPnl", 0), "trade realizedPnl")
+
+    if not math.isclose(
+        commission,
+        _INCIDENT_EXPECTED_INCOME["COMMISSION"][1],
+        rel_tol=0.0,
+        abs_tol=1e-8,
+    ):
+        raise db.PersistenceError("external incident trade commission mismatch")
+    if not math.isclose(
+        realized,
+        _INCIDENT_EXPECTED_INCOME["REALIZED_PNL"][1],
+        rel_tol=0.0,
+        abs_tol=1e-8,
+    ):
+        raise db.PersistenceError("external incident trade realized PnL mismatch")
+    return len(trades), commission, realized
+
+
 async def maybe_repair_known_atom_incident(engine, account_state: dict, rows, log=None) -> bool:
     """Repair only the exact, fully pinned 2026-09-27 ATOM manual-position episode."""
     log = log or default_log
@@ -297,6 +364,10 @@ async def maybe_repair_known_atom_incident(engine, account_state: dict, rows, lo
         return False
     if abs(current_equity - _INCIDENT_POST_EQUITY) > _INCIDENT_TOLERANCE:
         return False
+
+    trade_count, trade_commission, trade_realized = (
+        await _prove_incident_manual_ownership(engine)
+    )
 
     evidence1 = await collect_income(
         engine.client, _INCIDENT_START_MS, _INCIDENT_END_MS
@@ -335,8 +406,10 @@ async def maybe_repair_known_atom_incident(engine, account_state: dict, rows, lo
     log.critical(
         "[EXTERNAL_PERFORMANCE_INCIDENT_REPAIR] result=PASS incident=ATOMUSDT_20260927 "
         "bad_hwm=%.4f repaired_hwm=%.4f external_net=%.8f "
-        "pre_equity=%.4f post_equity=%.4f execution_effect=NONE",
+        "pre_equity=%.4f post_equity=%.4f manual_trades=%d "
+        "trade_commission=%.8f trade_realized=%.8f execution_effect=NONE",
         persisted_peak, target, net_external, pre_equity, current_equity,
+        trade_count, trade_commission, trade_realized,
     )
     return True
 
