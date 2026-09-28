@@ -148,13 +148,13 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
 
         self.replace("bot.engine.minimum_base_quantity", size)
         from bot import final_loss_budget
-        validate = final_loss_budget.validate
+        diagnose = final_loss_budget.diagnose
 
         def loss(*a, **k):
             self.events.append("FINAL_LOSS_BUDGET")
-            return validate(*a, **k)
+            return diagnose(*a, **k)
 
-        self.replace("bot.final_loss_budget.validate", loss)
+        self.replace("bot.final_loss_budget.diagnose", loss)
         dispatch = self.client.place_order
 
         async def observed_dispatch(*a, **k):
