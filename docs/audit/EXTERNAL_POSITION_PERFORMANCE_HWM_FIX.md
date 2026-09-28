@@ -128,3 +128,46 @@ This change does not:
 Future external/manual position episodes that are not the pinned ATOM incident
 remain quarantined after closure until a separately reviewed reconciliation
 path proves their full attribution.
+
+## PR #430 one-shot blocker
+
+Reviewed HEAD: `81152bc2d100f94aa9b57e7c956660dacf793419`.
+The repair could execute twice when HWM/equity revisited the pinned values.
+The restart/revisit regression fails on that HEAD with `True is not false`:
+the original implementation performs both rebases using the same ledger.
+
+The four requirements are now enforced:
+
+1. **Durable consumption:** a dedicated `ATOMUSDT_20260927:v1` marker, scoped
+   to the existing HWM namespace, records `CONSUMED` and the incident window.
+   It survives restarts and subsequent replacement of the latest HWM provenance.
+   A consumed incident skips the repair before reading historical ledger data.
+2. **Atomic persistence:** HWM, provenance and marker are written in one existing
+   database CAS transaction. The guards require the original pre-evidence HWM
+   and an absent marker. The existing HWM row is locked before checking the
+   marker on PostgreSQL; SQLite uses `BEGIN IMMEDIATE`. Memory is updated only
+   after a confirmed commit. No schema migration or separate marker write exists.
+3. **Fail closed:** only an absent marker authorizes first-use evaluation.
+   Invalid, partial or unknown marker values and strict storage-read failures
+   raise `PersistenceError`. A changed HWM or a marker appearing during evidence
+   collection causes CAS failure, including the same-HWM/consumed-marker case.
+   A lost commit acknowledgement propagates failure; a retry observes consumption.
+4. **Regression proof:** nine added tests cover restart plus historical HWM
+   revisit, the three committed records, injected final-write rollback and retry,
+   ambiguous marker values, marker-read failure, lost commit acknowledgement,
+   concurrent repair attempts, same-HWM marker conflict, and HWM drift during
+   evidence collection. They use fake Binance evidence and a real SQLite database.
+
+Validation: all 16 external-performance tests and the 62-test targeted pack
+(external performance, drawdown persistence, HWM provenance, CROSS dispatch)
+pass. Ruff critical checks, pyflakes on the changed Python files, compileall and
+selfcheck (zero critical findings) pass. The release proof reports PASS.
+The offline suite also passes. Its existing runner overcounts skipped PostgreSQL
+tests as passes: two PostgreSQL-only tests in the full suite and one in the
+release pack require `TEST_POSTGRES_DSN`, unavailable locally. Exact-head CI
+with PostgreSQL remains the deployment gate; local results do not prove that
+backend. No trading/risk thresholds, rebase formula or exchange behavior changed.
+
+The marker relies on the same durable namespace/database authority as the HWM.
+Restoring a database snapshot from before consumption restores the old state;
+this change does not provide replay protection across destructive storage rollback.
