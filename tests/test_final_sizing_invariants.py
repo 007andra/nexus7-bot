@@ -1,9 +1,13 @@
 import unittest
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from bot.config import cfg
 from bot import final_sizing_invariants as final_sizing
 from bot import pilot_risk_cap_hardening as pilot_cap
+from bot.professional_risk import CapitalState, stop_risk_size
+from bot import binance_cross_portfolio_stress as cross_stress
 
 
 class _Log:
@@ -93,6 +97,69 @@ class FinalSizingInvariantTests(unittest.TestCase):
         margin = qty * 2.0 / cfg.LEVERAGE
         self.assertLessEqual(margin, 19.37 * 0.50 + 1e-9)
         self.assertGreater(qty, 0.0)
+
+    def test_explicit_full_margin_cap_uses_at_most_available_collateral(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0, available=6.0)
+        with patch.dict("os.environ", {"LIVE_OPERATOR_MARGIN_FRACTION": "1"}):
+            qty, stored = self._call(module, engine, price=100.0)
+        self.assertEqual(qty, stored)
+        self.assertAlmostEqual(qty, 3.0)  # 6 USDT * 50x / 100
+        self.assertLessEqual(qty * 100 / cfg.LEVERAGE, 6.0)
+        self.assertIn("100pct_available_initial_margin_cap", final_sizing.sizing_contract(1.0))
+
+    def test_full_margin_cap_keeps_stop_risk_as_binding_upper_bound(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 0.03, available=6.0)
+        with patch.dict("os.environ", {"LIVE_OPERATOR_MARGIN_FRACTION": "1"}):
+            qty, _ = self._call(module, engine)
+        self.assertAlmostEqual(qty, 0.03)
+
+    def test_invalid_allocation_fails_closed(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0, available=6.0)
+        for value in ("0", "1.01", "nan", "bad"):
+            with self.subTest(value=value), patch.dict(
+                "os.environ", {"LIVE_OPERATOR_MARGIN_FRACTION": value}
+            ):
+                qty, stored = self._call(module, engine)
+                self.assertEqual((qty, stored), (0.0, 0.0))
+
+    def test_six_usdt_full_budget_still_limits_projected_loss(self):
+        result = stop_risk_size(
+            capital=CapitalState(equity=6.0, available_collateral=6.0),
+            entry=100.0, stop=98.0, risk_pct=1.0, leverage=50.0,
+            qty_step=0.001, min_qty=0.05, max_margin_pct=1.0,
+            fee_rate_per_side=0.0005, expected_slippage_pct=0.001,
+        )
+        self.assertGreater(result.qty, 0)
+        self.assertLessEqual(result.projected_stop_loss, 6.0)
+        self.assertLessEqual(result.required_margin, 6.0)
+
+    def test_full_budget_cannot_bypass_cross_stop_stress(self):
+        class Client:
+            async def get_account_state(self):
+                return {
+                    "crossWalletBalance": 6.0, "orderMargin": 0.0,
+                    "multiAssetsMargin": False, "canTrade": True,
+                }
+
+            async def get_positions(self):
+                return []
+
+            async def get_symbol_config(self, symbol):
+                return {"marginType": "CROSS"}
+
+            async def get_leverage_brackets(self, symbol):
+                return {"brackets": [{
+                    "bracket": 1, "notionalFloor": 0, "notionalCap": 10000,
+                    "maintMarginRatio": 0.01, "initialLeverage": 50,
+                }]}
+
+        engine = SimpleNamespace(client=Client(), positions={}, paper_trade=False)
+        signal = SimpleNamespace(
+            symbol="TESTUSDT", direction="LONG", entry=100.0, sl=98.0,
+        )
+        result = asyncio.run(cross_stress.evaluate(engine, signal, 3.0))
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason, "nonpositive_stressed_margin")
 
     def test_risk_sizing_exception_fails_closed(self):
         def _raise(*args, **kwargs):
