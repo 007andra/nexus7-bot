@@ -11,6 +11,7 @@ from bot import drawdown_persistence as ddp
 from bot import external_position_performance as epp
 from bot import hwm_namespace
 from bot import pilot_live_runtime as plr
+from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
 from bot.risk import RiskManager
 
@@ -319,6 +320,12 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
         client.rows = incident_rows()
         client.trades, client.orders = incident_trade_evidence()
         engine = self.engine(client, prior_equity=epp._INCIDENT_POST_EQUITY)
+        engine.risk.update_capital(
+            CapitalState(
+                equity=epp._INCIDENT_POST_EQUITY,
+                available_collateral=epp._INCIDENT_POST_EQUITY,
+            )
+        )
 
         await plr._refresh_account(engine, LOG)
 
@@ -332,6 +339,9 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertAlmostEqual(await self.peak(), expected_peak, places=9)
         self.assertAlmostEqual(engine.risk._legacy.drawdown, expected_dd, places=9)
+        self.assertAlmostEqual(
+            engine.risk.professional_snapshot.drawdown, expected_dd, places=9
+        )
         self.assertAlmostEqual(engine.risk._legacy.drawdown * 100.0, 9.04953, places=4)
         self.assertFalse(engine._external_performance_quarantine)
         self.assertTrue(plr._entry_drawdown_allows(engine, LOG))
