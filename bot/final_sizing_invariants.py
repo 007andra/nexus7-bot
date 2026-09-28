@@ -5,9 +5,9 @@ Canonical sizing contract, which every sizing log reports verbatim:
 * ``risk_authority=RiskManagerV3``: the stop-risk quantity sized from
   ``equity * effective_risk_pct`` over the planned stop distance plus
   round-trip fees and slippage. Leverage only changes required collateral.
-* ``target_policy=50pct_available_initial_margin_cap``: the operator ceiling,
-  ``available * 0.50`` of initial margin at configured leverage, floored to
-  exchange lots.
+* The operator ceiling defaults to ``available * 0.50`` of initial margin.
+  An explicit ``LIVE_OPERATOR_MARGIN_FRACTION`` may raise the ceiling up to
+  1.0; exchange lots are always floored.
 * ``final_quantity_policy=min(stop_risk_qty,operator_margin_cap_qty)``.
 
 Any invalid/non-positive input on either side yields ``qty=0`` (fail closed).
@@ -18,12 +18,15 @@ Earlier pilot hooks (``pilot_live_runtime``, ``pilot_risk_cap_hardening``,
 from __future__ import annotations
 
 import math
+import os
 from decimal import Decimal, ROUND_FLOOR
 
 from bot.config import cfg
+from bot.execution_cost import fallback_taker_fee
 from bot.quantity import quantity_rules
 
 MARGIN_FRACTION = 0.50
+ENTRY_PRICE_BUFFER = 0.005
 
 TARGET_POLICY = "50pct_available_initial_margin_cap"
 RISK_AUTHORITY = "RiskManagerV3"
@@ -32,6 +35,50 @@ SIZING_CONTRACT = (
     f"target_policy={TARGET_POLICY} risk_authority={RISK_AUTHORITY} "
     f"final_quantity_policy={FINAL_QUANTITY_POLICY}"
 )
+
+
+def operator_margin_fraction() -> float:
+    """Read the explicit LIVE allocation cap; invalid values fail closed."""
+    raw = os.environ.get("LIVE_OPERATOR_MARGIN_FRACTION")
+    if raw is None:
+        return MARGIN_FRACTION
+    try:
+        fraction = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid LIVE operator margin fraction") from exc
+    if not math.isfinite(fraction) or not 0 < fraction <= 1:
+        raise ValueError("invalid LIVE operator margin fraction")
+    return fraction
+
+
+def sizing_contract(fraction: float) -> str:
+    policy = f"{fraction * 100:g}pct_available_initial_margin_cap"
+    return (
+        f"target_policy={policy} risk_authority={RISK_AUTHORITY} "
+        f"final_quantity_policy={FINAL_QUANTITY_POLICY}"
+    )
+
+
+def operator_target_margin(available: float, leverage: float, fraction: float) -> float:
+    """Cap opening margin so fee and a 0.5% price buffer also fit collateral.
+
+    At a 100% allocation setting, spending the full wallet on initial margin
+    can make the Binance entry fail before the protective stop can be placed.
+    The reserve is calculated on notional, then the exchange lot floors it.
+    """
+    values = (available, leverage, fraction)
+    if any(not math.isfinite(float(v)) or float(v) <= 0 for v in values):
+        raise ValueError("invalid operator margin input")
+    if fraction > 1:
+        raise ValueError("operator margin fraction above one")
+    available_d = Decimal(str(available))
+    leverage_d = Decimal(str(leverage))
+    fraction_d = Decimal(str(fraction))
+    fee_d = Decimal(str(fallback_taker_fee()))
+    execution_factor = Decimal("1") + Decimal(str(ENTRY_PRICE_BUFFER))
+    collateral_per_notional = execution_factor * (Decimal("1") / leverage_d + fee_d)
+    notional = min(available_d * fraction_d * leverage_d, available_d / collateral_per_notional)
+    return float(notional / leverage_d)
 
 
 def _select_final_quantity(*, target_qty: float, risk_qty: float) -> float:
@@ -55,12 +102,14 @@ def binding_constraint(*, target_qty: float, risk_qty: float) -> str:
     return "RISK_BUDGET" if float(risk_qty) <= float(target_qty) else "OPERATOR_MARGIN_CAP"
 
 
-def _operator_target_quantity(info: dict, price: float, available: float, leverage: float) -> float:
-    """Derive the 50%-margin target directly from fresh collateral.
+def _operator_target_quantity(
+    info: dict, price: float, available: float, leverage: float,
+    *, fraction: float | None = None,
+) -> float:
+    """Derive the operator margin cap directly from fresh collateral.
 
     This deliberately does not depend on any earlier legacy sizing wrapper.
-    Native KuCoin contract lots are floored so rounding can never consume more
-    than the operator's 50% initial-margin allocation.
+    Contract lots are floored so rounding cannot exceed the allocation.
     """
     price_d = Decimal(str(price))
     available_d = Decimal(str(available))
@@ -69,7 +118,8 @@ def _operator_target_quantity(info: dict, price: float, available: float, levera
         return 0.0
 
     multiplier, lot, minimum, min_notional = quantity_rules(info)
-    target_margin = available_d * Decimal(str(MARGIN_FRACTION))
+    fraction = operator_margin_fraction() if fraction is None else fraction
+    target_margin = Decimal(str(operator_target_margin(available, leverage, fraction)))
     target_notional = target_margin * leverage_d
     contracts = target_notional / (price_d * multiplier)
     contracts = (contracts / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
@@ -100,7 +150,10 @@ def install(engine_module, pilot_cap, log) -> None:
             price_f = float(price)
             available = float(getattr(engine, "_pilot_available_balance", 0.0) or 0.0)
             leverage = float(cfg.LEVERAGE)
-            target_qty = _operator_target_quantity(info, price_f, available, leverage)
+            fraction = operator_margin_fraction()
+            target_qty = _operator_target_quantity(
+                info, price_f, available, leverage, fraction=fraction,
+            )
         except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
             log.critical(
                 "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=context_%s",
@@ -131,12 +184,12 @@ def install(engine_module, pilot_cap, log) -> None:
             log.critical(
                 "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=invalid_quantity "
                 "operator_margin_cap_qty=%.12g stop_risk_qty=%.12g %s",
-                symbol, target_qty, risk_qty, SIZING_CONTRACT,
+                symbol, target_qty, risk_qty, sizing_contract(fraction),
             )
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        target_margin = available * MARGIN_FRACTION
+        target_margin = operator_target_margin(available, leverage, fraction)
         target_notional = target_margin * leverage
         final_margin = (final_qty * price_f) / leverage
         tolerance = max(1e-9, target_margin * 1e-6)
@@ -182,12 +235,12 @@ def install(engine_module, pilot_cap, log) -> None:
         log.warning(
             "[FINAL_SIZING_INVARIANT] symbol=%s result=PASS operator_margin_cap_qty=%.12g "
             "stop_risk_qty=%.12g final_qty=%.12g binding=%s cap_margin=%.6f "
-            "cap_notional=%.6f final_notional=%.6f final_margin=%.6f margin_cap_pct=50.00%% "
+            "cap_notional=%.6f final_notional=%.6f final_margin=%.6f margin_cap_pct=%.2f%% "
             "leverage=%.0fx %s",
             symbol, target_qty, risk_qty, final_qty,
             binding_constraint(target_qty=target_qty, risk_qty=risk_qty),
-            target_margin, target_notional, final_qty * price_f, final_margin, leverage,
-            SIZING_CONTRACT,
+            target_margin, target_notional, final_qty * price_f, final_margin,
+            fraction * 100.0, leverage, sizing_contract(fraction),
         )
         return final_qty
 
@@ -196,5 +249,5 @@ def install(engine_module, pilot_cap, log) -> None:
     log.critical(
         "[FINAL_SIZING_INVARIANT] installed=true %s configured_leverage_unchanged=true "
         "fail_closed=true",
-        SIZING_CONTRACT,
+        sizing_contract(operator_margin_fraction()),
     )
