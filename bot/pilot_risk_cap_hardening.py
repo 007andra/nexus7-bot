@@ -241,30 +241,43 @@ def install(TradingEngine, log) -> None:
         cost_fraction = float("nan")
         setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
         try:
-            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
+            from bot.final_loss_budget import emit_telemetry, measure
             from bot.execution_cost import stress_cost_fraction
             from bot.config import cfg
             cost_fraction, _cost_ref = stress_cost_fraction(sig, symbol)
-            validate(
+            legacy_metrics = measure(
                 qty_f, executable_price, sig.sl, direction,
                 cfg.LEVERAGE, cost_fraction,
             )
         except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
+            # Invalid final geometry/cost context remains fail-closed. A valid
+            # measurement that merely exceeds the historical leverage-derived
+            # ceiling is diagnostic only.
             emit_telemetry(
                 log, symbol=symbol, setup_id=setup_id,
                 stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
                 entry=executable_price, stop=getattr(sig, "sl", float("nan")),
                 direction=direction, leverage=cfg.LEVERAGE,
-                cost_fraction=cost_fraction, result="BLOCK",
-                specific_reason=reason_from_exception(exc),
+                cost_fraction=cost_fraction, result="INVALID",
+                specific_reason=type(exc).__name__,
             )
             return False
+
+        legacy_exceeded = (
+            legacy_metrics["projected_loss"]
+            > legacy_metrics["loss_limit"]
+            + max(1e-12, legacy_metrics["loss_limit"] * 1e-12)
+        )
         emit_telemetry(
             log, symbol=symbol, setup_id=setup_id,
             stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
             entry=executable_price, stop=sig.sl, direction=direction,
-            leverage=cfg.LEVERAGE, cost_fraction=cost_fraction, result="PASS",
-            specific_reason="within_50pct_entry_margin",
+            leverage=cfg.LEVERAGE, cost_fraction=cost_fraction,
+            result="EXCEEDS_LEGACY_CEILING" if legacy_exceeded else "PASS",
+            specific_reason=(
+                "legacy_50pct_entry_margin_exceeded_diagnostic_only"
+                if legacy_exceeded else "within_legacy_50pct_entry_margin"
+            ),
         )
 
         log.info(
