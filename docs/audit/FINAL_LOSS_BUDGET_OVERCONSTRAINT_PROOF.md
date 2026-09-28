@@ -146,3 +146,45 @@ and reviewers confirm that no unique risk authority depends on the
 If the proof passes, the next separate change can evaluate whether
 `FINAL_LOSS_BUDGET` should remain blocking or become diagnostic telemetry while
 RiskManagerV3 and Binance CROSS stress stay fail-closed.
+
+
+## Exact-head CI result
+
+Candidate HEAD before this documentation-only result update:
+`cac5b6c76f022b45b56d65bdf9b07305c6457bd0`
+
+GitHub Actions:
+
+- Supply Chain Security: PASS
+- Quality Check: PASS
+- `tests.test_final_loss_budget_overconstraint_proof`: PASS (4)
+- full offline suite: `TOTAL=1905 PASSED=1905 FAILED=0 SKIPPED=0`
+- release proof: PASS, including `tests.test_release_pilot_postgres`
+- compile/static/startup/runtime safety steps: PASS
+
+Observed proof verdict:
+
+`RiskManagerV3 PASS + operator margin cap PASS + BINANCE_CROSS_STRESS PASS + FINAL_LOSS_BUDGET BLOCK`
+
+was reproduced for 0.70%, 1.00%, 2.00%, 3.00%, and 5.00% technical
+stops at 50x with 0.32% conservative round-trip stress cost.
+
+The 0.60% positive control passed all layers.
+
+The leverage-control test also passed: the same 2% stop retained the same
+RiskManagerV3 monetary risk quantity/budget at 10x and 50x when collateral was
+not binding, while the legacy projected-loss ceiling passed at 10x and blocked
+at 50x.
+
+The quantity-independence test passed for quantities 0.001, 1, and 1000.
+
+## Audit conclusion
+
+The dynamic evidence supports classification of the current
+`FINAL_LOSS_BUDGET` blocking rule as a legacy leverage-dependent geometry
+constraint layered on top of the current monetary-risk and CROSS-solvency
+authorities.
+
+This PR intentionally makes no policy change. Any conversion of this gate from
+blocking to diagnostic behavior must be implemented and reviewed in a separate
+PR.
