@@ -1,8 +1,9 @@
 """Operator LIVE sizing and explicit risk-override policy.
 
-The controlled LIVE pilot keeps the operator-requested margin ceiling:
+The controlled LIVE pilot applies the operator margin ceiling:
 
-* operator cap: initial margin <= 50% of freshly authenticated available collateral;
+* operator cap: initial margin <= 50% of freshly authenticated available
+  collateral by default, or an explicitly configured fraction up to 100%;
 * leverage is read from the existing configuration (production currently uses 50x);
 * the executed quantity is decided by ``final_sizing_invariants``:
   ``min(stop_risk_qty, operator_margin_cap_qty)`` with RiskManagerV3 as risk
@@ -227,7 +228,7 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
 
 
 def _install_margin_sizing(log) -> None:
-    """Keep 50% of fresh available collateral as the LIVE pilot margin target."""
+    """Apply the operator allocation to fresh LIVE available collateral."""
     from bot import engine as engine_module
     from bot import pilot_live_runtime
     from bot import pilot_risk_cap_hardening as pilot_cap
@@ -263,7 +264,17 @@ def _install_margin_sizing(log) -> None:
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        target_margin = available * MARGIN_FRACTION
+        from bot.final_sizing_invariants import operator_margin_fraction
+        try:
+            margin_fraction = operator_margin_fraction()
+        except ValueError:
+            pilot_cap._PILOT_FINAL_QTY.set(0.0)
+            log.critical(
+                "[PILOT_MARGIN_SIZING] symbol=%s result=BLOCK reason=invalid_margin_fraction",
+                symbol,
+            )
+            return 0.0
+        target_margin = available * margin_fraction
         target_notional = target_margin * leverage
         try:
             target_qty = float(
@@ -310,7 +321,7 @@ def _install_margin_sizing(log) -> None:
             "superseded_by=final_sizing_invariants",
             symbol,
             available,
-            MARGIN_FRACTION * 100.0,
+            margin_fraction * 100.0,
             target_margin,
             leverage,
             target_notional,
@@ -328,11 +339,13 @@ def install(TradingEngine, log) -> None:
     """Install after all controlled-pilot sizing/risk wrappers."""
     _install_drawdown_advisory(TradingEngine, log)
     _install_margin_sizing(log)
+    from bot.final_sizing_invariants import operator_margin_fraction
     log.critical(
-        "[OPERATOR_RUNTIME_POLICY] installed margin_cap=50pct_available "
+        "[OPERATOR_RUNTIME_POLICY] installed margin_cap=%.2fpct_available "
         "sizing_authority=final_sizing_invariants "
         "leverage=%sx drawdown_default=hard_gate explicit_override_supported=true "
-        "override_enabled=%s railway_variables_unchanged=true",
+        "override_enabled=%s",
+        operator_margin_fraction() * 100.0,
         cfg.LEVERAGE,
         _risk_override_enabled(),
     )
