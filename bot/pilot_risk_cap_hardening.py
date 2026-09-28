@@ -240,11 +240,11 @@ def install(TradingEngine, log) -> None:
         executable_price = metrics.get("executable_price")
         cost_fraction = float("nan")
         setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
-        try:
-            from bot.final_loss_budget import diagnose, emit_telemetry
-            from bot.execution_cost import stress_cost_fraction
-            from bot.config import cfg
+        from bot.final_loss_budget import diagnose, emit_telemetry
+        from bot.execution_cost import stress_cost_fraction
+        from bot.config import cfg
 
+        try:
             cost_fraction, _cost_ref = stress_cost_fraction(sig, symbol)
             result_name, specific_reason, _loss_metrics = diagnose(
                 qty_f,
@@ -254,25 +254,17 @@ def install(TradingEngine, log) -> None:
                 cfg.LEVERAGE,
                 cost_fraction,
             )
-            emit_telemetry(
-                log, symbol=symbol, setup_id=setup_id,
-                stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
-                entry=executable_price, stop=getattr(sig, "sl", float("nan")),
-                direction=direction, leverage=cfg.LEVERAGE,
-                cost_fraction=cost_fraction, result=result_name,
-                specific_reason=specific_reason,
-            )
         except Exception as exc:  # noqa: BLE001 - diagnostic must not affect dispatch
-            try:
-                log.warning(
-                    "[FINAL_LOSS_BUDGET] symbol=%s setup_id=%s "
-                    "stage=FRESH_PREDISPATCH_RECHECK result=UNAVAILABLE "
-                    "specific_reason=diagnostic_%s decision_effect=NONE "
-                    "execution_effect=OBSERVABILITY_ONLY",
-                    symbol, setup_id, type(exc).__name__,
-                )
-            except Exception:
-                pass
+            result_name = "UNAVAILABLE"
+            specific_reason = f"diagnostic_{type(exc).__name__}"
+        emit_telemetry(
+            log, symbol=symbol, setup_id=setup_id,
+            stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
+            entry=executable_price, stop=getattr(sig, "sl", float("nan")),
+            direction=direction, leverage=cfg.LEVERAGE,
+            cost_fraction=cost_fraction, result=result_name,
+            specific_reason=specific_reason,
+        )
 
         log.info(
             "[LIVE_PREDISPATCH_MARKET] symbol=%s result=PASS "
