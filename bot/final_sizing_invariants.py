@@ -22,9 +22,11 @@ import os
 from decimal import Decimal, ROUND_FLOOR
 
 from bot.config import cfg
+from bot.execution_cost import fallback_taker_fee
 from bot.quantity import quantity_rules
 
 MARGIN_FRACTION = 0.50
+ENTRY_PRICE_BUFFER = 0.005
 
 TARGET_POLICY = "50pct_available_initial_margin_cap"
 RISK_AUTHORITY = "RiskManagerV3"
@@ -55,6 +57,28 @@ def sizing_contract(fraction: float) -> str:
         f"target_policy={policy} risk_authority={RISK_AUTHORITY} "
         f"final_quantity_policy={FINAL_QUANTITY_POLICY}"
     )
+
+
+def operator_target_margin(available: float, leverage: float, fraction: float) -> float:
+    """Cap opening margin so fee and a 0.5% price buffer also fit collateral.
+
+    At a 100% allocation setting, spending the full wallet on initial margin
+    can make the Binance entry fail before the protective stop can be placed.
+    The reserve is calculated on notional, then the exchange lot floors it.
+    """
+    values = (available, leverage, fraction)
+    if any(not math.isfinite(float(v)) or float(v) <= 0 for v in values):
+        raise ValueError("invalid operator margin input")
+    if fraction > 1:
+        raise ValueError("operator margin fraction above one")
+    available_d = Decimal(str(available))
+    leverage_d = Decimal(str(leverage))
+    fraction_d = Decimal(str(fraction))
+    fee_d = Decimal(str(fallback_taker_fee()))
+    execution_factor = Decimal("1") + Decimal(str(ENTRY_PRICE_BUFFER))
+    collateral_per_notional = execution_factor * (Decimal("1") / leverage_d + fee_d)
+    notional = min(available_d * fraction_d * leverage_d, available_d / collateral_per_notional)
+    return float(notional / leverage_d)
 
 
 def _select_final_quantity(*, target_qty: float, risk_qty: float) -> float:
@@ -95,7 +119,7 @@ def _operator_target_quantity(
 
     multiplier, lot, minimum, min_notional = quantity_rules(info)
     fraction = operator_margin_fraction() if fraction is None else fraction
-    target_margin = available_d * Decimal(str(fraction))
+    target_margin = Decimal(str(operator_target_margin(available, leverage, fraction)))
     target_notional = target_margin * leverage_d
     contracts = target_notional / (price_d * multiplier)
     contracts = (contracts / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
@@ -165,7 +189,7 @@ def install(engine_module, pilot_cap, log) -> None:
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        target_margin = available * fraction
+        target_margin = operator_target_margin(available, leverage, fraction)
         target_notional = target_margin * leverage
         final_margin = (final_qty * price_f) / leverage
         tolerance = max(1e-9, target_margin * 1e-6)
