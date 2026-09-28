@@ -264,7 +264,7 @@ def _install_margin_sizing(log) -> None:
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        from bot.final_sizing_invariants import operator_margin_fraction
+        from bot.final_sizing_invariants import operator_margin_fraction, operator_target_margin
         try:
             margin_fraction = operator_margin_fraction()
         except ValueError:
@@ -274,7 +274,7 @@ def _install_margin_sizing(log) -> None:
                 symbol,
             )
             return 0.0
-        target_margin = available * margin_fraction
+        target_margin = operator_target_margin(available, leverage, margin_fraction)
         target_notional = target_margin * leverage
         try:
             target_qty = float(
