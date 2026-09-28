@@ -10,7 +10,7 @@ Every test drives the REAL chain used in production:
     final_sizing_invariants hook -> ProfessionalRiskAdapter.size
     -> RiskManagerV3.size_for_stop -> quantity.quantity_rules /
        minimum_base_quantity -> professional_risk.stop_risk_size
-    -> final_loss_budget.validate
+    -> final_loss_budget.diagnose
 with the production cost inputs (taker 5 bps/side, slippage allowance 20 bps).
 No exchange client exists in these tests: no order can be sent.
 """
@@ -200,14 +200,23 @@ class IncidentReproductionTests(RuntimeHarness):
             self.assertEqual(below, 0.0, symbol)
             self.assertEqual(above, float(d["min_valid_qty"]), symbol)
 
-    def test_final_loss_budget_independently_blocks_these_stops_at_50x(self):
-        # Even with ample capital the separate 50%-of-entry-margin loss ceiling
-        # rejects stop_fraction + cost > 1/(2*50) = 1% at 50x.
+    def test_final_loss_budget_warns_without_overriding_risk_sizing_at_50x(self):
+        # The historical 50%-of-entry-margin ceiling is diagnostic only.
+        # These candidates still exceed its legacy 1% notional boundary at 50x,
+        # but final quantity remains the RiskManagerV3/operator-cap result.
         for symbol, (info, entry, stop) in CANDIDATES.items():
             final, risk_qty, log = self.run_hook(symbol, info, entry, stop, equity=1000.0)
             self.assertGreater(risk_qty, 0.0, symbol)
-            self.assertEqual(final, 0.0, symbol)
-            self.assertTrue(any("projected_loss_exceeds_50pct_entry_margin" in t for _, t in log.records), symbol)
+            self.assertEqual(final, risk_qty, symbol)
+            self.assertTrue(
+                any(
+                    "result=WARN" in t
+                    and "projected_loss_exceeds_50pct_entry_margin" in t
+                    and "execution_effect=OBSERVABILITY_ONLY" in t
+                    for _, t in log.records
+                ),
+                symbol,
+            )
 
 
 class VenueMetadataTests(RuntimeHarness):
