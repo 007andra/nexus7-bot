@@ -31,6 +31,8 @@ class FakeBinance:
         self.position_margin = 0.0
         self.positions = []
         self.rows = []
+        self.trades = []
+        self.orders = []
         self.now_ms = epp._INCIDENT_END_MS
         self.fail_positions = False
 
@@ -60,13 +62,19 @@ class FakeBinance:
         return [dict(row) for row in self.positions]
 
     async def _get(self, endpoint, params=None, auth=False):
-        if endpoint != "/fapi/v1/income":
-            raise AssertionError(endpoint)
         start = int(params["startTime"])
         end = int(params["endTime"])
+        if endpoint == "/fapi/v1/income":
+            source = self.rows
+        elif endpoint == "/fapi/v1/userTrades":
+            source = self.trades
+        elif endpoint == "/fapi/v1/allOrders":
+            source = self.orders
+        else:
+            raise AssertionError(endpoint)
         return [
             dict(row)
-            for row in self.rows
+            for row in source
             if start <= int(row["time"]) <= end
         ]
 
@@ -95,6 +103,92 @@ def incident_rows(net_adjustment: float = 0.0):
         }
         for kind, amount, ts, tran in base
     ]
+
+
+def incident_trade_evidence(*, bgx_identity: bool = False):
+    opening_commissions = [
+        -0.01346650,
+        -0.01346650,
+        -0.01346650,
+        -0.01346650,
+        -0.01346648,
+    ]
+    trades = []
+    orders = []
+    for idx, commission in enumerate(opening_commissions, start=1):
+        order_id = 9100 + idx
+        ts = epp._INCIDENT_START_MS + idx * 10_000
+        trades.append({
+            "symbol": "ATOMUSDT",
+            "id": 9200 + idx,
+            "orderId": order_id,
+            "side": "BUY",
+            "price": "1.80",
+            "qty": "1",
+            "quoteQty": "1.80",
+            "realizedPnl": "0.00000000",
+            "commission": f"{commission:.8f}",
+            "commissionAsset": "USDT",
+            "time": ts,
+            "buyer": True,
+            "maker": False,
+            "positionSide": "BOTH",
+        })
+        orders.append({
+            "symbol": "ATOMUSDT",
+            "orderId": order_id,
+            "clientOrderId": (
+                "bgx7-forbidden" if bgx_identity and idx == 1
+                else f"manual-open-{idx}"
+            ),
+            "status": "FILLED",
+            "side": "BUY",
+            "positionSide": "BOTH",
+            "type": "MARKET",
+            "origType": "MARKET",
+            "reduceOnly": False,
+            "closePosition": False,
+            "executedQty": "1",
+            "avgPrice": "1.80",
+            "time": ts,
+            "updateTime": ts,
+        })
+
+    close_order_id = 9199
+    close_ts = epp._INCIDENT_END_MS - 20_000
+    trades.append({
+        "symbol": "ATOMUSDT",
+        "id": 9299,
+        "orderId": close_order_id,
+        "side": "SELL",
+        "price": "1.85",
+        "qty": "5",
+        "quoteQty": "9.25",
+        "realizedPnl": "0.45130999",
+        "commission": "-0.14653506",
+        "commissionAsset": "USDT",
+        "time": close_ts,
+        "buyer": False,
+        "maker": False,
+        "positionSide": "BOTH",
+    })
+    orders.append({
+        "symbol": "ATOMUSDT",
+        "orderId": close_order_id,
+        "clientOrderId": "manual-close",
+        "status": "FILLED",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "type": "MARKET",
+        "origType": "MARKET",
+        "reduceOnly": True,
+        "closePosition": False,
+        "executedQty": "5",
+        "avgPrice": "1.85",
+        "time": close_ts,
+        "updateTime": close_ts,
+    })
+    return trades, orders
 
 
 class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
@@ -223,6 +317,7 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
         await self.set_peak(epp._INCIDENT_BAD_HWM)
         client = FakeBinance(wallet=epp._INCIDENT_POST_EQUITY)
         client.rows = incident_rows()
+        client.trades, client.orders = incident_trade_evidence()
         engine = self.engine(client, prior_equity=epp._INCIDENT_POST_EQUITY)
 
         await plr._refresh_account(engine, LOG)
@@ -247,10 +342,30 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
             provenance["reason"], "external_position_performance_rebase"
         )
 
+    async def test_incident_repair_refuses_non_manual_order_identity(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        client = FakeBinance(wallet=epp._INCIDENT_POST_EQUITY)
+        client.rows = incident_rows()
+        client.trades, client.orders = incident_trade_evidence(
+            bgx_identity=True
+        )
+        engine = self.engine(client, prior_equity=epp._INCIDENT_POST_EQUITY)
+
+        with self.assertRaisesRegex(
+            db.PersistenceError,
+            "external incident ownership is not provably manual",
+        ):
+            await plr._refresh_account(engine, LOG)
+
+        self.assertAlmostEqual(
+            await self.peak(), epp._INCIDENT_BAD_HWM, places=6
+        )
+
     async def test_incident_repair_refuses_mismatched_exchange_ledger(self):
         await self.set_peak(epp._INCIDENT_BAD_HWM)
         client = FakeBinance(wallet=epp._INCIDENT_POST_EQUITY)
         client.rows = incident_rows(net_adjustment=-0.01)
+        client.trades, client.orders = incident_trade_evidence()
         engine = self.engine(client, prior_equity=epp._INCIDENT_POST_EQUITY)
 
         with self.assertRaisesRegex(
