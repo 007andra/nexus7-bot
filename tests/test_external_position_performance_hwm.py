@@ -81,11 +81,11 @@ class FakeBinance:
 
 def incident_rows(net_adjustment: float = 0.0):
     base = [
-        ("COMMISSION", -0.01346650, epp._INCIDENT_START_MS + 10_000, 8101),
-        ("COMMISSION", -0.01346650, epp._INCIDENT_START_MS + 20_000, 8102),
-        ("COMMISSION", -0.01346650, epp._INCIDENT_START_MS + 30_000, 8103),
-        ("COMMISSION", -0.01346650, epp._INCIDENT_START_MS + 40_000, 8104),
-        ("COMMISSION", -0.01346648, epp._INCIDENT_START_MS + 50_000, 8105),
+        ("COMMISSION", 0.01346650, epp._INCIDENT_START_MS + 10_000, 8101),
+        ("COMMISSION", 0.01346650, epp._INCIDENT_START_MS + 20_000, 8102),
+        ("COMMISSION", 0.01346650, epp._INCIDENT_START_MS + 30_000, 8103),
+        ("COMMISSION", 0.01346650, epp._INCIDENT_START_MS + 40_000, 8104),
+        ("COMMISSION", 0.01346648, epp._INCIDENT_START_MS + 50_000, 8105),
         ("REALIZED_PNL", 0.45130999, epp._INCIDENT_END_MS - 30_000, 8106),
         ("COMMISSION", -0.14653506, epp._INCIDENT_END_MS - 20_000, 8107),
         ("FUNDING_FEE", -0.02571883 + net_adjustment, epp._INCIDENT_END_MS - 10_000, 8108),
@@ -107,11 +107,11 @@ def incident_rows(net_adjustment: float = 0.0):
 
 def incident_trade_evidence(*, bgx_identity: bool = False):
     opening_commissions = [
-        -0.01346650,
-        -0.01346650,
-        -0.01346650,
-        -0.01346650,
-        -0.01346648,
+        0.01346650,
+        0.01346650,
+        0.01346650,
+        0.01346650,
+        0.01346648,
     ]
     trades = []
     orders = []
@@ -165,7 +165,7 @@ def incident_trade_evidence(*, bgx_identity: bool = False):
         "qty": "5",
         "quoteQty": "9.25",
         "realizedPnl": "0.45130999",
-        "commission": "-0.14653506",
+        "commission": "0.14653506",
         "commissionAsset": "USDT",
         "time": close_ts,
         "buyer": False,
