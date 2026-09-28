@@ -103,8 +103,13 @@ class FinalSizingInvariantTests(unittest.TestCase):
         with patch.dict("os.environ", {"LIVE_OPERATOR_MARGIN_FRACTION": "1"}):
             qty, stored = self._call(module, engine, price=100.0)
         self.assertEqual(qty, stored)
-        self.assertAlmostEqual(qty, 3.0)  # 6 USDT * 50x / 100
-        self.assertLessEqual(qty * 100 / cfg.LEVERAGE, 6.0)
+        self.assertGreater(qty, 2.8)
+        self.assertLess(qty, 3.0)  # 6 USDT with opening-fee and price reserve
+        notional = qty * 100.0
+        self.assertLessEqual(
+            notional * (1 + final_sizing.ENTRY_PRICE_BUFFER)
+            * (1 / cfg.LEVERAGE + 0.0006), 6.0,
+        )
         self.assertIn("100pct_available_initial_margin_cap", final_sizing.sizing_contract(1.0))
 
     def test_full_margin_cap_keeps_stop_risk_as_binding_upper_bound(self):
