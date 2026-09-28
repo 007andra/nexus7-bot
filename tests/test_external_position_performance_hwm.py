@@ -131,6 +131,40 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
             engine._pilot_prev_account_observed_ms = int(prior_ms)
         return engine
 
+    def test_owned_symbol_requires_compatible_side_and_quantity(self):
+        client = FakeBinance(wallet=6.0)
+        engine = SimpleNamespace(
+            client=client,
+            positions={
+                "ATOMUSDT": SimpleNamespace(qty=10.0, direction="LONG")
+            },
+        )
+
+        compatible = [{
+            "symbol": "ATOMUSDT",
+            "size": 8.0,
+            "sizeUnit": "BASE_ASSET",
+            "side": "Buy",
+        }]
+        self.assertEqual(epp._unowned_symbols(engine, compatible), set())
+
+        increased = [{
+            "symbol": "ATOMUSDT",
+            "size": 12.0,
+            "sizeUnit": "BASE_ASSET",
+            "side": "Buy",
+        }]
+        reversed_side = [{
+            "symbol": "ATOMUSDT",
+            "size": 8.0,
+            "sizeUnit": "BASE_ASSET",
+            "side": "Sell",
+        }]
+        self.assertEqual(epp._unowned_symbols(engine, increased), {"ATOMUSDT"})
+        self.assertEqual(
+            epp._unowned_symbols(engine, reversed_side), {"ATOMUSDT"}
+        )
+
     async def test_active_external_position_cannot_create_new_performance_high(self):
         await self.set_peak(6.4680)
         client = FakeBinance(wallet=6.4680, unrealized=0.8882)
