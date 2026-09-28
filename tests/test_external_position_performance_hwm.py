@@ -73,10 +73,14 @@ class FakeBinance:
 
 def incident_rows(net_adjustment: float = 0.0):
     base = [
-        ("COMMISSION", -0.06733248, epp._INCIDENT_START_MS + 10_000, 8101),
-        ("REALIZED_PNL", 0.45130999, epp._INCIDENT_END_MS - 30_000, 8102),
-        ("COMMISSION", -0.14653506, epp._INCIDENT_END_MS - 20_000, 8103),
-        ("FUNDING_FEE", -0.02571883 + net_adjustment, epp._INCIDENT_END_MS - 10_000, 8104),
+        ("COMMISSION", -0.01346650, epp._INCIDENT_START_MS + 10_000, 8101),
+        ("COMMISSION", -0.01346650, epp._INCIDENT_START_MS + 20_000, 8102),
+        ("COMMISSION", -0.01346650, epp._INCIDENT_START_MS + 30_000, 8103),
+        ("COMMISSION", -0.01346650, epp._INCIDENT_START_MS + 40_000, 8104),
+        ("COMMISSION", -0.01346648, epp._INCIDENT_START_MS + 50_000, 8105),
+        ("REALIZED_PNL", 0.45130999, epp._INCIDENT_END_MS - 30_000, 8106),
+        ("COMMISSION", -0.14653506, epp._INCIDENT_END_MS - 20_000, 8107),
+        ("FUNDING_FEE", -0.02571883 + net_adjustment, epp._INCIDENT_END_MS - 10_000, 8108),
     ]
     return [
         {
@@ -216,7 +220,7 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
         engine = self.engine(client, prior_equity=epp._INCIDENT_POST_EQUITY)
 
         with self.assertRaisesRegex(
-            db.PersistenceError, "external incident income total mismatch"
+            db.PersistenceError, "external incident income signature mismatch"
         ):
             await plr._refresh_account(engine, LOG)
 
