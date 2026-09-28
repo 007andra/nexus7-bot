@@ -16,8 +16,6 @@ closed by BGX. An unprotected external position blocks new entries; a protected
 external may coexist only under the existing capacity policy.
 """
 
-import time
-
 from bot.conditional_stop_protection import conditional_stop_confirmed, _to_base_size, _instrument_info
 from bot.restart_ownership_recovery import prove_restart_ownership
 
@@ -44,16 +42,7 @@ def install(TradingEngine, log, exchange_name: str = "kucoin"):
 
     async def _unexpected_positions(engine):
         try:
-            cached = getattr(engine.client, "_performance_position_snapshot", None)
-            if (
-                isinstance(cached, tuple)
-                and len(cached) == 2
-                and isinstance(cached[1], list)
-                and time.monotonic() - float(cached[0]) <= 2.0
-            ):
-                rows = cached[1]
-            else:
-                rows = await engine.client.get_positions()
+            rows = await engine.client.get_positions()
         except Exception as exc:
             log.critical(
                 "[EXTERNAL_POSITION_IMMUTABLE] result=BLOCKED "
