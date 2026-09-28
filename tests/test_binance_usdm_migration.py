@@ -145,12 +145,86 @@ class BinanceMigrationTests(unittest.TestCase):
                 "totalUnrealizedProfit": "5.50",
                 "totalPositionInitialMargin": "30",
                 "totalOpenOrderInitialMargin": "2",
-            }
+            },
+            "/fapi/v1/accountConfig": {"canTrade": True, "multiAssetsMargin": False},
         })
         state = run(client.get_account_state())
         self.assertEqual(state["equity"], 125.5)
         self.assertEqual(state["available"], 80.25)
         self.assertEqual(state["available_source"], "availableBalance")
+        self.assertIs(state["canTrade"], True)
+        self.assertIs(state["multiAssetsMargin"], False)
+        self.assertIn(("GET", "/fapi/v1/accountConfig", {}, True), client.calls)
+
+    def test_account_config_is_authoritative_over_v3_flags_and_fresh(self):
+        client = FakeBinance({
+            "/fapi/v3/account": {"totalMarginBalance": "6", "availableBalance": "6",
+                                 "canTrade": True, "multiAssetsMargin": False},
+            "/fapi/v1/accountConfig": {"canTrade": False, "multiAssetsMargin": True},
+        })
+        state = run(client.get_account_state())
+        self.assertIs(state["canTrade"], False)
+        self.assertIs(state["multiAssetsMargin"], True)
+        client.responses["/fapi/v1/accountConfig"] = {"canTrade": True, "multiAssetsMargin": False}
+        self.assertIs(run(client.get_account_state())["canTrade"], True)
+        self.assertEqual(sum(call[1] == "/fapi/v1/accountConfig" for call in client.calls), 2)
+
+    def test_account_config_missing_or_nonboolean_flags_fail_closed(self):
+        for field in ("canTrade", "multiAssetsMargin"):
+            for value in (None, "true", "false", 0, 1, [], {}):
+                config = {"canTrade": True, "multiAssetsMargin": False, field: value}
+                with self.subTest(field=field, value=value):
+                    client = FakeBinance({"/fapi/v1/accountConfig": config})
+                    with self.assertRaisesRegex(RuntimeError, "CONFIG_INVALID_" + field):
+                        run(client.get_account_state())
+            config = {"canTrade": True, "multiAssetsMargin": False}
+            del config[field]
+            with self.assertRaisesRegex(RuntimeError, "CONFIG_MISSING_" + field):
+                run(FakeBinance({"/fapi/v1/accountConfig": config}).get_account_state())
+
+    def test_account_config_failure_never_falls_back_to_v3_permission(self):
+        def unavailable(*args):
+            raise TimeoutError("config request failed")
+        for config in (None, [], unavailable):
+            with self.subTest(config=config):
+                client = FakeBinance({
+                    "/fapi/v3/account": {"canTrade": True, "multiAssetsMargin": False},
+                    "/fapi/v1/accountConfig": config,
+                })
+                with self.assertRaises((RuntimeError, TimeoutError)):
+                    run(client.get_account_state())
+
+    def test_real_adapter_feeds_cross_stress_without_assuming_permission(self):
+        from bot import binance_cross_portfolio_stress as stress
+        from bot.config import cfg
+        client = FakeBinance({
+            "/fapi/v3/account": {"totalMarginBalance": "6", "totalWalletBalance": "6",
+                                 "availableBalance": "6"},
+            "/fapi/v1/accountConfig": {"canTrade": True, "multiAssetsMargin": False},
+        })
+        client.get_positions = AsyncMock(return_value=[])
+        client.get_symbol_config = AsyncMock(return_value={"marginType": "CROSS"})
+        client.get_leverage_brackets = AsyncMock(return_value={"brackets": [{
+            "bracket": 1, "notionalFloor": 0, "notionalCap": 10000,
+            "maintMarginRatio": 0.01, "initialLeverage": 125,
+        }]})
+        engine = SimpleNamespace(client=client, paper_trade=False, positions={})
+        signal = SimpleNamespace(symbol="LINKUSDT", direction="LONG", entry=15.0, sl=14.9)
+        with patch.object(cfg, "LEVERAGE", 50):
+            self.assertTrue(run(stress.evaluate(engine, signal, 1.0)).allowed)
+            config = client.responses["/fapi/v1/accountConfig"]
+            config["canTrade"] = False
+            result = run(stress.evaluate(engine, signal, 1.0))
+            self.assertEqual(result.reason, "state_account_trading_disabled")
+            self.assertFalse(result.allowed)
+            config["canTrade"] = True
+            config["multiAssetsMargin"] = True
+            self.assertEqual(run(stress.evaluate(engine, signal, 1.0)).reason,
+                             "state_multi_assets_margin_unsupported")
+            del config["canTrade"]
+            result = run(stress.evaluate(engine, signal, 1.0))
+            self.assertFalse(result.allowed)
+            self.assertIn("CONFIG_MISSING_canTrade", result.reason)
 
     def test_conditional_close_stop_is_recognized_without_contract_conversion(self):
         client = FakeBinance({
