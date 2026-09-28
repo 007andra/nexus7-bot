@@ -3154,6 +3154,16 @@ class TradingEngine:
                     # ══════════════════════════════════════════════════
                     # Recheck after analysis/network waits, immediately before
                     # reservation and dispatch. Never size/send against stale funds.
+                    if is_binance() and not self.paper_trade:
+                        from bot.binance_cross_portfolio_stress import final_dispatch_context_valid
+
+                        if not final_dispatch_context_valid(self, sig, qty):
+                            log.critical(
+                                "[BINANCE_CROSS_STRESS] symbol=%s result=BLOCK "
+                                "reason=final_dispatch_context_mismatch stage=FINAL_PREDISPATCH",
+                                sig.symbol,
+                            )
+                            return
                     if not await self._refresh_entry_balance():
                         return
                     if self.paper_trade:
