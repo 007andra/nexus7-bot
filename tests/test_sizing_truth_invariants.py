@@ -2,7 +2,7 @@
 
 Exercises the real chain used in production: ``final_sizing_invariants`` (the
 last ``minimum_base_quantity`` hook) -> ``ProfessionalRiskAdapter.size`` ->
-``RiskManagerV3.size_for_stop`` -> ``final_loss_budget.validate``.
+``RiskManagerV3.size_for_stop`` -> ``final_loss_budget.diagnose``.
 
 Contract (2026-09-26 audit P0-1):
     final_qty = min(stop_risk_qty, operator_margin_cap_qty)
@@ -136,10 +136,16 @@ class SizingTruthInvariantTests(unittest.TestCase):
         self.assertEqual(sized[1], 0.0)
         for lev in (10, 20, 50):
             self.assertGreater(sized[lev], 0.0, lev)
-        # >=75x: a 0.4% stop plus round-trip costs exceeds the pre-existing
-        # final_loss_budget ceiling (projected loss <= 50% of initial margin).
+        # The historical final_loss_budget ceiling is diagnostic-only.
+        # Higher leverage therefore does not create a second geometry veto;
+        # RiskManagerV3/operator margin remain the binding sizing authorities.
         for lev in (75, 100, 125):
-            self.assertEqual(sized[lev], 0.0, lev)
+            self.assertGreater(sized[lev], 0.0, lev)
+        self.assertEqual(
+            len({sized[lev] for lev in (20, 50, 75, 100, 125)}),
+            1,
+            sized,
+        )
 
     def test_leverage_never_multiplies_the_loss_budget(self):
         """Once collateral is not binding, qty and projected loss are leverage-invariant."""

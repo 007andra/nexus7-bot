@@ -240,31 +240,30 @@ def install(TradingEngine, log) -> None:
         executable_price = metrics.get("executable_price")
         cost_fraction = float("nan")
         setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
+        from bot.final_loss_budget import diagnose, emit_telemetry
+        from bot.execution_cost import stress_cost_fraction
+        from bot.config import cfg
+
         try:
-            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.execution_cost import stress_cost_fraction
-            from bot.config import cfg
             cost_fraction, _cost_ref = stress_cost_fraction(sig, symbol)
-            validate(
-                qty_f, executable_price, sig.sl, direction,
-                cfg.LEVERAGE, cost_fraction,
+            result_name, specific_reason, _loss_metrics = diagnose(
+                qty_f,
+                executable_price,
+                getattr(sig, "sl", float("nan")),
+                direction,
+                cfg.LEVERAGE,
+                cost_fraction,
             )
-        except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
-            emit_telemetry(
-                log, symbol=symbol, setup_id=setup_id,
-                stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
-                entry=executable_price, stop=getattr(sig, "sl", float("nan")),
-                direction=direction, leverage=cfg.LEVERAGE,
-                cost_fraction=cost_fraction, result="BLOCK",
-                specific_reason=reason_from_exception(exc),
-            )
-            return False
+        except Exception as exc:  # noqa: BLE001 - diagnostic must not affect dispatch
+            result_name = "UNAVAILABLE"
+            specific_reason = f"diagnostic_{type(exc).__name__}"
         emit_telemetry(
             log, symbol=symbol, setup_id=setup_id,
             stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
-            entry=executable_price, stop=sig.sl, direction=direction,
-            leverage=cfg.LEVERAGE, cost_fraction=cost_fraction, result="PASS",
-            specific_reason="within_50pct_entry_margin",
+            entry=executable_price, stop=getattr(sig, "sl", float("nan")),
+            direction=direction, leverage=cfg.LEVERAGE,
+            cost_fraction=cost_fraction, result=result_name,
+            specific_reason=specific_reason,
         )
 
         log.info(

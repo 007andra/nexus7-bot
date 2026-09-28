@@ -1,10 +1,14 @@
-"""Deterministic projected loss ceiling applied on top of final sizing.
+"""Projected-loss diagnostic retained for observability after final sizing.
 
 The final quantity is ``min(stop_risk_qty, operator_margin_cap_qty)`` (see
-``final_sizing_invariants``). This module adds a second, independent ceiling:
-projected stop loss <= 50% of the entry's initial margin. Reject incompatible
-stops; never resize or move a technical stop. This is an estimate, not a guaranteed
-maximum realized loss: gaps, funding and execution beyond estimates can exceed it.
+``final_sizing_invariants``). The historical 50%-of-entry-initial-margin
+ceiling remains available through ``validate()`` for deterministic regression
+coverage, but executable runtime callers use ``diagnose()`` only.
+
+RiskManagerV3 owns the monetary stop-risk budget and Binance CROSS stress owns
+account-level solvency/liquidation safety. This module therefore reports whether
+the legacy ceiling would pass, warn, or be unavailable; it must not resize,
+move technical stops, or authorize/block execution.
 """
 import math
 
@@ -53,6 +57,26 @@ def validate(qty, entry, stop, direction, leverage, cost_fraction):
     if projected > limit + max(1e-12, limit * 1e-12):
         raise ValueError('projected loss exceeds 50pct entry margin')
     return projected, limit
+
+
+def diagnose(qty, entry, stop, direction, leverage, cost_fraction):
+    """Return legacy-ceiling diagnostics without affecting execution.
+
+    Result is one of PASS, WARN, or UNAVAILABLE. Unlike validate(), this helper
+    never raises for ordinary input/geometry failures and is suitable for
+    observability-only runtime call sites.
+    """
+    try:
+        metrics = measure(qty, entry, stop, direction, leverage, cost_fraction)
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        return "UNAVAILABLE", reason_from_exception(exc), None
+
+    projected = metrics["projected_loss"]
+    limit = metrics["loss_limit"]
+    tolerance = max(1e-12, limit * 1e-12)
+    if projected > limit + tolerance:
+        return "WARN", "projected_loss_exceeds_50pct_entry_margin", metrics
+    return "PASS", "within_50pct_entry_margin", metrics
 
 
 def reason_from_exception(exc):
