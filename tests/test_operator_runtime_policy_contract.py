@@ -9,7 +9,7 @@ def test_operator_margin_fraction_remains_fifty_percent():
 
 def test_operator_policy_uses_configured_leverage_without_mutating_it():
     source = inspect.getsource(policy)
-    assert "target_margin = available * MARGIN_FRACTION" in source
+    assert "target_margin = available * margin_fraction" in source
     assert "target_notional = target_margin * leverage" in source
     assert "leverage = float(cfg.LEVERAGE)" in source
     assert "cfg.LEVERAGE =" not in source
