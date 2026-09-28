@@ -3,9 +3,16 @@ import asyncio
 import builtins
 import inspect
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+from tests.run_offline import install_network_guard
+
+install_network_guard()
 
 # tests.run_offline imports this module in its own -S child after its network
 # audit hook. Set the synthetic release environment BEFORE importing the bot.
@@ -29,6 +36,7 @@ from bot import pilot_risk_cap_hardening as context
 from bot.binance import BinanceClient
 from bot.config import cfg
 from bot.nexus_types import NexusDecision
+from bot.nexus_runtime_engine import TradingEngine as RuntimeTradingEngine
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
 from bot.strategy import Signal
@@ -40,7 +48,10 @@ def chain(fn):
     seen = set()
     while callable(fn) and id(fn) not in seen:
         seen.add(id(fn))
-        result.append((fn.__module__, fn.__name__))
+        # functools.wraps can copy __module__/__name__ from an inner function.
+        # Code origin is the effective owner, not copied display metadata.
+        source = os.path.splitext(os.path.basename(fn.__code__.co_filename))[0]
+        result.append(("bot." + source, fn.__code__.co_name))
         closure = inspect.getclosurevars(fn).nonlocals
         candidates = [v for k, v in closure.items()
                       if (k.startswith("original") or k.startswith("previous"))
@@ -58,7 +69,7 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.evaluations = []
         self.requests = []
         self.client = BinanceClient()
-        self.engine = core.TradingEngine(self.client)
+        self.engine = RuntimeTradingEngine(self.client)
         self.engine.paper_trade = False
         self.engine._durable_state_enforced = True
         self.engine._durable_state_ok = True
@@ -71,7 +82,7 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         }}
         self.client._instruments = self.engine.instruments
         self.engine.risk.init(1000)
-        self.engine.risk = ProfessionalRiskAdapter(self.engine.risk)
+        self.assertIsInstance(self.engine.risk, ProfessionalRiskAdapter)
         self.engine.risk.set_plan(symbol="ETHUSDT", entry=100, stop=99.5, risk_pct=0.01)
         self.engine.risk.update_capital(CapitalState(1000, 1000))
         self.signal = Signal("ETHUSDT", "LONG", 100, 99.5, 104, 80, "offline", 90)
@@ -94,7 +105,9 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.client.get_cached_klines = lambda *a: [{"c": 100, "h": 101, "l": 99, "v": 1000}] * 50
         self.client._request = AsyncMock(side_effect=self.request)
         self.client.set_position_stops = AsyncMock(return_value=True)
-        self.client.wait_for_fill = AsyncMock(return_value={"filled": False, "isActive": False})
+        self.client.wait_for_fill = AsyncMock(return_value={
+            "filled": False, "isActive": False, "status": "NEW", "timed_out": True,
+        })
         self.client.get_order_by_client_oid = AsyncMock(return_value={})
         self.client._execution_ownership = SimpleNamespace(expires_at="2099-01-01T00:00:00+00:00")
         self.replace("bot.engine._NEXUS_ENABLED", True)
@@ -129,6 +142,8 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
                 context._PILOT_FINAL_QTY.set(-qty)
             elif self.scenario == "signal_missing":
                 context._PILOT_SIGNAL.set(None)
+            elif self.scenario == "quantity_drift":
+                context._PILOT_FINAL_QTY.set(qty + 0.001)
             return qty
 
         self.replace("bot.engine.minimum_base_quantity", size)
@@ -233,17 +248,36 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         return await self.real_evaluate(engine, sig, qty)
 
     async def test_positive_control(self):
+        self.assertEqual(cfg.LEVERAGE, 50)
         await self.engine._open(self.signal)
         self.assertEqual(self.client.place_order.call_count, 1, self.events)
         self.assertEqual(len(self.requests), 1, self.events)
         self.assertEqual(self.evaluations, [("PRE_ORDER", self.sized_qty), ("FINAL_PREDISPATCH", self.sized_qty)])
         self.assertEqual(self.dispatch_qty, self.sized_qty)
+        self.assertEqual(float(self.requests[0][2]["quantity"]), self.sized_qty)
         critical = [e for e in self.events if e in {
             "FINAL_SIZING_ENTER", "FINAL_LOSS_BUDGET", "FINAL_SIZING_RETURN",
             "STRESS_PRE_ORDER", "STRESS_FINAL_PREDISPATCH", "PLACE_ORDER", "FENCE", "OWNERSHIP", "FAKE_HTTP"}]
         self.assertEqual(critical, ["FINAL_SIZING_ENTER", "FINAL_LOSS_BUDGET", "FINAL_SIZING_RETURN",
                                    "STRESS_PRE_ORDER", "FINAL_LOSS_BUDGET", "STRESS_FINAL_PREDISPATCH",
                                    "PLACE_ORDER", "FENCE", "OWNERSHIP", "FAKE_HTTP"])
+        between = self.events[self.events.index("STRESS_PRE_ORDER") + 1:self.events.index("STRESS_FINAL_PREDISPATCH")]
+        self.assertIn("ACCOUNT_REFRESH", between)
+        self.assertNotIn("FINAL_SIZING_ENTER", self.events[self.events.index("STRESS_PRE_ORDER"):])
+
+    async def test_pre_order_block(self):
+        self.stage, self.scenario = "PRE_ORDER", "block"
+        await self.engine._open(self.signal)
+        self.assertEqual(len(self.evaluations), 1)
+        self.assertEqual(self.client.place_order.call_count, 0)
+        self.assertEqual(self.requests, [])
+
+    async def test_pre_order_exception(self):
+        self.stage, self.scenario = "PRE_ORDER", "exception"
+        await self.engine._open(self.signal)
+        self.assertEqual(len(self.evaluations), 1)
+        self.assertEqual(self.client.place_order.call_count, 0)
+        self.assertEqual(self.requests, [])
 
     async def test_block_at_final_boundary(self):
         self.scenario = "block"
@@ -261,6 +295,39 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
 
 
 class BootstrapContract(unittest.TestCase):
+    def test_optional_truth_overlay_preserves_cross_owner(self):
+        code = """
+from tests.run_offline import install_network_guard
+install_network_guard()
+import sitecustomize
+import builtins, inspect
+from bot.engine import TradingEngine
+from bot.binance import BinanceClient
+assert builtins._nexus_sitecustomize_status == 'ok'
+assert TradingEngine._refresh_entry_balance.__module__ == 'bot.binance_cross_portfolio_stress'
+assert TradingEngine._open.__module__ == 'bot.runtime_truth_hooks'
+assert inspect.getclosurevars(TradingEngine._open).nonlocals['original_open'].__module__ == 'bot.post_trade_forensics'
+assert BinanceClient.place_order.__module__ == 'bot.runtime_truth_hooks'
+assert inspect.getclosurevars(BinanceClient.place_order).nonlocals['original_place_order'].__module__ == 'bot.live_execution_fence'
+"""
+        env = dict(os.environ, BGX_RUNTIME_TRUTH_ENABLED="true")
+        with tempfile.TemporaryDirectory(prefix="binance-truth-proof-") as cwd:
+            result = subprocess.run([sys.executable, "-S", "-c", code],
+                                    env=env, cwd=cwd, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_removing_cross_wrapper_breaks_runtime_contract(self):
+        from bot import runtime_contract_guard, nexus_ai
+        from bot.pilot import PilotGuard
+        from bot.logger import log
+        fn = core.TradingEngine._refresh_entry_balance
+        inner = inspect.getclosurevars(fn).nonlocals["original_refresh"]
+        with patch.object(builtins, "_nexus_runtime_contract_status", None), patch.object(
+            core.TradingEngine, "_refresh_entry_balance", inner
+        ):
+            with self.assertRaisesRegex(RuntimeError, "RUNTIME_CONTRACT_DRIFT"):
+                runtime_contract_guard.install(core.TradingEngine, PilotGuard, nexus_ai, core, log)
+
     def test_final_refresh_owner(self):
         self.assertTrue(core.TradingEngine._binance_cross_portfolio_stress_installed)
         self.assertEqual(core.TradingEngine._refresh_entry_balance.__module__, "bot.binance_cross_portfolio_stress")
@@ -280,7 +347,7 @@ SCENARIOS = (
     "position_divergence", "open_orders", "bracket_missing", "bracket_invalid",
     "bracket_50x", "maintenance_invalid", "margin_nonpositive", "risk_rate",
     "quantity_missing", "quantity_zero", "quantity_negative", "signal_missing",
-    "symbol_unknown", "cross_unconfirmed", "internal_error",
+    "symbol_unknown", "cross_unconfirmed", "internal_error", "quantity_drift",
 )
 
 
@@ -292,6 +359,11 @@ def _scenario_test(scenario):
         await self.engine._open(self.signal)
         if scenario not in {"symbol_unknown", "quantity_zero", "quantity_negative"}:
             self.assertGreaterEqual(len(self.evaluations), 1, self.events)
+        if scenario not in {"symbol_unknown", "quantity_zero", "quantity_negative",
+                            "quantity_missing", "signal_missing", "quantity_drift"}:
+            self.assertEqual(len(self.evaluations), 2, self.events)
+            if scenario not in {"block", "exception"}:
+                self.assertFalse(self.last_result.allowed, self.last_result)
         self.assertEqual(self.client.place_order.call_count, 0, (scenario, self.events))
         self.assertEqual(self.requests, [], scenario)
     return check

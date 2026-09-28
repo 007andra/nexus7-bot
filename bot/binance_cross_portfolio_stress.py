@@ -294,6 +294,10 @@ async def evaluate(engine, sig, qty: float) -> StressResult:
         wallet, existing = (
             await _paper_existing(engine) if paper else await _live_existing(engine)
         )
+        if not paper:
+            config = await engine.client.get_symbol_config(candidate["symbol"])
+            if not isinstance(config, dict) or str(config.get("marginType", "")).upper() not in {"CROSS", "CROSSED"}:
+                raise ValueError("candidate_cross_margin_unconfirmed")
     except Exception as exc:
         return StressResult(False, f"state_{str(exc) or type(exc).__name__}", mode=mode)
 
@@ -363,6 +367,27 @@ async def evaluate(engine, sig, qty: float) -> StressResult:
         opening_fee,
         len(existing),
         mode,
+    )
+
+
+def final_dispatch_context_valid(engine, sig, qty) -> bool:
+    """Bind the final refresh to the actual LIVE order, never a pre-sizing skip.
+
+    Called by core _open immediately before its final refresh. No sizing or
+    policy is performed here: missing/drifted context must not skip the gate.
+    """
+    from bot import pilot_risk_cap_hardening as risk_cap
+
+    final_qty = _positive(risk_cap._PILOT_FINAL_QTY.get())
+    actual_qty = _positive(qty)
+    return (
+        bool(getattr(getattr(engine, "pilot", None), "enabled", False))
+        and risk_cap._PILOT_ENGINE.get() is engine
+        and risk_cap._PILOT_SIGNAL.get() is sig
+        and risk_cap._PILOT_SYMBOL.get() == getattr(sig, "symbol", None)
+        and final_qty is not None
+        and actual_qty is not None
+        and final_qty == actual_qty
     )
 
 

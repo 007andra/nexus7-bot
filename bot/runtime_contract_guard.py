@@ -175,6 +175,19 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
             ),
         ])
     else:
+        items.append(
+            ContractItem(
+                "TradingEngine._refresh_entry_balance",
+                TradingEngine._refresh_entry_balance,
+                "binance_cross_portfolio_stress.py",
+            )
+        )
+        markers.append(
+            MarkerItem(
+                "TradingEngine.binance_cross_portfolio_stress",
+                getattr(TradingEngine, "_binance_cross_portfolio_stress_installed", False),
+            )
+        )
         # Binance PAPER parity deliberately has no claimed LIVE accounting/MMR
         # authority yet. The client-level migration gate remains fail-closed.
         markers.append(
