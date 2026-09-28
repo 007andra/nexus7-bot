@@ -58,7 +58,7 @@ def _finite(value, label: str) -> float:
     return out
 
 
-def _server_now_ms(client) -> int:
+def server_now_ms(client) -> int:
     now = getattr(client, "_now_ms", None)
     if callable(now):
         try:
@@ -102,7 +102,10 @@ def _unowned_symbols(engine, rows) -> set[str]:
 
 
 async def _read_positions(engine):
-    rows = await engine.client.get_positions()
+    reader = getattr(engine.client, "get_positions", None)
+    if not callable(reader):
+        raise RuntimeError("external position reader unavailable")
+    rows = await reader()
     if not isinstance(rows, list):
         raise RuntimeError("external position read unavailable")
     engine.client._performance_position_snapshot = (time.monotonic(), rows)
@@ -154,7 +157,7 @@ async def _capture_quarantine(engine, symbols: set[str], log) -> dict:
     except (TypeError, ValueError):
         pre_equity = None
         pre_peak = None
-        start_ms = _server_now_ms(engine.client)
+        start_ms = server_now_ms(engine.client)
         status = "UNRESOLVED"
         reason = "pre_external_snapshot_unavailable"
 
@@ -266,6 +269,16 @@ async def maybe_repair_known_atom_incident(engine, account_state: dict, rows, lo
 async def evaluate(engine, account_state: dict, *, log=None) -> str:
     """Return NORMAL, FREEZE, or QUARANTINE for the performance-HWM update."""
     log = log or default_log
+
+    # Binance USD-M only. Legacy/KuCoin clients and narrow unit-test doubles
+    # without the Binance user-data capability keep their existing semantics.
+    if not callable(getattr(engine.client, "_listen_key_request", None)):
+        setattr(engine, "_external_performance_quarantine", False)
+        return "NORMAL"
+    if not callable(getattr(engine.client, "get_positions", None)):
+        setattr(engine, "_external_performance_quarantine", False)
+        return "NORMAL"
+
     try:
         rows = await _read_positions(engine)
     except Exception as exc:
