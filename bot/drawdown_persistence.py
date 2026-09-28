@@ -12,7 +12,7 @@ import math
 from bot import database as db
 from bot import hwm_provenance
 from bot import hwm_namespace
-from bot.atomic_key_value import save_key_values_atomic
+from bot.atomic_key_value import save_key_values_atomic, save_key_values_atomic_cas
 from bot.logger import log
 
 LEGACY_DURABLE_EQUITY_PEAK_KEY = "risk:account_equity_peak:v1"
@@ -180,6 +180,102 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
         "updated_atomic" if (repaired or needs_write) else "unchanged",
     )
     return peak
+
+
+async def restore_real_account_peak_without_new_high(
+    risk, equity: float, *, strict: bool = True
+) -> float:
+    """Restore the durable HWM but refuse to create a new high.
+
+    Used while performance attribution is quarantined by an external/manual
+    exchange position. Account equity remains authoritative for collateral and
+    solvency, but cannot manufacture a trading-performance HWM until ownership
+    attribution is resolved.
+    """
+    equity = _positive_finite(equity, "account equity")
+    persisted, _ = await _load_peak(risk, strict=strict)
+    if persisted is None:
+        raise db.PersistenceError("cannot freeze missing durable equity peak")
+    _validate_peak_vs_equity(persisted, equity)
+    setattr(risk, _CACHE_ATTR, persisted)
+    _apply_peak(risk, persisted, equity, allow_lower=True)
+    log.warning(
+        "[DURABLE_DRAWDOWN] equity=%.4f peak_equity=%.4f drawdown=%.2f%% "
+        "source=restored_no_new_high persistence=unchanged provenance=unchanged "
+        "reason=external_performance_quarantine execution_effect=BLOCK_NEW_ENTRIES",
+        equity, persisted, max(0.0, (persisted - equity) / persisted) * 100.0,
+    )
+    return persisted
+
+
+async def rebase_real_account_peak_for_external_performance(
+    risk,
+    current_equity: float,
+    *,
+    pre_event_equity: float,
+    post_event_equity: float,
+    pre_event_peak: float,
+    evidence_ref: str,
+    strict: bool = True,
+) -> float:
+    """Neutralize a proven external/manual performance episode by TWR rebasing.
+
+    This is deliberately analogous to external cash-flow rebasing: when a
+    manual position's net realized result is proven not to belong to BGX,
+    preserve the pre-episode performance drawdown ratio rather than treating
+    that external result as bot profit/loss.
+    """
+    current_equity = _positive_finite(current_equity, "account equity")
+    pre_event_equity = _positive_finite(pre_event_equity, "pre-event equity")
+    post_event_equity = _positive_finite(post_event_equity, "post-event equity")
+    pre_event_peak = _positive_finite(pre_event_peak, "pre-event peak")
+    if not math.isclose(current_equity, post_event_equity, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError("post-event equity does not match current equity")
+
+    ratio = post_event_equity / pre_event_equity
+    if not math.isfinite(ratio) or ratio <= 0:
+        raise ValueError("external performance rebase ratio invalid")
+    rebased_peak = pre_event_peak * ratio
+    if not math.isfinite(rebased_peak) or rebased_peak <= 0:
+        raise ValueError("external performance rebased HWM invalid")
+
+    raw_peak = await db.load_key_value(DURABLE_EQUITY_PEAK_KEY, strict=strict)
+    if raw_peak is None:
+        raise db.PersistenceError("cannot rebase missing durable equity peak")
+    try:
+        old_peak = _positive_finite(raw_peak, "persisted equity peak")
+    except (TypeError, ValueError) as exc:
+        raise db.PersistenceError("durable equity peak is malformed") from exc
+
+    provenance = hwm_provenance.build_hwm_provenance(
+        reason="external_position_performance_rebase",
+        old_peak=old_peak,
+        new_peak=rebased_peak,
+        account_equity=current_equity,
+        evidence_ref=evidence_ref,
+    )
+    ok = await save_key_values_atomic_cas(
+        (
+            (DURABLE_EQUITY_PEAK_KEY, format(rebased_peak, ".17g")),
+            (hwm_namespace.provenance_key(), provenance),
+        ),
+        expected={DURABLE_EQUITY_PEAK_KEY: raw_peak},
+        strict=strict,
+    )
+    if strict and not ok:
+        raise db.PersistenceError("external performance HWM rebase write not confirmed")
+
+    setattr(risk, _CACHE_ATTR, rebased_peak)
+    _apply_peak(risk, rebased_peak, current_equity, allow_lower=True)
+    log.critical(
+        "[EXTERNAL_PERFORMANCE_REBASE] result=RECONCILED old_peak=%.4f "
+        "pre_event_equity=%.4f post_event_equity=%.4f new_peak=%.4f "
+        "drawdown=%.2f%% methodology=TWR_EXTERNAL_POSITION_PERFORMANCE "
+        "provenance=durable_atomic_cas execution_effect=NONE",
+        old_peak, pre_event_equity, post_event_equity, rebased_peak,
+        max(0.0, (rebased_peak - current_equity) / rebased_peak) * 100.0,
+    )
+    return rebased_peak
 
 
 async def rebase_real_account_peak_for_external_flow(
