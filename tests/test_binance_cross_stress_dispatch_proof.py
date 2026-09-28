@@ -116,6 +116,10 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
                      "bot.pilot_live_runtime.capital_flows.reconcile_external_capital_flows",
                      "bot.pilot_live_runtime.restore_update_real_account_peak"):
             self.replace(name, AsyncMock())
+        self.replace(
+            "bot.pilot_live_runtime.external_performance.evaluate",
+            AsyncMock(return_value="NORMAL"),
+        )
         self.replace("bot.engine.scoring.calculate", AsyncMock(return_value={"aprovado": True, "total": 90}))
         self.replace("bot.execution_cost.snapshot_for", AsyncMock(side_effect=ValueError("offline fallback")))
         self.replace("bot.pilot_risk_cap_hardening.live_microstructure_recheck", AsyncMock(

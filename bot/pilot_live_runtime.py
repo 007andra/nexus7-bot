@@ -29,7 +29,11 @@ from decimal import Decimal, ROUND_FLOOR
 
 from bot import account_balance_semantics as account_semantics
 from bot import capital_flow_reconciliation as capital_flows
-from bot.drawdown_persistence import restore_update_real_account_peak
+from bot import external_position_performance as external_performance
+from bot.drawdown_persistence import (
+    restore_real_account_peak_without_new_high,
+    restore_update_real_account_peak,
+)
 from bot.quantity import quantity_rules
 
 
@@ -115,8 +119,18 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
         )
         engine._pilot_last_capital_flow_check = now
 
+    performance_mode = await external_performance.evaluate(engine, state, log=log)
+    if performance_mode in {"FREEZE", "QUARANTINE"}:
+        await restore_real_account_peak_without_new_high(
+            engine.risk, equity, strict=True
+        )
+    else:
+        await restore_update_real_account_peak(engine.risk, equity, strict=True)
+
     engine._pilot_prev_account_equity = equity
-    await restore_update_real_account_peak(engine.risk, equity, strict=True)
+    engine._pilot_prev_account_observed_ms = external_performance.server_now_ms(
+        engine.client
+    )
 
     engine._pilot_account_equity = equity
     engine._pilot_available_balance = available
@@ -150,10 +164,20 @@ def _entry_drawdown_allows(engine, log) -> bool:
     and RiskManagerV3 ``can_open`` in the sizing plan) ran on older reads, so a
     candidate approved before equity deteriorated must be re-checked here.
     Threshold and the explicit ``LIVE_RISK_OVERRIDE_APPROVED`` semantics are the
-    same as every other drawdown gate. Unreadable drawdown fails closed.
+    same as every other drawdown gate. An unresolved external-performance
+    attribution quarantine is not a threshold override case and remains
+    fail-closed. Unreadable drawdown also fails closed.
     """
     from bot.config import cfg
     from bot.operator_runtime_policy import _risk_override_enabled
+
+    if bool(getattr(engine, "_external_performance_quarantine", False)):
+        log.critical(
+            "[PILOT_PREDISPATCH_DRAWDOWN] result=BLOCK "
+            "reason=external_performance_quarantine "
+            "override_not_applicable=true execution_effect=BLOCK_NEW_ENTRY"
+        )
+        return False
 
     risk = getattr(engine, "risk", None)
     legacy = getattr(risk, "_legacy", risk)
@@ -433,5 +457,6 @@ def install(TradingEngine, log) -> None:
         "[PILOT_LIVE_RUNTIME] installed: cash-flow-aware durable equity drawdown + "
         "fresh available-collateral publication for final sizing "
         "(sizing_authority=final_sizing_invariants) + pre-dispatch drawdown hard gate + "
-        "read-only exposure/private-WS preflight; external positions immutable"
+        "read-only exposure/private-WS preflight + external-performance HWM quarantine; "
+        "external positions immutable"
     )
