@@ -1,8 +1,11 @@
 """Regression tests for external/manual-position performance-HWM quarantine."""
+import asyncio
 import json
 import logging
+import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 
@@ -259,6 +262,176 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             epp._unowned_symbols(engine, reversed_side), {"ATOMUSDT"}
         )
+
+    def incident_engine(self):
+        client = FakeBinance(wallet=epp._INCIDENT_POST_EQUITY)
+        client.rows = incident_rows()
+        client.trades, client.orders = incident_trade_evidence()
+        return self.engine(client)
+
+    async def repair(self, engine):
+        return await epp.maybe_repair_known_atom_incident(
+            engine, await engine.client.get_account_state(), [], log=LOG
+        )
+
+    async def test_incident_cannot_repair_twice_after_restart_and_hwm_revisit(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        self.assertTrue(await self.repair(self.incident_engine()))
+        # Simulate ordinary later highs replacing the latest provenance and a
+        # return to the historical numeric predicate. The incident marker must
+        # survive independently, including a closed/reopened database.
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        await db.save_key_value(hwm_namespace.provenance_key(), "later-high", strict=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = directory + "/restart.sqlite"
+            target = await aiosqlite.connect(path)
+            await db._conn.backup(target)
+            await target.close()
+            await db._conn.close()
+            db._conn = await aiosqlite.connect(path)
+            fresh_engine = self.incident_engine()
+            with patch.object(epp, "collect_income", new=AsyncMock(wraps=epp.collect_income)) as income:
+                self.assertFalse(await self.repair(fresh_engine))
+                income.assert_not_awaited()
+            self.assertEqual(await self.peak(), epp._INCIDENT_BAD_HWM)
+            self.assertFalse(hasattr(fresh_engine.risk, ddp._CACHE_ATTR))
+            self.assertEqual(
+                await db.load_key_value(hwm_namespace.provenance_key(), strict=True),
+                "later-high",
+            )
+            await db._conn.close()
+            db._conn = await aiosqlite.connect(":memory:")
+
+    async def test_incident_marker_commits_with_hwm_and_provenance(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        self.assertTrue(await self.repair(self.incident_engine()))
+        self.assertEqual(
+            await db.load_key_value(epp.incident_repair_key(), strict=True),
+            epp._incident_consumed_marker(),
+        )
+        provenance = json.loads(await db.load_key_value(hwm_namespace.provenance_key(), strict=True))
+        self.assertEqual(provenance["new_peak"], await self.peak())
+        self.assertEqual(provenance["old_peak"], epp._INCIDENT_BAD_HWM)
+
+    async def test_incident_marker_failure_rolls_back_all_three_keys(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        await db.save_key_value(hwm_namespace.provenance_key(), "before", strict=True)
+        # The marker is the last write; failing here proves HWM and provenance
+        # are rolled back, rather than merely testing a pre-write exception.
+        await db._conn.execute(
+            "CREATE TRIGGER reject_incident_marker BEFORE INSERT ON key_value "
+            "WHEN NEW.key LIKE 'risk:external_performance_repair:%' "
+            "BEGIN SELECT RAISE(ABORT, 'injected marker failure'); END"
+        )
+        await db._conn.commit()
+        engine = self.incident_engine()
+        old_memory_peak = engine.risk._legacy.peak_balance
+        with self.assertRaises(db.PersistenceError):
+            await self.repair(engine)
+        self.assertEqual(await self.peak(), epp._INCIDENT_BAD_HWM)
+        self.assertEqual(await db.load_key_value(hwm_namespace.provenance_key(), strict=True), "before")
+        self.assertIsNone(await db.load_key_value(epp.incident_repair_key(), strict=True))
+        self.assertEqual(engine.risk._legacy.peak_balance, old_memory_peak)
+        self.assertFalse(hasattr(engine.risk, ddp._CACHE_ATTR))
+        await db._conn.execute("DROP TRIGGER reject_incident_marker")
+        await db._conn.commit()
+        self.assertTrue(await self.repair(engine))
+
+    async def test_ambiguous_incident_marker_blocks_without_writes(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        for raw in ("", "null", "{}", "garbage", '{"status":"PENDING"}',
+                    epp._incident_consumed_marker().replace('"version":1', '"version":2')):
+            with self.subTest(raw=raw):
+                await db.save_key_value(epp.incident_repair_key(), raw, strict=True)
+                with self.assertRaisesRegex(db.PersistenceError, "marker ambiguous"):
+                    await plr._refresh_account(self.incident_engine(), LOG)
+                self.assertEqual(await self.peak(), epp._INCIDENT_BAD_HWM)
+                self.assertEqual(await db.load_key_value(epp.incident_repair_key(), strict=True), raw)
+                self.assertIsNone(await db.load_key_value(hwm_namespace.provenance_key(), strict=True))
+
+    async def test_incident_marker_read_failure_is_not_absence(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        original = db.load_key_value
+
+        async def read(key, **kwargs):
+            if key == epp.incident_repair_key():
+                self.assertIs(kwargs.get("strict"), True)
+                raise db.PersistenceError("injected marker read failure")
+            return await original(key, **kwargs)
+
+        with patch.object(db, "load_key_value", side_effect=read):
+            with self.assertRaisesRegex(db.PersistenceError, "marker read failure"):
+                await self.repair(self.incident_engine())
+        self.assertEqual(await self.peak(), epp._INCIDENT_BAD_HWM)
+
+    async def test_lost_commit_ack_does_not_permit_retry_rebase(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        original = ddp.save_key_values_atomic_cas
+        engine = self.incident_engine()
+
+        async def lost_ack(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise db.PersistenceError("commit acknowledgement lost")
+
+        with patch.object(ddp, "save_key_values_atomic_cas", side_effect=lost_ack):
+            with self.assertRaisesRegex(db.PersistenceError, "acknowledgement lost"):
+                await self.repair(engine)
+        self.assertFalse(hasattr(engine.risk, ddp._CACHE_ATTR))
+        committed_peak = await self.peak()
+        self.assertNotEqual(committed_peak, epp._INCIDENT_BAD_HWM)
+        self.assertFalse(await self.repair(self.incident_engine()))
+        self.assertEqual(await self.peak(), committed_peak)
+
+    async def test_concurrent_incident_repairs_have_one_winner(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        original = ddp.save_key_values_atomic_cas
+        ready = asyncio.Event()
+        arrivals = 0
+
+        async def commit(*args, **kwargs):
+            nonlocal arrivals
+            arrivals += 1
+            if arrivals == 2:
+                ready.set()
+            await asyncio.wait_for(ready.wait(), timeout=5)
+            return await original(*args, **kwargs)
+
+        with patch.object(ddp, "save_key_values_atomic_cas", side_effect=commit):
+            results = await asyncio.gather(
+                self.repair(self.incident_engine()), self.repair(self.incident_engine()),
+                return_exceptions=True,
+            )
+        self.assertEqual(sum(result is True for result in results), 1)
+        self.assertEqual(sum(isinstance(result, db.PersistenceError) for result in results), 1)
+        self.assertEqual(await db.load_key_value(epp.incident_repair_key(), strict=True), epp._incident_consumed_marker())
+
+    async def test_marker_created_after_read_refuses_even_identical_hwm(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        original = ddp.save_key_values_atomic_cas
+
+        async def raced_commit(*args, **kwargs):
+            await db.save_key_value(epp.incident_repair_key(), epp._incident_consumed_marker(), strict=True)
+            return await original(*args, **kwargs)
+
+        with patch.object(ddp, "save_key_values_atomic_cas", side_effect=raced_commit):
+            with self.assertRaises(db.PersistenceError):
+                await self.repair(self.incident_engine())
+        self.assertEqual(await self.peak(), epp._INCIDENT_BAD_HWM)
+        self.assertIsNone(await db.load_key_value(hwm_namespace.provenance_key(), strict=True))
+
+    async def test_hwm_change_during_evidence_collection_refuses_repair(self):
+        await self.set_peak(epp._INCIDENT_BAD_HWM)
+        original = epp.collect_income
+
+        async def changed_peak(*args, **kwargs):
+            await self.set_peak(8.0)
+            return await original(*args, **kwargs)
+
+        with patch.object(epp, "collect_income", side_effect=changed_peak):
+            with self.assertRaises(db.PersistenceError):
+                await self.repair(self.incident_engine())
+        self.assertEqual(await self.peak(), 8.0)
+        self.assertIsNone(await db.load_key_value(epp.incident_repair_key(), strict=True))
 
     async def test_active_external_position_cannot_create_new_performance_high(self):
         await self.set_peak(6.4680)

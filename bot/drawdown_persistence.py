@@ -216,6 +216,9 @@ async def rebase_real_account_peak_for_external_performance(
     post_event_equity: float,
     pre_event_peak: float,
     evidence_ref: str,
+    repair_marker_key: str,
+    repair_marker_value: str,
+    expected_peak_raw: str,
     strict: bool = True,
 ) -> float:
     """Neutralize a proven external/manual performance episode by TWR rebasing.
@@ -239,7 +242,9 @@ async def rebase_real_account_peak_for_external_performance(
     if not math.isfinite(rebased_peak) or rebased_peak <= 0:
         raise ValueError("external performance rebased HWM invalid")
 
-    raw_peak = await db.load_key_value(DURABLE_EQUITY_PEAK_KEY, strict=strict)
+    # Bind the commit to the HWM used to select the incident, before exchange
+    # evidence was collected. Never adopt a newer HWM observed during that I/O.
+    raw_peak = expected_peak_raw
     if raw_peak is None:
         raise db.PersistenceError("cannot rebase missing durable equity peak")
     try:
@@ -258,11 +263,15 @@ async def rebase_real_account_peak_for_external_performance(
         (
             (DURABLE_EQUITY_PEAK_KEY, format(rebased_peak, ".17g")),
             (hwm_namespace.provenance_key(), provenance),
+            (repair_marker_key, repair_marker_value),
         ),
-        expected={DURABLE_EQUITY_PEAK_KEY: raw_peak},
+        # Lock the existing HWM row first (also on PostgreSQL), then check the
+        # absent marker. Concurrent repairs cannot both consume the incident,
+        # even if the HWM later returns to its original value (the ABA case).
+        expected={DURABLE_EQUITY_PEAK_KEY: raw_peak, repair_marker_key: None},
         strict=strict,
     )
-    if strict and not ok:
+    if not ok:
         raise db.PersistenceError("external performance HWM rebase write not confirmed")
 
     setattr(risk, _CACHE_ATTR, rebased_peak)

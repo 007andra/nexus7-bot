@@ -57,6 +57,32 @@ _INCIDENT_EXPECTED_INCOME = {
 _INCIDENT_TOLERANCE = 0.002
 
 
+def incident_repair_key() -> str:
+    return f"risk:external_performance_repair:ATOMUSDT_20260927:v1:{hwm_namespace.hwm_namespace()}"
+
+
+def _incident_consumed_marker() -> str:
+    return json.dumps({
+        "version": 1,
+        "incident": "ATOMUSDT_20260927",
+        "namespace": hwm_namespace.hwm_namespace(),
+        "start_ms": _INCIDENT_START_MS,
+        "end_ms": _INCIDENT_END_MS,
+        "status": "CONSUMED",
+    }, sort_keys=True, separators=(",", ":"))
+
+
+async def _incident_already_consumed() -> bool:
+    # Only absence permits a first repair. Unknown versions, partial writes,
+    # corrupt values and storage errors must never be interpreted as absence.
+    raw = await db.load_key_value(incident_repair_key(), strict=True)
+    if raw is None:
+        return False
+    if raw != _incident_consumed_marker():
+        raise db.PersistenceError("external incident repair marker ambiguous")
+    return True
+
+
 def state_key() -> str:
     return f"{_STATE_KEY_PREFIX}:{hwm_namespace.hwm_namespace()}"
 
@@ -345,6 +371,8 @@ async def _prove_incident_manual_ownership(engine) -> tuple[int, float, float]:
 async def maybe_repair_known_atom_incident(engine, account_state: dict, rows, log=None) -> bool:
     """Repair only the exact, fully pinned 2026-09-27 ATOM manual-position episode."""
     log = log or default_log
+    if await _incident_already_consumed():
+        return False
     if _active_exchange_symbols(rows):
         return False
     if await _load_state(strict=True) is not None:
@@ -400,6 +428,9 @@ async def maybe_repair_known_atom_incident(engine, account_state: dict, rows, lo
             "2026-09-27:ATOMUSDT:external_position+income_rows:"
             f"rows={len(selected)}:net={net_external:.8f}"
         )[:160],
+        repair_marker_key=incident_repair_key(),
+        repair_marker_value=_incident_consumed_marker(),
+        expected_peak_raw=raw_peak,
         strict=True,
     )
     log.critical(
