@@ -311,13 +311,15 @@ class FinalSizingTelemetryTests(unittest.TestCase):
     # Contract change (2026-09-26 audit P0-1): the final quantity is
     # min(stop_risk_qty, operator_margin_cap_qty). With cap=5 and RiskManagerV3
     # qty=0.25, the executed and logged quantity is 0.25, not the cap.
-    def test_final_sizing_block_logs_final_min_qty_and_risk_authority(self):
+    def test_final_sizing_warn_logs_final_min_qty_and_risk_authority(self):
         qty, stored, log = self._exercise(99.12)
-        self.assertEqual(qty, 0.0)
-        self.assertEqual(stored, 0.0)
+        self.assertEqual(qty, 0.25)
+        self.assertEqual(stored, 0.25)
         msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
         self.assertIn("stage=FINAL_SIZING_INVARIANT", msg)
-        self.assertIn("result=BLOCK", msg)
+        self.assertIn("result=WARN", msg)
+        self.assertIn("projected_loss_exceeds_50pct_entry_margin", msg)
+        self.assertIn("execution_effect=OBSERVABILITY_ONLY", msg)
         self.assertIn("qty=0.25", msg)
         self.assertIn("qty_authority=FINAL_SIZING_INVARIANT", msg)
         self.assertIn("stop_risk_qty=0.25", msg)
