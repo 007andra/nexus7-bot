@@ -54,6 +54,21 @@ Therefore:
 
 which matches the observed pre-position equity.
 
+The incident signature is also checked independently against Binance
+`userTrades` and `allOrders` plus the durable BGX order registry. Every fill
+must classify as `MANUAL_EXTERNAL`; any BGX/unknown ownership blocks the
+repair. The exchange evidence must reconcile:
+
+- income `COMMISSION`: 6 rows, `-0.21386754 USDT`;
+- income `REALIZED_PNL`: 1 row, `+0.45130999 USDT`;
+- income `FUNDING_FEE`: 1 row, `-0.02571883 USDT`;
+- `userTrades` commissions: `+0.21386754 USDT` fee amount;
+- `userTrades` realized PnL: `+0.45130999 USDT`.
+
+The commission sign difference is intentional: the income ledger expresses the
+fee as a balance debit, while the user-trade record exposes the commission
+amount.
+
 The repair preserves the pre-episode performance ratio rather than merely
 resetting the HWM:
 
@@ -92,7 +107,8 @@ Performance HWM behavior changes separately:
 7. The historical ATOM incident is repaired automatically only if all pinned
    predicates match: account flat, exact contaminated HWM/current equity,
    stable double-read Binance income evidence, only ATOM performance rows in the
-   incident window, and exact net external result.
+   incident window, exact per-type counts/totals, manual ownership proven from
+   userTrades/allOrders + durable registry, and exact net external result.
 
 Any mismatch fails closed and leaves the existing HWM unchanged.
 
