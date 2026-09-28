@@ -1,10 +1,10 @@
-"""Deterministic projected loss ceiling applied on top of final sizing.
+"""Legacy projected-loss diagnostic retained after final risk sizing.
 
-The final quantity is ``min(stop_risk_qty, operator_margin_cap_qty)`` (see
-``final_sizing_invariants``). This module adds a second, independent ceiling:
-projected stop loss <= 50% of the entry's initial margin. Reject incompatible
-stops; never resize or move a technical stop. This is an estimate, not a guaranteed
-maximum realized loss: gaps, funding and execution beyond estimates can exceed it.
+The historical threshold is projected stop loss <= 50% of entry initial margin.
+Runtime callers use measure() for observability only when the inputs are valid;
+monetary risk is owned by RiskManagerV3 and Binance CROSS solvency is checked
+separately. validate() remains strict for unit tests/backward-compatible callers
+but is not an entry-authorization authority.
 """
 import math
 
