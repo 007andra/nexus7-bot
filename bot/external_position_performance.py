@@ -307,7 +307,12 @@ async def maybe_repair_known_atom_incident(engine, account_state: dict, rows, lo
     if evidence1 != evidence2:
         raise db.PersistenceError("external incident income evidence unstable")
 
-    selected, net_external = _incident_rows(evidence1)
+    try:
+        selected, net_external = _incident_rows(evidence1)
+    except ValueError as exc:
+        raise db.PersistenceError(
+            "external incident income signature mismatch"
+        ) from exc
     if abs(net_external - _INCIDENT_NET_EXTERNAL) > 1e-6:
         raise db.PersistenceError("external incident income total mismatch")
 
