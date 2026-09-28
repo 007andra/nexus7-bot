@@ -151,10 +151,10 @@ def install(engine_module, pilot_cap, log) -> None:
         signal = pilot_cap._PILOT_SIGNAL.get()
         cost_fraction = float("nan")
         setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
-        try:
-            from bot.final_loss_budget import diagnose, emit_telemetry
-            from bot.execution_cost import stress_cost_fraction
+        from bot.final_loss_budget import diagnose, emit_telemetry
+        from bot.execution_cost import stress_cost_fraction
 
+        try:
             # Conservative diagnostic input: max(candidate snapshot, static fallback).
             cost_fraction, _cost_ref = stress_cost_fraction(signal, symbol)
             result, specific_reason, _metrics = diagnose(
@@ -165,26 +165,18 @@ def install(engine_module, pilot_cap, log) -> None:
                 leverage,
                 cost_fraction,
             )
-            emit_telemetry(
-                log, symbol=symbol, setup_id=setup_id,
-                stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
-                stop=getattr(signal, "sl", float("nan")),
-                direction=getattr(signal, "direction", "UNKNOWN"),
-                leverage=leverage, cost_fraction=cost_fraction, result=result,
-                specific_reason=specific_reason,
-                risk_v3_advisory_qty=risk_qty,
-            )
         except Exception as exc:  # noqa: BLE001 - diagnostic must not affect sizing
-            try:
-                log.warning(
-                    "[FINAL_LOSS_BUDGET] symbol=%s setup_id=%s "
-                    "stage=FINAL_SIZING_INVARIANT result=UNAVAILABLE "
-                    "specific_reason=diagnostic_%s decision_effect=NONE "
-                    "execution_effect=OBSERVABILITY_ONLY",
-                    symbol, setup_id, type(exc).__name__,
-                )
-            except Exception:
-                pass
+            result = "UNAVAILABLE"
+            specific_reason = f"diagnostic_{type(exc).__name__}"
+        emit_telemetry(
+            log, symbol=symbol, setup_id=setup_id,
+            stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
+            stop=getattr(signal, "sl", float("nan")),
+            direction=getattr(signal, "direction", "UNKNOWN"),
+            leverage=leverage, cost_fraction=cost_fraction, result=result,
+            specific_reason=specific_reason,
+            risk_v3_advisory_qty=risk_qty,
+        )
 
         pilot_cap._PILOT_FINAL_QTY.set(final_qty)
         log.warning(
