@@ -164,7 +164,9 @@ def _entry_drawdown_allows(engine, log) -> bool:
     and RiskManagerV3 ``can_open`` in the sizing plan) ran on older reads, so a
     candidate approved before equity deteriorated must be re-checked here.
     Threshold and the explicit ``LIVE_RISK_OVERRIDE_APPROVED`` semantics are the
-    same as every other drawdown gate. Unreadable drawdown fails closed.
+    same as every other drawdown gate. An unresolved external-performance
+    attribution quarantine is not a threshold override case and remains
+    fail-closed. Unreadable drawdown also fails closed.
     """
     from bot.config import cfg
     from bot.operator_runtime_policy import _risk_override_enabled
