@@ -16,6 +16,7 @@ _ALLOWED_REASONS = {
     "new_equity_high",
     "incident_repair",
     "external_capital_flow_rebase",
+    "external_position_performance_rebase",
 }
 
 
