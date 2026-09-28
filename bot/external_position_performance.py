@@ -165,7 +165,6 @@ async def _read_positions(engine):
     rows = await reader()
     if not isinstance(rows, list):
         raise RuntimeError("external position read unavailable")
-    engine.client._performance_position_snapshot = (time.monotonic(), rows)
     return rows
 
 
