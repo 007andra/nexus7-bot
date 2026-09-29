@@ -806,6 +806,7 @@ class BinanceClient:
                 "multiplier": 1.0,
                 "minBaseQty": min_qty,
                 "minNotional": min_notional,
+                "marketTakeBound": float(item.get("marketTakeBound", 0) or 0),
                 "maxLeverage": 0.0,
                 "binanceSymbol": symbol,
                 "quantityUnit": "BASE_ASSET",
