@@ -71,6 +71,7 @@ def install() -> None:
     from bot import startup_position_unit_hardening as _startup_position_unit_hardening
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
     from bot import binance_protection_failclosed as _binance_protection_failclosed
+    from bot import binance_leverage_reconcile as _binance_leverage_reconcile
     from bot import pilot_external_position_guard as _pilot_external_position_guard
     from bot import kucoin_price_tick_hardening as _kucoin_price_tick_hardening
     from bot import kucoin_cross_margin_order as _kucoin_cross_margin_order
@@ -126,6 +127,7 @@ def install() -> None:
         _pilot_external_position_guard.install(
             TradingEngine, _log, exchange_name="binance"
         )
+        _binance_leverage_reconcile.install(TradingEngine, _log)
         _log.info(
             "[BINANCE_MIGRATION] kucoin_price_tick=NOT_NEEDED_NATIVE_DECIMAL "
             "kucoin_fill_normalization=NOT_NEEDED_BASE_ASSET_NATIVE "
