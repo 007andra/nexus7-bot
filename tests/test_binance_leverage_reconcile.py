@@ -183,7 +183,7 @@ class LeverageReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertEqual(self.client.set_calls, [("LINKUSDT", 50)])
 
-    async def test_postcheck_exposure_keeps_readiness_false(self):
+    async def test_exposure_appearing_before_mutation_blocks_without_write(self):
         self.client.configs["LINKUSDT"]["leverage"] = 5
         original_get_positions = self.client.get_positions
         calls = 0
@@ -191,7 +191,26 @@ class LeverageReconcileTests(unittest.IsolatedAsyncioTestCase):
         async def positions():
             nonlocal calls
             calls += 1
-            if calls == 1:
+            if calls == 1:  # global precheck
+                return []
+            return [{"symbol": "BTCUSDT", "size": 0.1}]
+
+        self.client.get_positions = positions
+        ok = await reconcile.reconcile(self.engine, self.log)
+        self.assertFalse(ok)
+        self.assertEqual(self.client.set_calls, [])
+        self.assertFalse(self.engine._binance_leverage_sync_ready)
+        self.client.get_positions = original_get_positions
+
+    async def test_postcheck_exposure_keeps_readiness_false_after_confirmed_write(self):
+        self.client.configs["LINKUSDT"]["leverage"] = 5
+        original_get_positions = self.client.get_positions
+        calls = 0
+
+        async def positions():
+            nonlocal calls
+            calls += 1
+            if calls < 3:  # global precheck + immediate pre-mutation recheck
                 return []
             return [{"symbol": "BTCUSDT", "size": 0.1}]
 
@@ -201,6 +220,44 @@ class LeverageReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.set_calls, [("LINKUSDT", 50)])
         self.assertFalse(self.engine._binance_leverage_sync_ready)
         self.client.get_positions = original_get_positions
+
+    async def test_full_symbol_preflight_is_atomic_before_first_mutation(self):
+        self.engine.viable_symbols = ["LINKUSDT", "ETHUSDT"]
+        self.client.configs["LINKUSDT"]["leverage"] = 5
+        self.client.configs["ETHUSDT"] = {
+            "symbol": "ETHUSDT",
+            "marginType": "CROSS",
+            "leverage": 5,
+        }
+
+        async def brackets(symbol):
+            maximum = 75 if symbol == "LINKUSDT" else 20
+            return {
+                "symbol": symbol,
+                "brackets": [{
+                    "bracket": 1,
+                    "initialLeverage": maximum,
+                    "notionalFloor": 0,
+                    "notionalCap": 50000,
+                    "maintMarginRatio": 0.004,
+                    "cum": 0,
+                }],
+            }
+
+        self.client.get_leverage_brackets = brackets
+        ok = await reconcile.reconcile(self.engine, self.log)
+        self.assertFalse(ok)
+        self.assertEqual(self.client.set_calls, [])
+        self.assertEqual(self.client.configs["LINKUSDT"]["leverage"], 5)
+        self.assertEqual(self.client.configs["ETHUSDT"]["leverage"], 5)
+
+    async def test_matching_symbol_still_requires_target_supported_by_brackets(self):
+        self.client.configs["LINKUSDT"]["leverage"] = 50
+        self.client.max_leverage = 20
+        ok = await reconcile.reconcile(self.engine, self.log)
+        self.assertFalse(ok)
+        self.assertEqual(self.client.set_calls, [])
+        self.assertFalse(self.engine._binance_leverage_sync_ready)
 
     async def test_non_binance_adapter_is_not_applicable(self):
         class OtherClient:
