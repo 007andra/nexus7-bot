@@ -298,6 +298,8 @@ async def evaluate(engine, sig, qty: float) -> StressResult:
             config = await engine.client.get_symbol_config(candidate["symbol"])
             if not isinstance(config, dict) or str(config.get("marginType", "")).upper() not in {"CROSS", "CROSSED"}:
                 raise ValueError("candidate_cross_margin_unconfirmed")
+            if str(config.get("leverage", "")) != str(int(cfg.LEVERAGE)):
+                raise ValueError("candidate_configured_leverage_unconfirmed")
     except Exception as exc:
         return StressResult(False, f"state_{str(exc) or type(exc).__name__}", mode=mode)
 
