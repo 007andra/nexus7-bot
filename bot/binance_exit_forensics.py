@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -184,8 +183,20 @@ def reconcile_exit_evidence(
     for row in ordered_trades:
         if int(row.get("time", 0) or 0) < first_fill_ms:
             continue
-        if str(row.get("side") or "").upper() != close_side:
-            continue
+        row_side = str(row.get("side") or "").upper()
+        row_order_id = str(row.get("orderId") or "")
+        if row_side == open_side:
+            if row_order_id == opening_order_id:
+                continue
+            return {
+                "status": "MIXED_OWNERSHIP_OR_REENTRY",
+                "symbol": symbol,
+                "opening_order_id": opening_order_id,
+                "pnl_fill_authority": False,
+                "cause_authority": False,
+            }
+        if row_side != close_side:
+            raise ValueError("trade side invalid")
         qty = _decimal(row.get("qty"), "closing qty")
         if qty <= 0:
             raise ValueError("closing quantity invalid")
@@ -483,6 +494,27 @@ async def capture_exit(
     return receipt
 
 
+async def _capture_exit_safely(engine, *, symbol, opening_order_id, start_ms, end_ms, log):
+    try:
+        return await capture_exit(
+            engine,
+            symbol=symbol,
+            opening_order_id=opening_order_id,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            log=log,
+        )
+    except Exception as exc:
+        log.warning(
+            "[BINANCE_EXIT_FORENSICS] symbol=%s result=UNCONFIRMED "
+            "opening_order_id=%s error_type=%s decision_effect=NONE execution_effect=NONE",
+            symbol,
+            opening_order_id,
+            type(exc).__name__,
+        )
+        return None
+
+
 def _schedule(engine, coro) -> None:
     task = asyncio.create_task(coro)
     background = getattr(engine, "_background_tasks", None)
@@ -559,7 +591,7 @@ def install(TradingEngine, log) -> None:
             start_ms, end_ms = _window(lineage, position)
             _schedule(
                 self,
-                capture_exit(
+                _capture_exit_safely(
                     self,
                     symbol=str(symbol),
                     opening_order_id=opening_order_id,
@@ -588,7 +620,7 @@ def install(TradingEngine, log) -> None:
                 start_ms, end_ms = _window(lineage)
                 _schedule(
                     self,
-                    capture_exit(
+                    _capture_exit_safely(
                         self,
                         symbol=symbol,
                         opening_order_id=opening_order_id,
