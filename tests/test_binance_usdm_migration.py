@@ -38,6 +38,47 @@ class FakeBinance(bn.BinanceClient):
 
 
 class BinanceMigrationTests(unittest.TestCase):
+    def test_margin_rejection_is_durable_and_identity_scoped(self):
+        import json
+        from bot import durable_execution as durable
+        from bot.order_state import OrderRegistry, OrderState
+
+        async def scenario():
+            engine = SimpleNamespace(orders=OrderRegistry(), _durable_order_lock=asyncio.Lock(),
+                                     _durable_state_ok=True, _durable_state_errors=set())
+            order, _ = engine.orders.get_or_create("bgx7-test", "LINKUSDT", "Buy", 19.34)
+            order.transition(OrderState.SUBMITTING)
+            params = {"newClientOrderId": order.client_oid, "symbol": "LINKUSDT",
+                      "side": "BUY", "quantity": "19.34"}
+            for exc in (
+                RuntimeError("Binance POST /fapi/v1/order HTTP 400 code=-2019"),
+                bn.BinanceAPIError("POST", "/fapi/v1/order", 503, -2019, "unknown", params),
+                bn.BinanceAPIError("POST", "/fapi/v1/order", 400, -1007, "timeout", params),
+                bn.BinanceAPIError("POST", "/fapi/v1/order", 400, -4116, "duplicate", params),
+                bn.BinanceAPIError("POST", "/fapi/v1/order", 400, -2019, "margin", dict(params, newClientOrderId="other")),
+                bn.BinanceAPIError("POST", "/fapi/v1/order", 400, -2019, "margin", dict(params, quantity="20")),
+            ):
+                self.assertFalse(await durable.record_binance_margin_rejection(engine, order, exc))
+                self.assertEqual(order.state, OrderState.SUBMITTING)
+            exc = bn.BinanceAPIError("POST", "/fapi/v1/order", 400, -2019, "margin", params)
+            with patch("bot.database.save_key_value", AsyncMock()) as save:
+                self.assertTrue(await durable.record_binance_margin_rejection(engine, order, exc))
+            restored = OrderRegistry()
+            restored.restore(json.loads(save.call_args.args[1])["orders"])
+            self.assertEqual(restored.pending_orders(), [])
+            self.assertTrue(durable.can_open(engine))
+
+            other, _ = engine.orders.get_or_create("bgx7-other", "LINKUSDT", "Buy", 19.34)
+            other.transition(OrderState.SUBMITTING)
+            failed, _ = engine.orders.get_or_create("bgx7-failed", "LINKUSDT", "Buy", 19.34)
+            failed.transition(OrderState.SUBMITTING)
+            exc = bn.BinanceAPIError("POST", "/fapi/v1/order", 400, -2019, "margin", dict(params, newClientOrderId=failed.client_oid))
+            with patch("bot.database.save_key_value", AsyncMock(side_effect=RuntimeError("offline"))):
+                self.assertFalse(await durable.record_binance_margin_rejection(engine, failed, exc))
+            self.assertFalse(durable.can_open(engine))
+            self.assertEqual(other.state, OrderState.SUBMITTING)
+        run(scenario())
+
     def test_required_engine_interface_is_present(self):
         required = {
             "get_balance", "load_instruments", "get_instruments",
