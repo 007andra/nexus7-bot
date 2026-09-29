@@ -1,4 +1,5 @@
 import asyncio
+from decimal import Decimal
 
 from bot import binance_exit_forensics as forensic
 
@@ -131,7 +132,7 @@ def test_missing_algo_link_keeps_cause_unattributed_but_fill_pnl_exact():
     assert receipt["pnl_fill_authority"] is True
     assert receipt["realized_income_crosscheck"] is True
     assert receipt["close_vwap"] == "11.515"
-    assert receipt["net_after_funding"] == "1.73743"
+    assert Decimal(receipt["net_after_funding"]) == Decimal("1.73743")
 
 
 def test_algo_actual_order_id_proves_protective_close_identity():
