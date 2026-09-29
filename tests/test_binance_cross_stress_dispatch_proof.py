@@ -238,6 +238,16 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
                 row["maintMarginRatio"] = 0.99
             elif self.scenario == "cross_unconfirmed":
                 changes["get_symbol_config"] = AsyncMock(return_value={})
+            elif self.scenario == "leverage_mismatch_lower":
+                changes["get_symbol_config"] = AsyncMock(return_value={"marginType": "CROSSED", "leverage": 20})
+            elif self.scenario == "leverage_mismatch_higher":
+                changes["get_symbol_config"] = AsyncMock(return_value={"marginType": "CROSSED", "leverage": 75})
+            elif self.scenario == "leverage_missing":
+                changes["get_symbol_config"] = AsyncMock(return_value={"marginType": "CROSSED"})
+            elif self.scenario == "leverage_invalid":
+                changes["get_symbol_config"] = AsyncMock(return_value={"marginType": "CROSSED", "leverage": "bad"})
+            elif self.scenario == "leverage_read_exception":
+                changes["get_symbol_config"] = AsyncMock(side_effect=RuntimeError("symbolConfig read failed"))
             elif self.scenario == "internal_error":
                 changes["get_leverage_brackets"] = AsyncMock(side_effect=RuntimeError("unexpected internal error"))
             changes.setdefault("get_account_state", AsyncMock(return_value=account))
@@ -352,6 +362,8 @@ SCENARIOS = (
     "bracket_50x", "maintenance_invalid", "margin_nonpositive", "risk_rate",
     "quantity_missing", "quantity_zero", "quantity_negative", "signal_missing",
     "symbol_unknown", "cross_unconfirmed", "internal_error", "quantity_drift",
+    "leverage_mismatch_lower", "leverage_mismatch_higher", "leverage_missing",
+    "leverage_invalid", "leverage_read_exception",
 )
 
 

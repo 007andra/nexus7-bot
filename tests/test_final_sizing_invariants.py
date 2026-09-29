@@ -150,7 +150,9 @@ class FinalSizingInvariantTests(unittest.TestCase):
                 return []
 
             async def get_symbol_config(self, symbol):
-                return {"marginType": "CROSS"}
+                # Valid CROSS candidate whose actual Binance leverage matches
+                # the configured contract (cfg.LEVERAGE = 50 in setUp).
+                return {"marginType": "CROSS", "leverage": 50}
 
             async def get_leverage_brackets(self, symbol):
                 return {"brackets": [{
@@ -165,6 +167,58 @@ class FinalSizingInvariantTests(unittest.TestCase):
         result = asyncio.run(cross_stress.evaluate(engine, signal, 3.0))
         self.assertFalse(result.allowed)
         self.assertEqual(result.reason, "nonpositive_stressed_margin")
+
+    def _stress_with_symbol_config(self, config_or_exc):
+        class Client:
+            async def get_account_state(self):
+                return {"crossWalletBalance": 6.0, "orderMargin": 0.0,
+                        "multiAssetsMargin": False, "canTrade": True}
+
+            async def get_positions(self):
+                return []
+
+            async def get_symbol_config(self, symbol):
+                if isinstance(config_or_exc, Exception):
+                    raise config_or_exc
+                return config_or_exc
+
+            async def get_leverage_brackets(self, symbol):
+                return {"brackets": [{
+                    "bracket": 1, "notionalFloor": 0, "notionalCap": 10000,
+                    "maintMarginRatio": 0.01, "initialLeverage": 50,
+                }]}
+
+        engine = SimpleNamespace(client=Client(), positions={}, paper_trade=False)
+        signal = SimpleNamespace(symbol="TESTUSDT", direction="LONG", entry=100.0, sl=98.0)
+        return asyncio.run(cross_stress.evaluate(engine, signal, 3.0))
+
+    def test_actual_leverage_equal_to_configured_continues_evaluation(self):
+        # Equality must not short-circuit to PASS: the stress math still runs
+        # and reaches the original stressed-margin verdict.
+        result = self._stress_with_symbol_config({"marginType": "CROSS", "leverage": 50})
+        self.assertEqual(result.reason, "nonpositive_stressed_margin")
+
+    def test_actual_leverage_mismatch_missing_invalid_or_unreadable_blocks(self):
+        cases = {
+            "lower": {"marginType": "CROSS", "leverage": 20},
+            "higher": {"marginType": "CROSS", "leverage": 75},
+            "missing": {"marginType": "CROSS"},
+            "none": {"marginType": "CROSS", "leverage": None},
+            "text": {"marginType": "CROSS", "leverage": "bad"},
+            "empty": {"marginType": "CROSS", "leverage": ""},
+            "bool": {"marginType": "CROSS", "leverage": True},
+        }
+        for name, config in cases.items():
+            result = self._stress_with_symbol_config(config)
+            self.assertFalse(result.allowed, name)
+            self.assertEqual(result.reason, "state_candidate_configured_leverage_unconfirmed", name)
+        result = self._stress_with_symbol_config(RuntimeError("symbol config read failed"))
+        self.assertFalse(result.allowed)
+        self.assertTrue(result.reason.startswith("state_"), result.reason)
+
+    def test_leverage_gate_never_rewrites_configured_leverage(self):
+        self._stress_with_symbol_config({"marginType": "CROSS", "leverage": 20})
+        self.assertEqual(cfg.LEVERAGE, 50)
 
     def test_risk_sizing_exception_fails_closed(self):
         def _raise(*args, **kwargs):
