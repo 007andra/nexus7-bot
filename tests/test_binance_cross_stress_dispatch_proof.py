@@ -101,7 +101,7 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.client.get_account_state = AsyncMock(side_effect=self.account)
         self.client.get_leverage_brackets = AsyncMock(side_effect=self.brackets)
         self.client.get_position_mode = AsyncMock(return_value="ONE_WAY")
-        self.client.get_symbol_config = AsyncMock(return_value={"marginType": "CROSSED"})
+        self.client.get_symbol_config = AsyncMock(return_value={"marginType": "CROSSED", "leverage": 50})
         self.client.get_cached_klines = lambda *a: [{"c": 100, "h": 101, "l": 99, "v": 1000}] * 50
         self.client._request = AsyncMock(side_effect=self.request)
         self.client.set_position_stops = AsyncMock(return_value=True)
