@@ -33,6 +33,7 @@ from bot import external_position_performance as external_performance
 from bot.drawdown_persistence import (
     restore_real_account_peak_without_new_high,
     restore_update_real_account_peak,
+    restore_zero_equity_peak_fail_closed,
 )
 from bot.quantity import quantity_rules
 
@@ -99,6 +100,32 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
     available = float(state["available"])
 
     account_semantics.update_risk_from_equity(engine.risk, equity)
+
+    if equity == 0.0:
+        # Zero is an authenticated observable account state, not executable
+        # capital. Preserve the durable HWM at 100% drawdown so the runtime can
+        # continue read-only reconciliation/forensics without ever opening risk.
+        await restore_zero_equity_peak_fail_closed(engine.risk, strict=True)
+        engine._pilot_prev_account_equity = 0.0
+        engine._pilot_prev_account_observed_ms = external_performance.server_now_ms(
+            engine.client
+        )
+        engine._pilot_account_equity = 0.0
+        engine._pilot_available_balance = 0.0
+        engine._pilot_balance_source = state.get("available_source", "unknown")
+        snapshot = dict(state)
+        snapshot["_observed_at"] = time.time()
+        snapshot["_zero_equity_fail_closed"] = True
+        engine.client._last_account_overview_snapshot = snapshot
+        log.critical(
+            "[PILOT_LIVE_BALANCE] equity=0.0000 observed_available=%.4f "
+            "published_available=0.0000 peak_equity=%.4f drawdown=100.00%% "
+            "zero_equity=true capital_confirmed=false "
+            "execution_effect=BLOCK_NEW_ENTRIES",
+            available,
+            float(getattr(getattr(engine.risk, "_legacy", engine.risk), "peak_balance", 0.0) or 0.0),
+        )
+        return state
 
     # KuCoin accountEquity includes external deposits/withdrawals/transfers.
     # Before enforcing the durable HWM, reconcile completed ledger cash flows
@@ -341,7 +368,7 @@ def install(TradingEngine, log) -> None:
             return await original_update_balance(self, *args, **kwargs)
         try:
             state = await _refresh_account(self, log)
-            self.risk.balance_confirmed = True
+            self.risk.balance_confirmed = bool(float(state["equity"]) > 0.0)
             return state
         except Exception as exc:
             self.risk.balance_confirmed = False
@@ -357,7 +384,7 @@ def install(TradingEngine, log) -> None:
         try:
             state = await _refresh_account(self, log, for_entry=True)
             available = float(state["available"])
-            self.risk.balance_confirmed = True
+            self.risk.balance_confirmed = bool(float(state["equity"]) > 0.0)
 
             # Keep risk.balance semantically stable as authenticated account
             # equity. The core engine reads _pilot_available_balance explicitly
