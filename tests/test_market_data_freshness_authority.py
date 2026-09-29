@@ -145,7 +145,11 @@ class FreshnessContractTests(unittest.TestCase):
         with patch.object(client, "_get", AsyncMock(return_value=rows)):
             asyncio.run(client.get_klines("BTCUSDT", "15"))
             asyncio.run(client._seed_kline_cache(["BTCUSDT"], ["15"]))
-        with patch.object(client, "_get", AsyncMock(return_value={"lastPrice": "1"})):
+        async def rest_ticker(endpoint, params=None, auth=False):
+            if endpoint == "/fapi/v1/ticker/bookTicker":
+                return {"symbol": "BTCUSDT", "bidPrice": "0.9999", "askPrice": "1.0001"}
+            return {"lastPrice": "1"}
+        with patch.object(client, "_get", AsyncMock(side_effect=rest_ticker)):
             asyncio.run(client.get_ticker("BTCUSDT"))
         self.assertTrue(client.get_cached_ticker("BTCUSDT"))
         self.assertIn("no_market_data", gate(client)[0])
