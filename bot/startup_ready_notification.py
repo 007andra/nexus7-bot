@@ -36,7 +36,7 @@ async def _notify_when_runtime_ready(engine, log, *, timeout_s: float = 90.0) ->
                     dd_line = ""
                     if dd is not None and limit is not None:
                         dd_line = f"\nDrawdown: *{dd:.2f}%* | limite: *{limit:.2f}%*"
-                    await notify(
+                    result = await notify(
                         "🟠 *NEXUS-7 ONLINE — LIVE BLOQUEADO*\n"
                         "`━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
                         "✅ Engine conectado e ativo.\n"
@@ -44,7 +44,7 @@ async def _notify_when_runtime_ready(engine, log, *, timeout_s: float = 90.0) ->
                         f"Motivo: `{blocker_text}`{dd_line}"
                     )
                 elif mode == "LIVE":
-                    await notify(
+                    result = await notify(
                         "🔴 *NEXUS-7 ONLINE — LIVE OPERACIONAL*\n"
                         "`━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
                         "✅ Engine conectado e ativo.\n"
@@ -52,14 +52,16 @@ async def _notify_when_runtime_ready(engine, log, *, timeout_s: float = 90.0) ->
                         "⚠️ Cada nova entrada ainda passa por NEXUS, risco e validações pré-trade."
                     )
                 else:
-                    await notify(
+                    result = await notify(
                         "🟠 *NEXUS-7 ONLINE — ESTADO RESTRITO*\n"
                         "`━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
                         f"Estado efetivo: `{mode or 'UNKNOWN'}`.\n"
                         "Nenhuma disponibilidade de novas entradas é afirmada."
                     )
+                from bot.telegram_transport import delivered
                 log.info(
-                    "[STARTUP_READY_NOTIFICATION] sent=true effective_mode=%s blockers=%s execution_effect=NONE",
+                    "[STARTUP_READY_NOTIFICATION] sent=%s effective_mode=%s blockers=%s execution_effect=NONE",
+                    str(delivered(result)).lower(),
                     mode,
                     blockers,
                 )
