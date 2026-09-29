@@ -43,6 +43,22 @@ from bot.private_stream_health import (
 from bot.order_state import OrderState, InvalidTransition
 
 
+class BinanceAPIError(RuntimeError):
+    """Structured HTTP rejection; network/ambiguous errors remain separate."""
+
+    def __init__(self, method, endpoint, status, code, message, params=None):
+        super().__init__(
+            f"Binance {method} {endpoint} HTTP {status} code={code} msg={str(message)[:180]}"
+        )
+        self.method, self.endpoint, self.status, self.code = method, endpoint, status, code
+        # Keep only non-secret order identity, never signed request parameters.
+        params = params or {}
+        self.client_oid = str(params.get("newClientOrderId", ""))
+        self.symbol = str(params.get("symbol", ""))
+        self.side = str(params.get("side", ""))
+        self.quantity = str(params.get("quantity", ""))
+
+
 def _clean_credential_env(name: str) -> str:
     raw = os.environ.get(name, "")
     cleaned = raw.strip().replace("\r", "").replace("\n", "").replace("\t", "")
@@ -427,10 +443,7 @@ class BinanceClient:
                         if resp.status >= 500 and attempt + 1 < attempts:
                             await asyncio.sleep(min(4.0, 2 ** attempt))
                             continue
-                        raise RuntimeError(
-                            f"Binance {method} {endpoint} HTTP {resp.status} "
-                            f"code={code} msg={str(msg)[:180]}"
-                        )
+                        raise BinanceAPIError(method, endpoint, resp.status, code, msg, params)
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 last_error = exc
                 if attempt + 1 < attempts:
@@ -820,9 +833,17 @@ class BinanceClient:
             {"symbol": to_binance(symbol)},
             auth=True,
         )
-        if isinstance(data, list):
-            return data[0] if data else {}
-        return data if isinstance(data, dict) else {}
+        config = (data[0] if data else {}) if isinstance(data, list) else data
+        if not isinstance(config, dict):
+            return {}
+        from bot.config import cfg
+        log.info(
+            "[BINANCE_SYMBOL_CONFIG] symbol=%s exchange_leverage=%s configured_leverage=%s "
+            "margin_type=%s source=/fapi/v1/symbolConfig mutation=false",
+            symbol, config.get("leverage", "UNKNOWN"), cfg.LEVERAGE,
+            config.get("marginType", "UNKNOWN"),
+        )
+        return config
 
     async def set_leverage(self, symbol: str, leverage: int):
         if PAPER_TRADE:
