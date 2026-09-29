@@ -2731,7 +2731,12 @@ class TradingEngine:
                     and not durable.can_open(self)):
                 log.critical(
                     "[DURABLE_STATE] nova entrada bloqueada: estado persistente "
-                    "não confirmado; posições existentes continuam gerenciadas"
+                    "não confirmado; posições existentes continuam gerenciadas "
+                    "errors=%s pending=%s paused=%s daily_pnl_ok=%s",
+                    sorted(getattr(self, "_durable_state_errors", set())),
+                    [(o.client_oid, o.symbol, o.state.value) for o in self.orders.pending_orders()],
+                    bool(getattr(self, "entries_paused", False)),
+                    getattr(self, "_daily_pnl_ok", True),
                 )
                 return
 
@@ -3117,6 +3122,7 @@ class TradingEngine:
             )
 
             for attempt in range(1, MAX_RETRIES + 1):
+                _managed = None
                 try:
                     # ══════════════════════════════════════════════════
                     # P0 — NUNCA RETENTAR ORDEM SEM VERIFICAR EXECUÇÃO
@@ -3454,6 +3460,8 @@ class TradingEngine:
                     # submission would create a second logical dispatch boundary,
                     # so Binance fails closed here and waits for the next signal.
                     if is_binance():
+                        if self._durable_state_enforced:
+                            await durable.record_binance_margin_rejection(self, _managed, exc)
                         import re as _re
                         _code_match = _re.search(
                             r"code=(-?\d+)", err_str
