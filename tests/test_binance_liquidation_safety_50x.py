@@ -38,7 +38,7 @@ class _Client:
                 "multiAssetsMargin": False, "canTrade": self.can_trade}
 
     async def get_symbol_config(self, symbol):
-        return {"marginType": "CROSSED"}
+        return {"marginType": "CROSSED", "leverage": 50}
 
     async def get_positions(self):
         return []
