@@ -274,3 +274,8 @@ The LIVE-shaped runtime harness passes, and the composed notify chain is
   `robust_notify`.
 - The engine still awaits some notifications inline (unchanged code).
   Blocking is now bounded, and near zero while DEGRADED.
+
+
+## Rebase note — 2026-09-29
+
+Revalidated branch base: `migration/binance-usdm` after PR #435, merge SHA `eb6f9f7e522f923cc9ac380510974db43c14ad6e`. The Telegram transport scope remains observability/delivery-only; no trading, risk, sizing, leverage, drawdown or Binance execution policy is changed by this PR.
