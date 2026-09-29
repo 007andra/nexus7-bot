@@ -1,3 +1,4 @@
+# Rebased onto PR #435 merge SHA eb6f9f7; runtime behavior unchanged.
 """Telegram delivery resilience: transport, classification, retry, breaker.
 
 Every test is offline. HTTP scenarios run against a scripted loopback server
