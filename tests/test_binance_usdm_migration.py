@@ -739,8 +739,11 @@ class BinanceMigrationTests(unittest.TestCase):
     def test_funding_open_interest_and_ticker_normalization(self):
         client = FakeBinance({
             "/fapi/v1/ticker/24hr": {
-                "lastPrice": "100", "bidPrice": "99.9", "askPrice": "100.1",
+                "lastPrice": "100",
                 "volume": "20", "quoteVolume": "2000",
+            },
+            "/fapi/v1/ticker/bookTicker": {
+                "symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1",
             },
             "/fapi/v1/openInterest": {"openInterest": "12.5"},
             "/fapi/v1/premiumIndex": {"lastFundingRate": "0.0001"},
@@ -749,8 +752,49 @@ class BinanceMigrationTests(unittest.TestCase):
         oi = run(client.get_open_interest("BTCUSDT"))
         funding = run(client.get_funding_rate("BTCUSDT"))
         self.assertEqual(ticker["turnover"], 2000.0)
+        self.assertEqual((ticker["bid"], ticker["ask"]), (99.9, 100.1))
         self.assertEqual(float(oi["openInterestValue"]), 1250.0)
         self.assertEqual(funding, 0.0001)
+
+    def test_fresh_binance_ticker_reaches_microstructure_guard(self):
+        from bot.pre_dispatch_guard import live_microstructure_recheck
+
+        client = FakeBinance({
+            "/fapi/v1/ticker/24hr": {"lastPrice": "100", "volume": "20", "quoteVolume": "2000"},
+            "/fapi/v1/ticker/bookTicker": {
+                "symbol": "BTCUSDT", "bidPrice": "99.99", "askPrice": "100.01",
+            },
+            "/fapi/v1/depth": {"bids": [["99.99", "100"]], "asks": [["100.01", "100"]]},
+        })
+
+        def check():
+            return run(live_microstructure_recheck(
+                client=client, instruments={"BTCUSDT": {"multiplier": 1}},
+                symbol="BTCUSDT", signal_entry=100, side="BUY", qty=1,
+            ))
+
+        self.assertTrue(check().allowed)
+        cached = dict(client.get_cached_ticker("BTCUSDT"))
+        for book in (None, [], {}, {"symbol": "ETHUSDT", "bidPrice": "99", "askPrice": "100"}):
+            with self.subTest(book=book):
+                client.responses["/fapi/v1/ticker/bookTicker"] = book
+                self.assertFalse(check().allowed)
+                self.assertEqual(client.get_cached_ticker("BTCUSDT"), cached)
+        for bid, ask in ((None, "100"), ("nan", "100"), ("99", "inf"), ("0", "100"), ("101", "100"), ("bad", "100")):
+            with self.subTest(bid=bid, ask=ask):
+                client.responses["/fapi/v1/ticker/bookTicker"] = {
+                    "symbol": "BTCUSDT", "bidPrice": bid, "askPrice": ask,
+                }
+                self.assertFalse(check().allowed)
+        def timeout(*args):
+            raise asyncio.TimeoutError()
+        client.responses["/fapi/v1/ticker/bookTicker"] = timeout
+        self.assertFalse(check().allowed)
+        client.responses["/fapi/v1/ticker/bookTicker"] = {
+            "symbol": "BTCUSDT", "bidPrice": "99", "askPrice": "101",
+        }
+        self.assertIn("SPREAD_TOO_WIDE", check().blockers)
+        self.assertEqual(client.get_cached_ticker("BTCUSDT")["ask"], 101)
 
 
 if __name__ == "__main__":
