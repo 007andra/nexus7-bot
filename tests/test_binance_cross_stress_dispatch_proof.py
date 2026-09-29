@@ -101,7 +101,7 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.client.get_account_state = AsyncMock(side_effect=self.account)
         self.client.get_leverage_brackets = AsyncMock(side_effect=self.brackets)
         self.client.get_position_mode = AsyncMock(return_value="ONE_WAY")
-        self.client.get_symbol_config = AsyncMock(return_value={"marginType": "CROSSED"})
+        self.client.get_symbol_config = AsyncMock(return_value={"marginType": "CROSSED", "leverage": 50})
         self.client.get_cached_klines = lambda *a: [{"c": 100, "h": 101, "l": 99, "v": 1000}] * 50
         self.client._request = AsyncMock(side_effect=self.request)
         self.client.set_position_stops = AsyncMock(return_value=True)
@@ -238,6 +238,16 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
                 row["maintMarginRatio"] = 0.99
             elif self.scenario == "cross_unconfirmed":
                 changes["get_symbol_config"] = AsyncMock(return_value={})
+            elif self.scenario == "leverage_mismatch_lower":
+                changes["get_symbol_config"] = AsyncMock(return_value={"marginType": "CROSSED", "leverage": 20})
+            elif self.scenario == "leverage_mismatch_higher":
+                changes["get_symbol_config"] = AsyncMock(return_value={"marginType": "CROSSED", "leverage": 75})
+            elif self.scenario == "leverage_missing":
+                changes["get_symbol_config"] = AsyncMock(return_value={"marginType": "CROSSED"})
+            elif self.scenario == "leverage_invalid":
+                changes["get_symbol_config"] = AsyncMock(return_value={"marginType": "CROSSED", "leverage": "bad"})
+            elif self.scenario == "leverage_read_exception":
+                changes["get_symbol_config"] = AsyncMock(side_effect=RuntimeError("symbolConfig read failed"))
             elif self.scenario == "internal_error":
                 changes["get_leverage_brackets"] = AsyncMock(side_effect=RuntimeError("unexpected internal error"))
             changes.setdefault("get_account_state", AsyncMock(return_value=account))
@@ -352,6 +362,8 @@ SCENARIOS = (
     "bracket_50x", "maintenance_invalid", "margin_nonpositive", "risk_rate",
     "quantity_missing", "quantity_zero", "quantity_negative", "signal_missing",
     "symbol_unknown", "cross_unconfirmed", "internal_error", "quantity_drift",
+    "leverage_mismatch_lower", "leverage_mismatch_higher", "leverage_missing",
+    "leverage_invalid", "leverage_read_exception",
 )
 
 
@@ -375,3 +387,102 @@ def _scenario_test(scenario):
 
 for _scenario in SCENARIOS:
     setattr(DispatchProof, "test_fail_closed_" + _scenario, _scenario_test(_scenario))
+
+
+class _OpenNewRiskInvariantMatrix:
+    """OPEN_NEW_RISK mutation matrix through the real engine._open chain.
+
+    Each test perturbs exactly one authority relative to the positive control
+    (which dispatches exactly once) and requires zero exchange HTTP requests.
+    """
+
+    async def _assert_no_exchange_request(self, label, *, evidence=None):
+        import logging as _logging
+        with self.assertLogs("kakazito-trade", level="DEBUG") as logs:
+            _logging.getLogger("kakazito-trade").debug("[MATRIX] %s", label)
+            await self.engine._open(self.signal)
+        self.log_output = "\n".join(logs.output)
+        mutations = [r for r in self.requests if r[0] != "GET"]
+        self.assertEqual(mutations, [], (label, self.events))
+        if evidence:
+            self.assertTrue(any(e in self.log_output or e in self.events for e in evidence),
+                            (label, self.events, self.log_output[-3000:]))
+
+    async def test_inv01_04_unresolved_durable_state_blocks(self):
+        self.engine._durable_state_ok = False
+        self.engine._durable_state_errors = {"orders"}
+        await self._assert_no_exchange_request("durable_state_unresolved", evidence=["durable", "DURABLE"])
+        self.assertEqual(self.client.place_order.call_count, 0)
+
+    async def test_inv02_invalid_ownership_blocks_at_transport(self):
+        from bot.execution_ownership import StaleExecutionFence
+
+        async def invalid(*a):
+            self.events.append("OWNERSHIP_INVALID")
+            raise StaleExecutionFence("REJECTED_STALE_FENCE superseded token")
+
+        self.replace("bot.execution_ownership.validate_execution_ownership", AsyncMock(side_effect=invalid))
+        await self._assert_no_exchange_request("ownership_invalid", evidence=["OWNERSHIP_INVALID"])
+
+    async def test_inv03_stale_fence_blocks_at_transport(self):
+        async def stale(*a):
+            self.events.append("FENCE_STALE")
+            return False
+
+        self.replace("bot.live_execution_fence.acquire", AsyncMock(side_effect=stale))
+        await self._assert_no_exchange_request("fence_stale", evidence=["FENCE_STALE"])
+
+    async def test_inv09_drawdown_at_hard_limit_blocks(self):
+        async def drawn_down():
+            self.events.append("ACCOUNT_REFRESH")
+            return {"equity": 899.0, "available": 899.0, "crossWalletBalance": 899.0,
+                    "orderMargin": 0, "canTrade": True, "multiAssetsMargin": False}
+
+        self.client.get_account_state = AsyncMock(side_effect=drawn_down)
+        self.engine.risk._legacy.peak_balance = 1000.0
+        with patch.dict(os.environ, {"LIVE_RISK_OVERRIDE_APPROVED": ""}):
+            await self._assert_no_exchange_request("drawdown_limit", evidence=["DRAWDOWN", "drawdown"])
+        self.assertEqual(self.client.place_order.call_count, 0)
+
+    async def test_inv10_external_position_conflict_blocks(self):
+        self.client.get_positions = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "size": 1, "side": "Buy", "positionAmt": "1"}])
+        await self._assert_no_exchange_request("external_position", evidence=["position_divergence", "EXTERNAL", "external"])
+        self.assertEqual(self.client.place_order.call_count, 0)
+
+    async def test_inv11_invalid_top_of_book_blocks(self):
+        self.replace("bot.pilot_risk_cap_hardening.live_microstructure_recheck", AsyncMock(
+            return_value=SimpleNamespace(allowed=False, metrics={}, blockers=["stale_book_ticker"])))
+        await self._assert_no_exchange_request("top_of_book", evidence=["stale_book_ticker"])
+        self.assertEqual(self.client.place_order.call_count, 0)
+
+    async def test_inv12_missing_instrument_metadata_blocks(self):
+        self.engine.instruments.pop("ETHUSDT")
+        await self._assert_no_exchange_request("instrument_metadata", evidence=["ETHUSDT"])
+        self.assertEqual(self.client.place_order.call_count, 0)
+
+    async def test_inv13_readiness_failure_blocks(self):
+        def not_ready(engine):
+            self.events.append("READINESS_BLOCK")
+            raise RuntimeError("protection_system_ready=false")
+
+        self.replace("bot.runtime_readiness.assert_ready_for_new_entries", not_ready)
+        await self._assert_no_exchange_request("readiness")
+        self.assertIn("READINESS_BLOCK", self.events)
+
+    async def test_inv14_ambiguous_transport_never_resubmits(self):
+        async def ambiguous(method, endpoint, params=None, **kwargs):
+            self.requests.append((method, endpoint, params))
+            raise asyncio.TimeoutError("response lost after possible acceptance")
+
+        self.client._request = AsyncMock(side_effect=ambiguous)
+        await self.engine._open(self.signal)
+        posts = [r for r in self.requests if r[0] == "POST" and r[1] == "/fapi/v1/order"]
+        self.assertLessEqual(len(posts), 1, self.events)
+        pending = [o for o in self.engine.orders.pending_orders() if o.symbol == "ETHUSDT"]
+        self.assertTrue(all(not o.is_terminal for o in pending))
+
+
+for _name, _fn in list(vars(_OpenNewRiskInvariantMatrix).items()):
+    if _name.startswith("test_") or _name.startswith("_assert_no_exchange"):
+        setattr(DispatchProof, _name, _fn)

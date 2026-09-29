@@ -6,8 +6,91 @@ uses authenticated read evidence to resolve already-persisted order intents.
 from __future__ import annotations
 
 import time
+import math
+import os
 
 STALE_SUBMITTING_AGE_S = 300.0
+
+# Operator-authorized incident recovery, NOT a general absence->rejection rule.
+# Railway e430206e-c76f-416d-94b4-ed17e83c8ae6 / SHA 67cf44a32db87ec6c39e360d128e4bbe1c2317fd
+# 2026-09-29T07:45:21.852384687Z: POST /fapi/v1/order HTTP 400 code=-2019,
+# side=Buy qty=19.34 LINKUSDT. No engine retry (1/1). Exact id reconstructed
+# with the deployed build_client_oid algorithm from LINKUSDT_Buy_19.34_29844465
+# and matched to restored SUBMITTING record on deployment 8f801e05... .
+_LINK_REJECTED_OID = "bgx7-3c132f2a2fe68e76ba376fdfbedb70"
+
+
+async def _recover_audited_link_rejection(engine, order, log) -> bool:
+    from bot.binance import BinanceAPIError, BinanceClient
+    from bot.order_state import OrderState
+    from bot.durable_live_reconciliation import _owner_valid
+
+    if order.client_oid != _LINK_REJECTED_OID:
+        return False
+    client = getattr(engine.client, "_client", engine.client)
+    if (getattr(engine, "paper_trade", True) or not isinstance(client, BinanceClient)
+            or os.getenv("RAILWAY_PROJECT_ID") != "1443ec46-186f-497b-9e61-4b69446d35c3"
+            or os.getenv("RAILWAY_ENVIRONMENT_ID") != "e07566a4-170b-418d-9c91-b19604db8b3e"
+            or order.symbol != "LINKUSDT" or order.side != "Buy" or order.qty != 19.34
+            or order.state != OrderState.SUBMITTING or order.order_id
+            or order.filled_qty != 0 or order.avg_price != 0
+            or order.reduce_only or order.exposure_intent != "INCREASE"
+            or not 1790667900 <= order.created_at <= 1790667922
+            or getattr(engine, "positions", {})):
+        return False
+    try:
+        if not await _owner_valid(engine):
+            return False
+        # Bypass the convenience lookup that collapses arbitrary failures to {}.
+        try:
+            await client._get("/fapi/v1/order", {
+                "symbol": "LINKUSDT", "origClientOrderId": order.client_oid,
+            }, auth=True)
+        except BinanceAPIError as exc:
+            if (exc.method, exc.endpoint, exc.status, exc.code) != (
+                "GET", "/fapi/v1/order", 400, -2013
+            ):
+                raise
+        else:
+            return False
+        positions = await client._get("/fapi/v3/positionRisk", auth=True)
+        if not isinstance(positions, list):
+            return False
+        for row in positions:
+            if not isinstance(row, dict) or "positionAmt" not in row:
+                return False
+            qty = float(row["positionAmt"])
+            if not math.isfinite(qty) or qty != 0:
+                return False
+        for endpoint in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"):
+            rows = await client._get(endpoint, auth=True)
+            if endpoint.endswith("openAlgoOrders") and isinstance(rows, dict):
+                rows = rows.get("orders")
+            if not isinstance(rows, list) or rows:
+                return False
+        # Read actual leverage for the incident symbol, never change it here.
+        config = await client.get_symbol_config("LINKUSDT")
+        if (config.get("symbol") != "LINKUSDT"
+                or str(config.get("marginType", "")).upper() not in {"CROSS", "CROSSED"}
+                or not 1 <= int(config.get("leverage", 0)) <= 125):
+            return False
+        if not await _owner_valid(engine):
+            return False
+        # Recheck in-memory evidence after asynchronous reads (private WS races).
+        if (order.state != OrderState.SUBMITTING or order.order_id
+                or order.filled_qty != 0 or order.avg_price != 0
+                or getattr(engine, "positions", {})):
+            return False
+        order.transition(OrderState.REJECTED, source="AUDITED_BINANCE_2019_20260929",
+                         code=-2019, evidence_deployment="e430206e-c76f-416d-94b4-ed17e83c8ae6",
+                         evidence_timestamp="2026-09-29T07:45:21.852384687Z")
+        log.warning("[AUDITED_LINK_REJECTION] clientOid=%s state=REJECTED "
+                    "exchange_leverage=%s persistence=PENDING resubmit=false exchange_mutation=false",
+                    order.client_oid, config["leverage"])
+        return True
+    except Exception as exc:
+        log.warning("[AUDITED_LINK_REJECTION] result=BLOCK error_type=%s", type(exc).__name__)
+        return False
 
 
 def _active_items(payload):
@@ -74,13 +157,18 @@ def install(durable_module, order_state_module, log) -> None:
 
         pending = list(engine.orders.pending_orders())
         if not pending:
-            durable_module._clear(engine, "orders")
+            # persist_orders clears the durable gate only after the write
+            # succeeds (and re-blocks on failure); clearing first opened the
+            # gate for the duration of the await with nothing persisted.
             return await durable_module.persist_orders(
                 engine, "startup_reconcile_hardened_empty", strict=True
             )
 
         changed = False
         for order in pending:
+            if await _recover_audited_link_rejection(engine, order, log):
+                changed = True
+                continue
             age_s = max(0.0, time.time() - float(order.created_at or time.time()))
             log.warning(
                 "[DURABLE_RECONCILE_DETAIL] clientOid=%s symbol=%s state=%s "
