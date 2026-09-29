@@ -24,11 +24,13 @@ class CapitalReaderVenueTests(unittest.TestCase):
             calls.append(endpoint)
             if endpoint == "/fapi/v3/account":
                 return dict(BINANCE_ACCOUNT)
+            if endpoint == "/fapi/v1/accountConfig":
+                return {"canTrade": True, "multiAssetsMargin": False}
             raise RuntimeError(f"Binance GET {endpoint} HTTP 404")
 
         with patch.object(client, "_request", side_effect=fake_request):
             snap = asyncio.run(read_account_capital(client))
-        self.assertEqual(calls, ["/fapi/v3/account"])
+        self.assertEqual(calls, ["/fapi/v3/account", "/fapi/v1/accountConfig"])
         self.assertAlmostEqual(snap.capital.equity, 9.841)
         self.assertAlmostEqual(snap.capital.available_collateral, 9.5)
         self.assertAlmostEqual(snap.capital.position_margin, 0.2)

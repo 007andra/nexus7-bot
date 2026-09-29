@@ -604,10 +604,34 @@ class BinanceClient:
         log.info("💰 Binance Futures available USDT: $%.4f", balance)
         return balance
 
+    async def get_account_config(self) -> dict:
+        """Read fresh trading/margin flags from their authoritative endpoint.
+
+        Account V3 supplies balances, not these permission/configuration flags.
+        Missing or malformed flags must never become an assumed permission.
+        """
+        data = await self._get("/fapi/v1/accountConfig", auth=True)
+        if not isinstance(data, dict):
+            raise RuntimeError("BINANCE_ACCOUNT_CONFIG_UNAVAILABLE")
+        flags = {}
+        for name in ("canTrade", "multiAssetsMargin"):
+            if name not in data:
+                raise RuntimeError(f"BINANCE_ACCOUNT_CONFIG_MISSING_{name}")
+            if type(data[name]) is not bool:
+                raise RuntimeError(f"BINANCE_ACCOUNT_CONFIG_INVALID_{name}")
+            flags[name] = data[name]
+        log.info(
+            "[BINANCE_ACCOUNT_CONFIG] source=/fapi/v1/accountConfig "
+            "canTrade=%s multiAssetsMargin=%s validated=true",
+            flags["canTrade"], flags["multiAssetsMargin"],
+        )
+        return flags
+
     async def get_account_state(self) -> dict:
         data = await self._get("/fapi/v3/account", auth=True)
         if not isinstance(data, dict):
             raise RuntimeError("Binance account state unavailable")
+        account_config = await self.get_account_config()
 
         def finite(name, fallback=None):
             raw = data.get(name, fallback)
@@ -641,8 +665,8 @@ class BinanceClient:
             ),
             "crossUnrealisedPNL": finite("totalCrossUnPnl", 0),
             "walletBalance": finite("totalWalletBalance", 0),
-            "multiAssetsMargin": bool(data.get("multiAssetsMargin", False)),
-            "canTrade": bool(data.get("canTrade", False)),
+            "multiAssetsMargin": account_config["multiAssetsMargin"],
+            "canTrade": account_config["canTrade"],
         }
 
     async def get_leverage_brackets(self, symbol: str) -> dict:
