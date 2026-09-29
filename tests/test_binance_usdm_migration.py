@@ -244,7 +244,7 @@ class BinanceMigrationTests(unittest.TestCase):
             "/fapi/v1/accountConfig": {"canTrade": True, "multiAssetsMargin": False},
         })
         client.get_positions = AsyncMock(return_value=[])
-        client.get_symbol_config = AsyncMock(return_value={"marginType": "CROSS"})
+        client.get_symbol_config = AsyncMock(return_value={"marginType": "CROSS", "leverage": 50})
         client.get_leverage_brackets = AsyncMock(return_value={"brackets": [{
             "bracket": 1, "notionalFloor": 0, "notionalCap": 10000,
             "maintMarginRatio": 0.01, "initialLeverage": 125,
@@ -253,6 +253,12 @@ class BinanceMigrationTests(unittest.TestCase):
         signal = SimpleNamespace(symbol="LINKUSDT", direction="LONG", entry=15.0, sl=14.9)
         with patch.object(cfg, "LEVERAGE", 50):
             self.assertTrue(run(stress.evaluate(engine, signal, 1.0)).allowed)
+            for actual in (20, 75, None, "bad"):
+                client.get_symbol_config.return_value = {"marginType": "CROSS", "leverage": actual}
+                result = run(stress.evaluate(engine, signal, 1.0))
+                self.assertFalse(result.allowed)
+                self.assertEqual(result.reason, "state_candidate_configured_leverage_unconfirmed")
+            client.get_symbol_config.return_value = {"marginType": "CROSS", "leverage": 50}
             config = client.responses["/fapi/v1/accountConfig"]
             config["canTrade"] = False
             result = run(stress.evaluate(engine, signal, 1.0))
