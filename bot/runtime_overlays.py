@@ -51,6 +51,7 @@ def install(TradingEngine, log) -> None:
     from bot import partial_tp_execution_hardening
     from bot import exchange_accounting_evidence
     from bot import binance_accounting_evidence
+    from bot import binance_exit_forensics
     from bot import daily_pnl_exchange_reconciliation
     from bot import daily_stop_override_telemetry
     from bot import external_origin_runtime
@@ -100,6 +101,8 @@ def install(TradingEngine, log) -> None:
     post_trade_forensics.install(
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
     )
+    if exchange_runtime.is_binance():
+        binance_exit_forensics.install(TradingEngine, log)
     daily_pnl_estimate_lineage_hardening.install(durable_daily_pnl, log)
     if exchange_runtime.is_kucoin():
         daily_pnl_exchange_reconciliation.install(exchange_accounting_evidence, log)
@@ -129,7 +132,7 @@ def install(TradingEngine, log) -> None:
         "fail-closed market viability, exchange order-visibility race hardening, fail-closed "
         "partial-TP execution, drawdown hard-gate with explicit override, final risk-authoritative "
         "sizing invariants, truthful daily-stop override telemetry, market-risk coverage telemetry, "
-        "restart opening-order lineage recovery, post-trade forensics, direct-close daily-PnL "
+        "restart opening-order lineage recovery, post-trade forensics, Binance read-only exit forensics, direct-close daily-PnL "
         "estimate lineage, confirmed daily-PnL reconciliation, durable external-origin telemetry, "
         "final headline semantics, stop-only CROSS target policy, fail-closed CROSS portfolio "
         "stop-stress gate, startup readiness final notification via operator run owner, delegated operator margin/drawdown/exit policy, strict NEXUS "
