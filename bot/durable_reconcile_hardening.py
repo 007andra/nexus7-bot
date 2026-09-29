@@ -157,7 +157,9 @@ def install(durable_module, order_state_module, log) -> None:
 
         pending = list(engine.orders.pending_orders())
         if not pending:
-            durable_module._clear(engine, "orders")
+            # persist_orders clears the durable gate only after the write
+            # succeeds (and re-blocks on failure); clearing first opened the
+            # gate for the duration of the await with nothing persisted.
             return await durable_module.persist_orders(
                 engine, "startup_reconcile_hardened_empty", strict=True
             )

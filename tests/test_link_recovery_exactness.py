@@ -281,6 +281,24 @@ class ConvergenceProofTests(Harness):
         self.assert_no_mutation()
         self.client.get_order_by_client_oid.assert_awaited()
 
+    async def test_durable_gate_never_opens_before_persistence_completes(self):
+        # Empty-pending path after an in-memory terminalization whose earlier
+        # persistence failed: the gate must stay closed while the write is in
+        # flight and after a failed write.
+        self.order.transition(OrderState.REJECTED, source="test")
+        durable = self._durable()
+        seen = []
+
+        async def persist(engine, reason, strict=False):
+            seen.append(engine._durable_state_ok)
+            return False  # real persist_orders re-blocks and returns False
+
+        durable.persist_orders = persist
+        hardening.install(durable, order_state, _Log())
+        self.assertFalse(await durable.reconcile_orders(self.engine))
+        self.assertEqual(seen, [False])
+        self.assertFalse(self.engine._durable_state_ok)
+
     async def test_persistence_failure_keeps_entries_blocked(self):
         durable = self._durable()
 
