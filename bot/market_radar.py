@@ -411,7 +411,12 @@ async def send_once(engine, log, notify=None, radar: MarketRadar = RADAR) -> boo
         if notify is None:
             from bot.notifier import notify as notify
         text = build_message(engine, radar)
-        await notify(text)
+        result = await notify(text)
+        from bot.telegram_transport import delivered
+        if not delivered(result):
+            log.warning("[MARKET_RADAR] sent=false class=%s skipped=%s execution_effect=NONE",
+                        getattr(result, "cls", "NA"), getattr(result, "skipped", None) or "NA")
+            return False
         log.info("[MARKET_RADAR] sent=true chars=%d execution_effect=NONE", len(text))
         return True
     except asyncio.CancelledError:
