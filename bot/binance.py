@@ -1410,15 +1410,27 @@ class BinanceClient:
         return cached[-limit:]
 
     async def get_ticker(self, symbol: str) -> dict:
-        data = await self._get(
-            "/fapi/v1/ticker/24hr",
-            {"symbol": to_binance(symbol)},
+        venue_symbol = to_binance(symbol)
+        data, book = await asyncio.gather(
+            self._get("/fapi/v1/ticker/24hr", {"symbol": venue_symbol}),
+            self._get("/fapi/v1/ticker/bookTicker", {"symbol": venue_symbol}),
         )
+        # USD-M 24hr statistics do not contain the executable bid/ask.
+        # Always read fresh bookTicker; never substitute cached or last prices.
+        if not isinstance(book, dict) or book.get("symbol") != venue_symbol:
+            raise RuntimeError("BINANCE_TOP_OF_BOOK_INVALID")
+        try:
+            bid = float(book["bidPrice"])
+            ask = float(book["askPrice"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("BINANCE_TOP_OF_BOOK_INVALID") from exc
+        if not (math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask):
+            raise RuntimeError("BINANCE_TOP_OF_BOOK_INVALID")
         ticker = {
             "symbol": symbol,
             "lastPrice": float(data.get("lastPrice", 0) or 0),
-            "bid": float(data.get("bidPrice", 0) or 0),
-            "ask": float(data.get("askPrice", 0) or 0),
+            "bid": bid,
+            "ask": ask,
             "volume": float(data.get("volume", 0) or 0),
             "turnover": float(data.get("quoteVolume", 0) or 0),
         }
