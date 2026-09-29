@@ -179,22 +179,57 @@ async def reconcile(engine, log) -> bool:
     matched = 0
     changed = 0
     failures: list[str] = []
+    plan: list[tuple[str, int, int]] = []
 
+    # Phase 1: prove the whole symbol set is compatible before the first
+    # account mutation. A later unsupported/isolated/unreadable symbol must
+    # not leave earlier symbols partially reconfigured merely because it was
+    # encountered later in the loop.
     for symbol in symbols:
         try:
             before = await raw_client.get_symbol_config(symbol)
             current, _ = _config_values(before, symbol)
-            if current == target:
-                matched += 1
-                continue
-
             maximum = await _max_supported_leverage(raw_client, symbol)
             if target > maximum:
                 raise RuntimeError(
                     f"configured_leverage_exceeds_symbol_max_{maximum}"
                 )
+            if current == target:
+                matched += 1
+            else:
+                plan.append((symbol, current, maximum))
+        except Exception as exc:
+            failures.append(symbol)
+            log.critical(
+                "[BINANCE_LEVERAGE_RECONCILE] symbol=%s result=BLOCK "
+                "stage=preflight reason=%s target=%dx mutation=false "
+                "execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                symbol,
+                str(exc) or type(exc).__name__,
+                target,
+            )
 
+    if failures:
+        log.critical(
+            "[BINANCE_LEVERAGE_RECONCILE] result=BLOCK stage=preflight "
+            "target=%dx symbols=%d mismatches=%d failures=%d "
+            "mutation=false execution_effect=BLOCK_NEW_LIVE_ENTRY",
+            target,
+            len(symbols),
+            len(plan),
+            len(failures),
+        )
+        return False
+
+    # Phase 2: apply only the proven mismatch set. External/manual exposure can
+    # appear after the global precheck, so re-read exposure immediately before
+    # every account configuration write.
+    for symbol, current, maximum in plan:
+        try:
             await _validated_ownership(engine, raw_client)
+            if not await _account_exposure_clear(raw_client):
+                raise RuntimeError("account_exposure_present_before_mutation")
+
             write_error = None
             try:
                 await raw_client.set_leverage(symbol, target)
@@ -223,12 +258,17 @@ async def reconcile(engine, log) -> bool:
         except Exception as exc:
             failures.append(symbol)
             log.critical(
-                "[BINANCE_LEVERAGE_RECONCILE] symbol=%s result=BLOCK reason=%s "
-                "target=%dx execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                "[BINANCE_LEVERAGE_RECONCILE] symbol=%s result=BLOCK "
+                "stage=mutation reason=%s target=%dx "
+                "execution_effect=BLOCK_NEW_LIVE_ENTRY",
                 symbol,
                 str(exc) or type(exc).__name__,
                 target,
             )
+            # Do not continue changing other symbols after any mutation-stage
+            # uncertainty. Partial configuration is tolerated only fail-closed;
+            # the final per-candidate CROSS leverage gate remains authoritative.
+            break
 
     try:
         post_clear = await _account_exposure_clear(raw_client)
