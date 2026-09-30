@@ -12,10 +12,14 @@ from __future__ import annotations
 import math
 
 from bot import account_balance_semantics
+from bot import capital_flow_reconciliation as capital_flows
 from bot import missed_opportunity_audit
 from bot.account_capital_reader import read_account_capital
 from bot.config import cfg
-from bot.drawdown_persistence import restore_update_real_account_peak
+from bot.drawdown_persistence import (
+    restore_update_real_account_peak,
+    restore_zero_equity_peak_fail_closed,
+)
 from bot.engine import TradingEngine as CoreTradingEngine
 from bot.kucoin_position_units import KuCoinPositionUnitAdapter
 from bot.exchange import EXCHANGE_NAME
@@ -91,6 +95,25 @@ class TradingEngine(CoreTradingEngine):
             state = await account_balance_semantics.read_account_state(self.client)
             equity = float(state["equity"])
             self.risk.update(equity)
+
+            if equity <= 0.0:
+                await restore_zero_equity_peak_fail_closed(self.risk, strict=True)
+                self.risk.balance_confirmed = False
+                self.risk.invalidate_capital()
+                self._drawdown_hard_gate_active = True
+                log.critical(
+                    "[LIVE_CAPITAL_ORDER] stage=balance_refresh equity=0 "
+                    "cashflow_reconcile=SKIPPED hwm_promotion=BLOCKED "
+                    "execution_effect=BLOCK_NEW_ENTRIES"
+                )
+                return
+
+            # External cash flows are accounting events, not performance. This
+            # reconciliation MUST complete before any positive equity is allowed
+            # to promote the durable HWM.
+            await capital_flows.reconcile_external_capital_flows(
+                self.client, self.risk, equity, strict=True
+            )
             await restore_update_real_account_peak(self.risk, equity, strict=True)
 
             if equity > 0:
@@ -165,9 +188,22 @@ class TradingEngine(CoreTradingEngine):
 
         try:
             snapshot = await read_account_capital(self.client)
+            equity = float(snapshot.capital.equity)
+            if equity <= 0.0:
+                await restore_zero_equity_peak_fail_closed(self.risk, strict=True)
+                self.risk.invalidate_capital()
+                raise RuntimeError("LIVE capital unavailable for RiskManagerV3")
+
             self.risk.update_capital(snapshot.capital)
+
+            # Candidate-level capital refresh must obey the same ordering as the
+            # controlled LIVE balance path: reconcile exchange cash flows first,
+            # then allow authenticated equity to update the performance HWM.
+            await capital_flows.reconcile_external_capital_flows(
+                self.client, self.risk, equity, strict=True
+            )
             await restore_update_real_account_peak(
-                self.risk, snapshot.capital.equity, strict=True
+                self.risk, equity, strict=True
             )
             if not self.risk._v3.can_open(len(self.positions)):
                 self.risk.invalidate_capital()
