@@ -117,6 +117,50 @@ async def _write_peak_with_provenance(*, old_peak, new_peak, equity, reason, evi
         raise db.PersistenceError("atomic HWM/provenance write not confirmed")
 
 
+async def restore_zero_equity_peak_fail_closed(risk, *, strict: bool = True) -> float:
+    """Restore the durable positive HWM while current authenticated equity is zero.
+
+    Zero account equity is a valid observable account state but never an
+    executable capital state. The HWM is preserved, drawdown is fixed at 100%,
+    RiskManagerV3 is invalidated, and no HWM/cash-flow write is performed.
+    This exists only so read-only reconciliation/forensics can keep running
+    without weakening the new-entry gate.
+    """
+    persisted, source = await _load_peak(risk, strict=strict)
+    if persisted is None:
+        raise db.PersistenceError(
+            "cannot preserve zero-equity drawdown without durable equity peak"
+        )
+
+    peak = _positive_finite(persisted, "persisted equity peak")
+    setattr(risk, _CACHE_ATTR, peak)
+
+    v3 = getattr(risk, "_v3", None)
+    if v3 is not None:
+        if hasattr(v3, "restore_peak_equity"):
+            v3.restore_peak_equity(peak)
+        if hasattr(v3, "invalidate"):
+            v3.invalidate()
+
+    legacy = getattr(risk, "_legacy", risk)
+    existing = float(getattr(legacy, "peak_balance", 0.0) or 0.0)
+    if math.isfinite(existing) and existing > peak:
+        peak = existing
+    legacy.balance = 0.0
+    legacy.peak_balance = peak
+    legacy.drawdown = 1.0
+    legacy.balance_confirmed = False
+
+    log.critical(
+        "[DURABLE_DRAWDOWN] equity=0.0000 peak_equity=%.4f drawdown=100.00%% "
+        "source=%s persistence=unchanged zero_equity=true "
+        "capital_confirmed=false execution_effect=BLOCK_NEW_ENTRIES",
+        peak,
+        source,
+    )
+    return peak
+
+
 async def restore_update_real_account_peak(risk, equity: float, *, strict: bool = True) -> float:
     equity = _positive_finite(equity, "account equity")
     persisted, _ = await _load_peak(risk, strict=strict)
