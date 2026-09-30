@@ -144,6 +144,199 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
+    async def test_20260930_zero_crossing_repair_is_evidence_bound_and_preserves_drawdown(self):
+        import bot.cash_flow_ledger as cfl
+
+        pre = 7.40782133
+        post = 19.18862133
+        last_good_peak = 8.8015
+        bad_peak = post * post / pre
+        repaired = post * last_good_peak / pre
+        ledger = {
+            "version": 1,
+            "pending": [],
+            "applied": [{
+                "reconciliation_id": "auto-176be1f3ca8bbe91",
+                "method": "LEDGER_RECONSTRUCTED",
+                "tran_ids": ["416195536884", "416435307318"],
+                "pre_flow_equity": pre,
+                "post_flow_equity": post,
+                "previous_hwm": post,
+                "adjusted_hwm": bad_peak,
+                "equity_at_reconciliation": post,
+            }],
+        }
+        ledger_raw = json.dumps(ledger)
+        provenance_raw = hwm_provenance.build_hwm_provenance(
+            reason="external_capital_flow_rebase",
+            old_peak=post,
+            new_peak=bad_peak,
+            account_equity=post,
+            evidence_ref=(
+                "cash_flow_ledger:LEDGER_RECONSTRUCTED:"
+                "auto-176be1f3ca8bbe91"
+            ),
+        )
+        peak_raw = format(bad_peak, ".17g")
+
+        async def load(key, strict=True):
+            if key == DURABLE_EQUITY_PEAK_KEY:
+                return peak_raw
+            if key == cfl.LEDGER_KEY:
+                return ledger_raw
+            if key == hwm_namespace.provenance_key():
+                return provenance_raw
+            if key == "risk:hwm_repair:2026-09-30-zero-crossing:v1":
+                return None
+            raise AssertionError(key)
+
+        with patch(
+            "bot.drawdown_persistence.db.load_key_value",
+            AsyncMock(side_effect=load),
+        ), patch(
+            "bot.drawdown_persistence.save_key_values_atomic_cas",
+            AsyncMock(return_value=True),
+        ) as cas:
+            peak = await restore_update_real_account_peak(
+                self.risk, post, strict=True
+            )
+
+        self.assertAlmostEqual(peak, repaired, places=10)
+        self.assertAlmostEqual(
+            self.legacy.drawdown,
+            (last_good_peak - pre) / last_good_peak,
+            places=10,
+        )
+        self.assertAlmostEqual(self.legacy.peak_balance, repaired, places=10)
+        cas.assert_awaited_once()
+        expected = cas.await_args.kwargs["expected"]
+        self.assertEqual(expected[DURABLE_EQUITY_PEAK_KEY], peak_raw)
+        self.assertEqual(expected[cfl.LEDGER_KEY], ledger_raw)
+        self.assertIsNone(
+            expected["risk:hwm_repair:2026-09-30-zero-crossing:v1"]
+        )
+
+    async def test_20260930_zero_crossing_repair_refuses_evidence_mismatch(self):
+        import bot.cash_flow_ledger as cfl
+
+        pre = 7.40782133
+        post = 19.18862133
+        bad_peak = post * post / pre
+        peak_raw = format(bad_peak, ".17g")
+        wrong_ledger = json.dumps({
+            "version": 1,
+            "pending": [],
+            "applied": [{
+                "reconciliation_id": "auto-176be1f3ca8bbe91",
+                "method": "LEDGER_RECONSTRUCTED",
+                "tran_ids": ["WRONG", "416435307318"],
+                "pre_flow_equity": pre,
+                "post_flow_equity": post,
+                "previous_hwm": post,
+                "adjusted_hwm": bad_peak,
+                "equity_at_reconciliation": post,
+            }],
+        })
+        provenance_raw = hwm_provenance.build_hwm_provenance(
+            reason="external_capital_flow_rebase",
+            old_peak=post,
+            new_peak=bad_peak,
+            account_equity=post,
+            evidence_ref=(
+                "cash_flow_ledger:LEDGER_RECONSTRUCTED:"
+                "auto-176be1f3ca8bbe91"
+            ),
+        )
+
+        async def load(key, strict=True):
+            if key == DURABLE_EQUITY_PEAK_KEY:
+                return peak_raw
+            if key == cfl.LEDGER_KEY:
+                return wrong_ledger
+            if key == hwm_namespace.provenance_key():
+                return provenance_raw
+            if key == "risk:hwm_repair:2026-09-30-zero-crossing:v1":
+                return None
+            raise AssertionError(key)
+
+        with patch(
+            "bot.drawdown_persistence.db.load_key_value",
+            AsyncMock(side_effect=load),
+        ), patch(
+            "bot.drawdown_persistence.save_key_values_atomic_cas",
+            AsyncMock(return_value=True),
+        ) as cas, patch(
+            "bot.drawdown_persistence.save_key_values_atomic",
+            AsyncMock(return_value=True),
+        ):
+            peak = await restore_update_real_account_peak(
+                self.risk, post, strict=True
+            )
+
+        self.assertAlmostEqual(peak, bad_peak, places=10)
+        cas.assert_not_awaited()
+
+    async def test_20260930_zero_crossing_repair_marker_makes_repair_one_shot(self):
+        import bot.cash_flow_ledger as cfl
+
+        pre = 7.40782133
+        post = 19.18862133
+        bad_peak = post * post / pre
+        peak_raw = format(bad_peak, ".17g")
+        ledger_raw = json.dumps({
+            "version": 1,
+            "pending": [],
+            "applied": [{
+                "reconciliation_id": "auto-176be1f3ca8bbe91",
+                "method": "LEDGER_RECONSTRUCTED",
+                "tran_ids": ["416195536884", "416435307318"],
+                "pre_flow_equity": pre,
+                "post_flow_equity": post,
+                "previous_hwm": post,
+                "adjusted_hwm": bad_peak,
+                "equity_at_reconciliation": post,
+            }],
+        })
+        provenance_raw = hwm_provenance.build_hwm_provenance(
+            reason="external_capital_flow_rebase",
+            old_peak=post,
+            new_peak=bad_peak,
+            account_equity=post,
+            evidence_ref=(
+                "cash_flow_ledger:LEDGER_RECONSTRUCTED:"
+                "auto-176be1f3ca8bbe91"
+            ),
+        )
+
+        async def load(key, strict=True):
+            if key == DURABLE_EQUITY_PEAK_KEY:
+                return peak_raw
+            if key == cfl.LEDGER_KEY:
+                return ledger_raw
+            if key == hwm_namespace.provenance_key():
+                return provenance_raw
+            if key == "risk:hwm_repair:2026-09-30-zero-crossing:v1":
+                return '{"already":"done"}'
+            raise AssertionError(key)
+
+        with patch(
+            "bot.drawdown_persistence.db.load_key_value",
+            AsyncMock(side_effect=load),
+        ), patch(
+            "bot.drawdown_persistence.save_key_values_atomic_cas",
+            AsyncMock(return_value=True),
+        ) as cas, patch(
+            "bot.drawdown_persistence.save_key_values_atomic",
+            AsyncMock(return_value=True),
+        ):
+            peak = await restore_update_real_account_peak(
+                self.risk, post, strict=True
+            )
+
+        self.assertAlmostEqual(peak, bad_peak, places=10)
+        cas.assert_not_awaited()
+
+
 class RiskManagerV3PeakRestoreTests(unittest.TestCase):
     def test_restore_peak_does_not_confirm_capital(self):
         risk = RiskManagerV3()
