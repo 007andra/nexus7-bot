@@ -196,6 +196,23 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
         return False, "durable_episode_mismatch"
     if str(state.get("status") or "") != "ARMED":
         return False, "durable_episode_disarmed"
+    try:
+        armed_drawdown = float(state.get("armed_drawdown"))
+        worst_drawdown = float(state.get("worst_drawdown"))
+    except (TypeError, ValueError):
+        return False, "durable_drawdown_malformed"
+    if (
+        not math.isfinite(armed_drawdown)
+        or not math.isfinite(worst_drawdown)
+        or armed_drawdown < 0
+        or worst_drawdown < armed_drawdown
+    ):
+        return False, "durable_drawdown_malformed"
+    # A previous process may have observed worsening drawdown and crashed before
+    # persisting DISARMED. Refuse restart if the current authenticated drawdown
+    # is worse than the original arm point.
+    if float(drawdown) > armed_drawdown + 1e-12:
+        return False, "restart_drawdown_worsened"
     if state.get("expires_at") != policy.expires_at.isoformat():
         return False, "durable_expiry_mismatch"
     if float(state.get("max_drawdown", -1)) != float(policy.max_drawdown):
