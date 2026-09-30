@@ -20,7 +20,7 @@ import math
 import os
 
 from bot.config import cfg
-from bot import market_radar, startup_ready_notification
+from bot import drawdown_recovery, market_radar, startup_ready_notification
 
 
 MARGIN_FRACTION = 0.50
@@ -123,20 +123,44 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                 _risk_override_enabled(),
             )
             if self.drawdown >= cfg.MAX_DRAWDOWN:
-                if not _risk_override_enabled():
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "override=false entries_blocked=true",
+                if _risk_override_enabled():
+                    log.critical(
+                        "[DRAWDOWN_OVERRIDE] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "override=true entries_blocked=false",
                         float(self.drawdown) * 100.0,
                         float(cfg.MAX_DRAWDOWN) * 100.0,
                     )
-                    return False
-                log.critical(
-                    "[DRAWDOWN_OVERRIDE] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "override=true entries_blocked=false",
-                    float(self.drawdown) * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
-                )
+                elif drawdown_recovery.context_allows(
+                    self.drawdown, open_positions=n
+                ):
+                    ctx = drawdown_recovery.current_context()
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_GATE] stage=LEGACY_CANDIDATE "
+                        "episode=%s drawdown=%.2f%% result=ALLOW_CANDIDATE_ONLY",
+                        getattr(ctx, "episode_id", "unknown"),
+                        float(self.drawdown) * 100.0,
+                    )
+                else:
+                    scan_allowed, recovery_reason = drawdown_recovery.scan_decision(
+                        self.drawdown, n
+                    )
+                    if scan_allowed:
+                        log.warning(
+                            "[DRAWDOWN_RECOVERY_GATE] stage=SCAN drawdown=%.2f%% "
+                            "result=ALLOW_SCAN_ONLY reason=%s execution_authority=false",
+                            float(self.drawdown) * 100.0,
+                            recovery_reason,
+                        )
+                    else:
+                        log.error(
+                            "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
+                            "override=false recovery=false recovery_reason=%s "
+                            "entries_blocked=true",
+                            float(self.drawdown) * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            recovery_reason,
+                        )
+                        return False
             if n >= cfg.MAX_POSITIONS:
                 log.info("⛔ %s/%s posições → aguardando", n, cfg.MAX_POSITIONS)
                 return False
@@ -152,20 +176,31 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
             if self.equity <= 0 or self.available_collateral <= 0:
                 return False
             if self.drawdown >= cfg.MAX_DRAWDOWN:
-                if not _risk_override_enabled():
+                if _risk_override_enabled():
+                    log.critical(
+                        "[DRAWDOWN_OVERRIDE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "override=true entries_blocked=false",
+                        float(self.drawdown) * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                    )
+                elif drawdown_recovery.context_allows(
+                    self.drawdown, open_positions=open_positions
+                ):
+                    ctx = drawdown_recovery.current_context()
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_GATE] stage=RISK_V3 episode=%s "
+                        "drawdown=%.2f%% result=ALLOW_CANDIDATE_ONLY",
+                        getattr(ctx, "episode_id", "unknown"),
+                        float(self.drawdown) * 100.0,
+                    )
+                else:
                     log.error(
                         "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "override=false entries_blocked=true",
+                        "override=false recovery_context=false entries_blocked=true",
                         float(self.drawdown) * 100.0,
                         float(cfg.MAX_DRAWDOWN) * 100.0,
                     )
                     return False
-                log.critical(
-                    "[DRAWDOWN_OVERRIDE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "override=true entries_blocked=false",
-                    float(self.drawdown) * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
-                )
             if open_positions >= cfg.MAX_POSITIONS:
                 return False
             return True
