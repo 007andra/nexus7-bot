@@ -109,8 +109,10 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 await restore_update_real_account_peak(self.risk, value, strict=True)
 
 
-    async def test_zero_equity_preserves_durable_peak_and_forces_100pct_drawdown(self):
+    async def test_zero_equity_preserves_highest_known_peak_and_forces_100pct_drawdown(self):
         self.legacy.balance_confirmed = True
+        # setUp initializes the in-memory peak at 100.0. A lower persisted
+        # value must never lower that known HWM during a zero-equity event.
         with patch(
             "bot.drawdown_persistence.db.load_key_value",
             AsyncMock(return_value="8.8015"),
@@ -122,9 +124,9 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 self.risk, strict=True
             )
 
-        self.assertEqual(peak, 8.8015)
+        self.assertEqual(peak, 100.0)
         self.assertEqual(self.legacy.balance, 0.0)
-        self.assertEqual(self.legacy.peak_balance, 8.8015)
+        self.assertEqual(self.legacy.peak_balance, 100.0)
         self.assertEqual(self.legacy.drawdown, 1.0)
         self.assertFalse(self.legacy.balance_confirmed)
         self.assertFalse(self.risk.professional_snapshot.confirmed)
