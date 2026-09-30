@@ -125,8 +125,9 @@ authorization independently, so they cannot be bypassed by recovery mode.
 ## Disabled behavior
 
 With `LIVE_DRAWDOWN_RECOVERY_APPROVED` absent or false, the lifecycle
-reconciler returns immediately without a database read. Production behavior is
-therefore unchanged until explicit authorization is supplied.
+reconciler returns immediately without a database read and the existing
+cash-flow refresh cadence is preserved. Production behavior is therefore
+unchanged until explicit authorization is supplied.
 
 ## Current production incident
 
