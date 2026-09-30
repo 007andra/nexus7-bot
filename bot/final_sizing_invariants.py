@@ -168,8 +168,23 @@ def install(engine_module, pilot_cap, log) -> None:
             return 0.0
 
         try:
+            from bot.drawdown_recovery import recovery_size_multiplier
+            drawdown = float(getattr(engine.risk, "drawdown", 0.0) or 0.0)
+            recovery_mult = recovery_size_multiplier(drawdown)
+            if recovery_mult <= 0:
+                log.critical(
+                    "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK "
+                    "reason=drawdown_authorization_invalid",
+                    symbol,
+                )
+                pilot_cap._PILOT_FINAL_QTY.set(0.0)
+                return 0.0
             risk_qty = float(engine.risk.size(
-                symbol, price_f, engine.instruments, open_positions=engine.positions,
+                symbol,
+                price_f,
+                engine.instruments,
+                size_mult=recovery_mult,
+                open_positions=engine.positions,
             ))
         except Exception as exc:
             log.critical(
@@ -236,11 +251,11 @@ def install(engine_module, pilot_cap, log) -> None:
             "[FINAL_SIZING_INVARIANT] symbol=%s result=PASS operator_margin_cap_qty=%.12g "
             "stop_risk_qty=%.12g final_qty=%.12g binding=%s cap_margin=%.6f "
             "cap_notional=%.6f final_notional=%.6f final_margin=%.6f margin_cap_pct=%.2f%% "
-            "leverage=%.0fx %s",
+            "leverage=%.0fx recovery_size_mult=%.6f %s",
             symbol, target_qty, risk_qty, final_qty,
             binding_constraint(target_qty=target_qty, risk_qty=risk_qty),
             target_margin, target_notional, final_qty * price_f, final_margin,
-            fraction * 100.0, leverage, sizing_contract(fraction),
+            fraction * 100.0, leverage, recovery_mult, sizing_contract(fraction),
         )
         return final_qty
 
