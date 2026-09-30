@@ -139,16 +139,16 @@ class PredispatchDrawdownRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, ["ATOMUSDT"])
         self.assertTrue(any("result=OVERRIDE" in l for l in log.lines))
 
-    async def test_unreadable_drawdown_fails_closed(self):
+    def test_unreadable_drawdown_fails_closed(self):
         engine = SimpleNamespace(risk=SimpleNamespace(drawdown=float("nan")))
-        self.assertFalse(await live._entry_drawdown_allows(engine, _Log()))
+        self.assertFalse(live._entry_drawdown_allows(engine, _Log()))
         engine = SimpleNamespace(risk=SimpleNamespace())
-        self.assertFalse(await live._entry_drawdown_allows(engine, _Log()))
+        self.assertFalse(live._entry_drawdown_allows(engine, _Log()))
 
-    async def test_confirmed_v3_drawdown_is_also_enforced(self):
+    def test_confirmed_v3_drawdown_is_also_enforced(self):
         v3 = SimpleNamespace(confirmed=True, drawdown=0.12)
         engine = SimpleNamespace(risk=SimpleNamespace(_legacy=SimpleNamespace(drawdown=0.05), _v3=v3))
-        self.assertFalse(await live._entry_drawdown_allows(engine, _Log()))
+        self.assertFalse(live._entry_drawdown_allows(engine, _Log()))
 
 
 if __name__ == "__main__":
