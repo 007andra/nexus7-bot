@@ -30,6 +30,7 @@ from decimal import Decimal, ROUND_FLOOR
 from bot import account_balance_semantics as account_semantics
 from bot import capital_flow_reconciliation as capital_flows
 from bot import external_position_performance as external_performance
+from bot import binance_hwm_incident_repair as hwm_incident_repair
 from bot.drawdown_persistence import (
     restore_real_account_peak_without_new_high,
     restore_update_real_account_peak,
@@ -145,6 +146,10 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
             strict=True,
         )
         engine._pilot_last_capital_flow_check = now
+
+    await hwm_incident_repair.repair_if_needed(
+        engine.risk, equity, strict=True
+    )
 
     performance_mode = await external_performance.evaluate(engine, state, log=log)
     if performance_mode in {"FREEZE", "QUARANTINE"}:
