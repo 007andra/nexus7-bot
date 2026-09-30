@@ -188,7 +188,7 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
     return state
 
 
-async def _entry_drawdown_allows(engine, log) -> bool:
+def _entry_drawdown_allows(engine, log) -> bool:
     """Hard drawdown gate on the equity read that was just refreshed.
 
     ``_refresh_entry_balance`` is called again immediately before the order
@@ -255,37 +255,30 @@ async def _entry_drawdown_allows(engine, log) -> bool:
                 recovery.episode_id,
             )
             return False
-        from bot.drawdown_recovery import ensure_durable_episode, record_drawdown_observation
-        durable_ok, durable_reason = await ensure_durable_episode(drawdown, strict=True)
-        if not durable_ok:
+        receipt = getattr(engine, "_drawdown_recovery_receipt", None)
+        if not isinstance(receipt, dict) or receipt.get("episode_id") != recovery.episode_id:
             log.error(
                 "[PILOT_PREDISPATCH_RECOVERY] result=BLOCK episode=%s "
-                "reason=%s durable_receipt=false execution_effect=BLOCK_NEW_ENTRY",
-                recovery.episode_id, durable_reason,
+                "reason=durable_receipt_not_prevalidated execution_effect=BLOCK_NEW_ENTRY",
+                recovery.episode_id,
             )
             return False
-        observation_ok, observation_reason = await record_drawdown_observation(
-            drawdown, strict=True
-        )
-        if not observation_ok:
+        if receipt.get("status") != "ARMED":
             log.error(
                 "[PILOT_PREDISPATCH_RECOVERY] result=BLOCK episode=%s "
-                "reason=%s execution_effect=BLOCK_NEW_ENTRY",
-                recovery.episode_id, observation_reason,
+                "reason=durable_episode_disarmed execution_effect=BLOCK_NEW_ENTRY",
+                recovery.episode_id,
             )
             return False
         log.critical(
             "[PILOT_PREDISPATCH_RECOVERY] result=PASS episode=%s drawdown=%.4f%% "
             "normal_limit=%.4f%% recovery_ceiling=%.4f%% recovery_risk_pct=%.4f%% "
-            "durable_receipt=true restart_contract=%s observation=%s "
-            "scope=drawdown_threshold_only other_gates_unchanged=true",
+            "durable_receipt=true scope=drawdown_threshold_only other_gates_unchanged=true",
             recovery.episode_id,
             drawdown * 100.0,
             limit * 100.0,
             float(recovery.max_drawdown) * 100.0,
             float(recovery.risk_pct) * 100.0,
-            durable_reason,
-            observation_reason,
         )
         return True
 
@@ -450,7 +443,7 @@ def install(TradingEngine, log) -> None:
             if available <= 0:
                 log.warning("[PILOT_LIVE_BALANCE] entry blocked: available collateral <= 0")
                 return False
-            return await _entry_drawdown_allows(self, log)
+            return _entry_drawdown_allows(self, log)
         except Exception as exc:
             self.risk.balance_confirmed = False
             log.critical(
