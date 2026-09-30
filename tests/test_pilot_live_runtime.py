@@ -75,6 +75,7 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(out, state)
         reconcile.assert_awaited_once_with(engine.client, engine.risk, 100.0, strict=True)
+        repair.assert_awaited_once_with(engine.risk, 100.0, strict=True)
         self.assertEqual(engine.risk.balance, 100.0)
         self.assertEqual(engine._pilot_account_equity, 100.0)
         self.assertEqual(engine._pilot_available_balance, 25.0)
