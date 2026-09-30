@@ -14,7 +14,7 @@ import os
 
 from bot.config import cfg
 from bot import database as db
-from bot.atomic_key_value import save_key_values_atomic_cas, AtomicKeyValueConflict
+from bot.atomic_key_value import save_key_values_atomic_cas, CompareAndSwapConflict
 
 AUTH_ENV = "LIVE_RECOVERY_AUTHORIZED"
 EPISODE_ENV = "LIVE_RECOVERY_EPISODE_ID"
@@ -186,7 +186,7 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
             ok = await save_key_values_atomic_cas(
                 ((STATE_KEY, payload),), expected={STATE_KEY: None}, strict=strict,
             )
-        except AtomicKeyValueConflict:
+        except CompareAndSwapConflict:
             return False, "durable_arm_conflict"
         if not ok:
             return False, "durable_arm_unconfirmed"
@@ -225,7 +225,7 @@ async def record_drawdown_observation(drawdown: float, *, strict: bool = True) -
         await save_key_values_atomic_cas(
             ((STATE_KEY, payload),), expected={STATE_KEY: raw}, strict=strict,
         )
-    except AtomicKeyValueConflict:
+    except CompareAndSwapConflict:
         return False, "durable_observation_conflict"
     return status == "ARMED", reason
 
@@ -252,6 +252,6 @@ async def record_recovery_close(net_pnl: float, *, strict: bool = True) -> tuple
         await save_key_values_atomic_cas(
             ((STATE_KEY, payload),), expected={STATE_KEY: raw}, strict=strict,
         )
-    except AtomicKeyValueConflict:
+    except CompareAndSwapConflict:
         return False, "durable_close_conflict"
     return False, "recovery_trade_net_loss"
