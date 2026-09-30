@@ -110,6 +110,8 @@ class PredispatchDrawdownRaceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(live.account_semantics, "read_account_state", reads), \
                 patch.object(live.capital_flows, "reconcile_external_capital_flows",
                              AsyncMock(return_value={"applied": 0})), \
+                patch.object(live.hwm_incident_repair, "repair_if_needed",
+                             AsyncMock(return_value={"status": "NOT_MATCHED"})), \
                 patch.object(live, "restore_update_real_account_peak", AsyncMock(return_value=None)), \
                 patch.object(live, "_run_readonly_preflight", AsyncMock(return_value=True)):
             result = await engine._open(SimpleNamespace(symbol="ATOMUSDT"))
