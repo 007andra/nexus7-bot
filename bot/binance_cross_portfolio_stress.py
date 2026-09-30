@@ -451,6 +451,61 @@ def install(TradingEngine, log) -> None:
             )
             return False
 
+        # Last recovery-specific mutation before core durable order intent and
+        # exchange dispatch: consume the one-shot episode. Normal drawdown is a
+        # no-op here. Any persistence ambiguity blocks the entry.
+        try:
+            from bot.drawdown_recovery import consume_for_dispatch
+
+            risk = getattr(self, "risk", None)
+            legacy = getattr(risk, "_legacy", risk)
+            dd_values = [getattr(legacy, "drawdown", None)]
+            v3 = getattr(risk, "_v3", None)
+            if v3 is not None and getattr(v3, "confirmed", False):
+                dd_values.append(getattr(v3, "drawdown", None))
+            drawdowns = [
+                float(value)
+                for value in dd_values
+                if value is not None
+            ]
+            if (
+                not drawdowns
+                or any(not math.isfinite(value) or value < 0 for value in drawdowns)
+            ):
+                raise ValueError("drawdown_unreadable")
+            dispatch_ok, dispatch_reason, receipt = await consume_for_dispatch(
+                self,
+                symbol=getattr(sig, "symbol", ""),
+                qty=qty,
+                drawdown=max(drawdowns),
+                strict=True,
+            )
+        except Exception as exc:
+            log.critical(
+                "[DRAWDOWN_RECOVERY_DISPATCH] symbol=%s result=BLOCK "
+                "reason=%s execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                getattr(sig, "symbol", "?"),
+                type(exc).__name__,
+            )
+            return False
+
+        if not dispatch_ok:
+            log.critical(
+                "[DRAWDOWN_RECOVERY_DISPATCH] symbol=%s result=BLOCK reason=%s "
+                "execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                getattr(sig, "symbol", "?"),
+                dispatch_reason,
+            )
+            return False
+        if dispatch_reason == "consumed":
+            log.critical(
+                "[DRAWDOWN_RECOVERY_DISPATCH] symbol=%s result=PASS episode=%s "
+                "token_state=CONSUMED one_shot=true retry_requires_new_episode=true "
+                "execution_effect=ALLOW_THIS_DISPATCH_ONLY",
+                getattr(sig, "symbol", "?"),
+                str((receipt or {}).get("episode_id") or "UNKNOWN"),
+            )
+
         log.warning(
             "[BINANCE_CROSS_STRESS] symbol=%s result=PASS reason=%s mode=%s "
             "risk_rate=%.4f limit=%.4f stressed_margin=%.8f "
