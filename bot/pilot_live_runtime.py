@@ -436,6 +436,7 @@ def install(TradingEngine, log) -> None:
             # Keep the long-standing synchronous threshold helper intact for
             # tests/diagnostics. Only the LIVE async refresh owns durable
             # Recovery receipt I/O.
+            from bot.config import cfg
             from bot.operator_runtime_policy import _risk_override_enabled
             if not _risk_override_enabled():
                 legacy = getattr(self.risk, "_legacy", self.risk)
