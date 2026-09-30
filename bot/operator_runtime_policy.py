@@ -124,14 +124,25 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
             )
             if self.drawdown >= cfg.MAX_DRAWDOWN:
                 if not _risk_override_enabled():
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "override=false entries_blocked=true",
+                    from bot.drawdown_recovery import threshold_decision
+                    recovery_allowed, recovery_reason, recovery = threshold_decision(self.drawdown)
+                    if not (recovery_allowed and recovery_reason == "recovery_threshold_exception"):
+                        log.error(
+                            "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
+                            "override=false recovery_reason=%s entries_blocked=true",
+                            float(self.drawdown) * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            recovery_reason,
+                        )
+                        return False
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_SCAN] episode=%s drawdown=%.2f%% "
+                        "threshold_exception=true final_authority=predispatch",
+                        recovery.episode_id,
                         float(self.drawdown) * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
                     )
-                    return False
-                log.critical(
+                else:
+                    log.critical(
                     "[DRAWDOWN_OVERRIDE] drawdown=%.2f%% configured_limit=%.2f%% "
                     "override=true entries_blocked=false",
                     float(self.drawdown) * 100.0,
@@ -153,14 +164,25 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                 return False
             if self.drawdown >= cfg.MAX_DRAWDOWN:
                 if not _risk_override_enabled():
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "override=false entries_blocked=true",
+                    from bot.drawdown_recovery import threshold_decision
+                    recovery_allowed, recovery_reason, recovery = threshold_decision(self.drawdown)
+                    if not (recovery_allowed and recovery_reason == "recovery_threshold_exception"):
+                        log.error(
+                            "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
+                            "override=false recovery_reason=%s entries_blocked=true",
+                            float(self.drawdown) * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            recovery_reason,
+                        )
+                        return False
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_SCAN_V3] episode=%s drawdown=%.2f%% "
+                        "threshold_exception=true final_authority=predispatch",
+                        recovery.episode_id,
                         float(self.drawdown) * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
                     )
-                    return False
-                log.critical(
+                else:
+                    log.critical(
                     "[DRAWDOWN_OVERRIDE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
                     "override=true entries_blocked=false",
                     float(self.drawdown) * 100.0,
