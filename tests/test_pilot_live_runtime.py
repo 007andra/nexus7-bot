@@ -69,6 +69,10 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "reconcile_external_capital_flows",
             AsyncMock(return_value={"applied": 0, "bootstrap": False}),
         ) as reconcile, patch.object(
+            live.hwm_incident_repair,
+            "repair_if_needed",
+            AsyncMock(return_value={"status": "NOT_MATCHED"}),
+        ) as repair, patch.object(
             live, "restore_update_real_account_peak", AsyncMock(return_value=None)
         ):
             out = await live._refresh_account(engine, _Log())
@@ -424,6 +428,10 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             live.capital_flows,
             "reconcile_external_capital_flows",
             AsyncMock(return_value={"applied": 0, "bootstrap": False}),
+        ), patch.object(
+            live.hwm_incident_repair,
+            "repair_if_needed",
+            AsyncMock(return_value={"status": "NOT_MATCHED"}),
         ), patch.object(
             live, "restore_update_real_account_peak", AsyncMock(side_effect=restore_hwm)
         ), patch.object(
