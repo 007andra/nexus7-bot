@@ -328,9 +328,53 @@ class DrawdownRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
             drawdown=DD,
         )
 
-    async def test_new_increase_intent_consumes_only_entry(self):
+    async def test_final_dispatch_reserves_episode_before_network_boundary(self):
         ctx = self._ctx()
         state = self._armed()
+        raw = recovery._dump(state)
+        engine = fake_engine()
+        captured = {}
+
+        async def cas(items, expected, strict=True):
+            captured.update(json.loads(dict(items)[recovery.STATE_KEY]))
+            return True
+
+        token = recovery.bind_context(ctx)
+        try:
+            with patch.dict(
+                os.environ, {recovery.BROAD_OVERRIDE_ENV: "false"}, clear=True
+            ), patch.object(
+                cfg, "MAX_DRAWDOWN", 0.10
+            ), patch.object(
+                recovery.db, "load_key_value", AsyncMock(return_value=raw)
+            ), patch.object(
+                recovery, "save_key_values_atomic_cas", AsyncMock(side_effect=cas)
+            ):
+                reserved = await recovery.reserve_dispatch(
+                    engine,
+                    ctx,
+                    symbol="AVAXUSDT",
+                    qty=1.25,
+                    drawdown=DD,
+                )
+        finally:
+            recovery.reset_context(token)
+
+        self.assertTrue(reserved)
+        self.assertEqual(captured["status"], "RESERVED")
+        self.assertEqual(captured["entry_count"], 1)
+        self.assertEqual(captured["entry_symbol"], "AVAXUSDT")
+        self.assertAlmostEqual(captured["reserved_qty"], 1.25)
+
+    async def test_new_increase_intent_promotes_reserved_episode_to_in_trade(self):
+        ctx = self._ctx()
+        state = self._armed()
+        state.update({
+            "status": "RESERVED",
+            "entry_count": 1,
+            "entry_symbol": "AVAXUSDT",
+            "reserved_qty": 1.25,
+        })
         raw = recovery._dump(state)
         engine = fake_engine(records=[{
             "client_oid": "bgx7-new",
@@ -368,6 +412,48 @@ class DrawdownRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertFalse(consumed)
         load.assert_not_awaited()
+
+    async def test_reserved_attempt_without_position_or_pending_order_disarms(self):
+        state = self._armed()
+        state.update({
+            "status": "RESERVED",
+            "entry_count": 1,
+            "entry_symbol": "AVAXUSDT",
+            "reserved_qty": 1.25,
+        })
+        raw = recovery._dump(state)
+        engine = fake_engine()
+        captured = {}
+
+        async def load(_key, strict=True):
+            return raw
+
+        async def cas(items, expected, strict=True):
+            captured.update(json.loads(dict(items)[recovery.STATE_KEY]))
+            return True
+
+        with patch.dict(os.environ, env_config(), clear=True), patch.object(
+            cfg, "MAX_DRAWDOWN", 0.10
+        ), patch.object(cfg, "MAX_RISK_PCT", 0.01), patch.object(
+            recovery.durable_execution, "can_open", return_value=True
+        ), patch.object(
+            recovery, "_ownership_valid", AsyncMock(return_value=True)
+        ), patch.object(
+            recovery, "_private_stream_valid", return_value=True
+        ), patch.object(
+            recovery.db, "load_key_value", AsyncMock(side_effect=load)
+        ), patch.object(
+            recovery, "save_key_values_atomic_cas", AsyncMock(side_effect=cas)
+        ):
+            await recovery.reconcile_episode(
+                engine, equity=EQUITY, hwm=HWM, drawdown=DD
+            )
+
+        self.assertEqual(captured["status"], "DISARMED")
+        self.assertEqual(
+            captured["disarm_reason"],
+            "reserved_attempt_completed_reauth_required",
+        )
 
     async def test_in_trade_episode_waits_while_entry_intent_pending(self):
         state = self._armed()
