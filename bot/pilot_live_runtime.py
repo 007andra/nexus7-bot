@@ -188,7 +188,86 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
     return state
 
 
-async def _entry_drawdown_allows(engine, log) -> bool:
+async def _prevalidate_drawdown_recovery(engine, log) -> None:
+    """Validate durable Recovery state before the synchronous final threshold gate."""
+    engine._drawdown_recovery_receipt = None
+
+    from bot.config import cfg
+    from bot.operator_runtime_policy import _risk_override_enabled
+
+    if bool(getattr(engine, "_external_performance_quarantine", False)):
+        return
+    if _risk_override_enabled():
+        return
+
+    risk = getattr(engine, "risk", None)
+    legacy = getattr(risk, "_legacy", risk)
+    candidates = [getattr(legacy, "drawdown", None)]
+    v3 = getattr(risk, "_v3", None)
+    if v3 is not None and getattr(v3, "confirmed", False):
+        candidates.append(getattr(v3, "drawdown", None))
+    try:
+        values = [float(v) for v in candidates if v is not None]
+    except (TypeError, ValueError):
+        return
+    if not values or any(v != v or v < 0 or v == float("inf") for v in values):
+        return
+
+    drawdown = max(values)
+    if drawdown < float(cfg.MAX_DRAWDOWN):
+        return
+
+    from bot.drawdown_recovery import (
+        ensure_durable_episode,
+        record_drawdown_observation,
+        threshold_decision,
+    )
+
+    recovery_allowed, recovery_reason, recovery = threshold_decision(drawdown)
+    if not (
+        recovery_allowed
+        and recovery_reason == "recovery_threshold_exception"
+    ):
+        return
+    if bool(getattr(engine, "positions", {})):
+        return
+
+    durable_ok, durable_reason = await ensure_durable_episode(
+        drawdown, strict=True
+    )
+    if not durable_ok:
+        log.error(
+            "[PILOT_RECOVERY_PREVALIDATE] result=BLOCK episode=%s reason=%s",
+            recovery.episode_id, durable_reason,
+        )
+        return
+
+    observation_ok, observation_reason = await record_drawdown_observation(
+        drawdown, strict=True
+    )
+    if not observation_ok:
+        log.error(
+            "[PILOT_RECOVERY_PREVALIDATE] result=BLOCK episode=%s reason=%s",
+            recovery.episode_id, observation_reason,
+        )
+        return
+
+    engine._drawdown_recovery_receipt = {
+        "episode_id": recovery.episode_id,
+        "status": "ARMED",
+        "durable_reason": durable_reason,
+        "observation_reason": observation_reason,
+    }
+    log.warning(
+        "[PILOT_RECOVERY_PREVALIDATE] result=PASS episode=%s "
+        "durable_reason=%s observation=%s execution_effect=NONE",
+        recovery.episode_id,
+        durable_reason,
+        observation_reason,
+    )
+
+
+def _entry_drawdown_allows(engine, log) -> bool:
     """Hard drawdown gate on the equity read that was just refreshed.
 
     ``_refresh_entry_balance`` is called again immediately before the order
@@ -442,8 +521,10 @@ def install(TradingEngine, log) -> None:
             # published through the equity field.
             if available <= 0:
                 log.warning("[PILOT_LIVE_BALANCE] entry blocked: available collateral <= 0")
+                self._drawdown_recovery_receipt = None
                 return False
-            return await _entry_drawdown_allows(self, log)
+            await _prevalidate_drawdown_recovery(self, log)
+            return _entry_drawdown_allows(self, log)
         except Exception as exc:
             self.risk.balance_confirmed = False
             log.critical(
