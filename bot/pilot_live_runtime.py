@@ -188,7 +188,7 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
     return state
 
 
-def _entry_drawdown_allows(engine, log) -> bool:
+async def _entry_drawdown_allows(engine, log) -> bool:
     """Hard drawdown gate on the equity read that was just refreshed.
 
     ``_refresh_entry_balance`` is called again immediately before the order
@@ -450,7 +450,7 @@ def install(TradingEngine, log) -> None:
             if available <= 0:
                 log.warning("[PILOT_LIVE_BALANCE] entry blocked: available collateral <= 0")
                 return False
-            return _entry_drawdown_allows(self, log)
+            return await _entry_drawdown_allows(self, log)
         except Exception as exc:
             self.risk.balance_confirmed = False
             log.critical(
