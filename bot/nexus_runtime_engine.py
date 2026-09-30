@@ -13,6 +13,7 @@ import math
 
 from bot import account_balance_semantics
 from bot import capital_flow_reconciliation as capital_flows
+from bot import drawdown_recovery
 from bot import binance_hwm_incident_repair as hwm_incident_repair
 from bot import missed_opportunity_audit
 from bot.account_capital_reader import read_account_capital
@@ -168,7 +169,19 @@ class TradingEngine(CoreTradingEngine):
         if getattr(decision, "execution_allowed", None) is not True:
             return
 
-        risk_pct = float(self._effective_risk_pct())
+        normal_risk_pct = float(self._effective_risk_pct())
+        risk_pct = float(drawdown_recovery.effective_risk_pct(normal_risk_pct))
+        recovery_ctx = drawdown_recovery.current_context()
+        if recovery_ctx is not None:
+            log.critical(
+                "[DRAWDOWN_RECOVERY] episode=%s stage=RISK_PLAN "
+                "normal_risk_pct=%.4f%% recovery_risk_pct=%.4f%% "
+                "leverage_unchanged=%sx execution_effect=REDUCE_RISK_BUDGET",
+                recovery_ctx.episode_id,
+                normal_risk_pct * 100.0,
+                risk_pct * 100.0,
+                cfg.LEVERAGE,
+            )
         from bot.execution_cost import reusable_snapshot
 
         self.risk.set_plan(
