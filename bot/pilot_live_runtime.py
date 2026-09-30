@@ -240,6 +240,12 @@ def _entry_drawdown_allows(engine, log) -> bool:
     drawdown = max(values)
     if drawdown < limit:
         return True
+    if drawdown_recovery.broad_override_conflict():
+        log.critical(
+            "[PILOT_PREDISPATCH_DRAWDOWN] result=BLOCK "
+            "reason=recovery_broad_override_conflict execution_effect=BLOCK_NEW_ENTRY"
+        )
+        return False
     if drawdown_recovery.context_allows(
         drawdown, open_positions=len(getattr(engine, "positions", {}))
     ):
