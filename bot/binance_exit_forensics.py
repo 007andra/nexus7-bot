@@ -469,30 +469,34 @@ async def capture_exit(
             type(exc).__name__,
         )
 
-    # A recovery episode may continue after a non-losing close, but a confirmed
-    # fills-authoritative net loss disarms it durably. Ambiguous PnL evidence
-    # never produces a false loss classification; the next recovery decision
-    # remains bound to the durable receipt and all normal gates.
-    if bool(receipt.get("pnl_fill_authority")):
-        try:
-            from bot.drawdown_recovery import record_recovery_close
-            recovery_ok, recovery_reason = await record_recovery_close(
-                float(receipt.get("net_after_funding", "nan")), strict=True
-            )
-            if recovery_reason != "not_armed":
-                log.critical(
-                    "[RECOVERY_POST_TRADE] symbol=%s opening_order_id=%s "
-                    "result=%s reason=%s pnl_authority=fills",
-                    symbol, opening_order_id,
-                    "CONTINUE" if recovery_ok else "DISARMED",
-                    recovery_reason,
-                )
-        except Exception as exc:
+    # Bind any recovery post-trade decision to the Binance opening fill time.
+    # Startup backfills older than the durable episode are ignored. A close that
+    # belongs to the episode but lacks fills-authoritative PnL disarms Recovery
+    # conservatively instead of silently continuing.
+    try:
+        from bot.drawdown_recovery import record_recovery_close
+        pnl_authority = bool(receipt.get("pnl_fill_authority"))
+        recovery_ok, recovery_reason = await record_recovery_close(
+            float(receipt.get("net_after_funding", "nan")) if pnl_authority else float("nan"),
+            opening_fill_ms=int(receipt.get("first_fill_ms", 0) or 0),
+            strict=True,
+        )
+        if recovery_reason not in {"not_armed", "outside_episode"}:
             log.critical(
                 "[RECOVERY_POST_TRADE] symbol=%s opening_order_id=%s "
-                "result=UNCONFIRMED reason=%s execution_effect=BLOCK_ON_NEXT_RECOVERY_CHECK",
-                symbol, opening_order_id, type(exc).__name__,
+                "result=%s reason=%s pnl_authority=%s opening_fill_ms=%s",
+                symbol, opening_order_id,
+                "CONTINUE" if recovery_ok else "DISARMED",
+                recovery_reason,
+                "fills" if pnl_authority else "unconfirmed",
+                receipt.get("first_fill_ms", "NA"),
             )
+    except Exception as exc:
+        log.critical(
+            "[RECOVERY_POST_TRADE] symbol=%s opening_order_id=%s "
+            "result=UNCONFIRMED reason=%s execution_effect=BLOCK_ON_NEXT_RECOVERY_CHECK",
+            symbol, opening_order_id, type(exc).__name__,
+        )
 
     log.warning(
         "[BINANCE_EXIT_FORENSICS] symbol=%s result=%s opening_order_id=%s "
