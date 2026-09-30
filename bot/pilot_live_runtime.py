@@ -139,7 +139,7 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
         previous_equity is None
         or abs(equity - float(previous_equity)) >= max(0.02, abs(float(previous_equity)) * 0.01)
     )
-    if material_change or (now - last_flow_check) >= 300.0:
+    if for_entry or material_change or (now - last_flow_check) >= 300.0:
         await capital_flows.reconcile_external_capital_flows(
             engine.client,
             engine.risk,
