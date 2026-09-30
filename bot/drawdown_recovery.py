@@ -196,8 +196,9 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
     """Create/validate the durable recovery receipt.
 
     Restart semantics are deterministic: the same configured episode must match
-    the durable receipt exactly and remain ARMED. A different episode cannot
-    overwrite an existing receipt. Persistence ambiguity fails closed.
+    the durable receipt exactly and remain ARMED. A different episode may replace
+    a prior receipt only after expiry, by atomic CAS, with no drawdown worsening
+    and no relaxation of recovery ceiling/risk. Persistence ambiguity fails closed.
     """
     allowed, reason, policy = threshold_decision(drawdown)
     if not (allowed and reason == "recovery_threshold_exception"):
@@ -221,7 +222,52 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
         return True, "durable_armed"
 
     if str(state.get("episode_id") or "") != policy.episode_id:
-        return False, "durable_episode_mismatch"
+        # Sequential recovery episodes may roll over an old durable receipt only
+        # after that receipt has expired. Rollover is intentionally narrower than
+        # first-arm semantics: the previous episode must still be ARMED, current
+        # drawdown must not have worsened from its arm point, and the new episode
+        # cannot relax either the recovery ceiling or recovery risk.
+        if str(state.get("status") or "") != "ARMED":
+            return False, "durable_previous_episode_disarmed"
+        try:
+            old_policy = _policy_from_state(state)
+            old_armed_drawdown = float(state.get("armed_drawdown"))
+        except (db.PersistenceError, TypeError, ValueError):
+            return False, "durable_episode_mismatch"
+        if (
+            not math.isfinite(old_armed_drawdown)
+            or old_armed_drawdown < 0
+        ):
+            return False, "durable_drawdown_malformed"
+        current = datetime.now(timezone.utc)
+        if old_policy.expires_at is None or current < old_policy.expires_at:
+            return False, "durable_episode_mismatch"
+        if float(drawdown) > old_armed_drawdown + 1e-12:
+            return False, "durable_rollover_drawdown_worsened"
+        if (
+            float(policy.max_drawdown) > float(old_policy.max_drawdown) + 1e-12
+            or float(policy.risk_pct) > float(old_policy.risk_pct) + 1e-12
+        ):
+            return False, "durable_rollover_policy_relaxed"
+
+        payload = _state_payload(
+            policy=policy,
+            status="ARMED",
+            armed_drawdown=float(drawdown),
+            worst_drawdown=float(drawdown),
+            reason="operator_rearmed_after_expiry",
+        )
+        try:
+            ok = await save_key_values_atomic_cas(
+                ((STATE_KEY, payload),),
+                expected={STATE_KEY: raw},
+                strict=strict,
+            )
+        except CompareAndSwapConflict:
+            return False, "durable_rollover_conflict"
+        if not ok:
+            return False, "durable_rollover_unconfirmed"
+        return True, "durable_rearmed_after_expiry"
     if str(state.get("status") or "") != "ARMED":
         return False, "durable_episode_disarmed"
     try:

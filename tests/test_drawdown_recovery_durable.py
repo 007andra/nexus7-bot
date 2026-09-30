@@ -70,6 +70,97 @@ class DurableRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "durable_episode_mismatch")
 
+    async def test_expired_armed_episode_rolls_over_atomically_without_relaxation(self):
+        old_policy = drawdown_recovery.RecoveryPolicy(
+            True,
+            "episode-expired-001",
+            datetime.now(timezone.utc) - timedelta(minutes=5),
+            0.18,
+            0.005,
+            "configured",
+        )
+        raw = drawdown_recovery._state_payload(
+            policy=old_policy, status="ARMED", armed_drawdown=0.1583,
+            worst_drawdown=0.1583, reason="operator_armed",
+        )
+        os.environ[drawdown_recovery.EPISODE_ENV] = "episode-durable-002"
+        os.environ[drawdown_recovery.EXPIRES_ENV] = (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat()
+        written = {}
+
+        async def cas(items, *, expected, strict):
+            self.assertEqual(expected, {drawdown_recovery.STATE_KEY: raw})
+            written.update(dict(items))
+            return True
+
+        with patch.object(cfg, "MAX_DRAWDOWN", 0.10), patch.object(cfg, "MAX_RISK_PCT", 0.01), \
+             patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
+             patch.object(drawdown_recovery, "save_key_values_atomic_cas", side_effect=cas):
+            ok, reason = await drawdown_recovery.ensure_durable_episode(0.1583)
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "durable_rearmed_after_expiry")
+        state = json.loads(written[drawdown_recovery.STATE_KEY])
+        self.assertEqual(state["episode_id"], "episode-durable-002")
+        self.assertEqual(state["status"], "ARMED")
+        self.assertEqual(state["reason"], "operator_rearmed_after_expiry")
+        self.assertEqual(state["armed_drawdown"], 0.1583)
+
+    async def test_expired_rollover_fails_if_drawdown_worsened(self):
+        old_policy = drawdown_recovery.RecoveryPolicy(
+            True,
+            "episode-expired-001",
+            datetime.now(timezone.utc) - timedelta(minutes=5),
+            0.18,
+            0.005,
+            "configured",
+        )
+        raw = drawdown_recovery._state_payload(
+            policy=old_policy, status="ARMED", armed_drawdown=0.1583,
+            worst_drawdown=0.1583, reason="operator_armed",
+        )
+        os.environ[drawdown_recovery.EPISODE_ENV] = "episode-durable-002"
+        os.environ[drawdown_recovery.EXPIRES_ENV] = (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat()
+        with patch.object(cfg, "MAX_DRAWDOWN", 0.10), patch.object(cfg, "MAX_RISK_PCT", 0.01), \
+             patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
+             patch.object(drawdown_recovery, "save_key_values_atomic_cas", AsyncMock()) as cas:
+            ok, reason = await drawdown_recovery.ensure_durable_episode(0.1590)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "durable_rollover_drawdown_worsened")
+        cas.assert_not_awaited()
+
+    async def test_expired_rollover_cannot_relax_policy(self):
+        old_policy = drawdown_recovery.RecoveryPolicy(
+            True,
+            "episode-expired-001",
+            datetime.now(timezone.utc) - timedelta(minutes=5),
+            0.17,
+            0.004,
+            "configured",
+        )
+        raw = drawdown_recovery._state_payload(
+            policy=old_policy, status="ARMED", armed_drawdown=0.1583,
+            worst_drawdown=0.1583, reason="operator_armed",
+        )
+        os.environ[drawdown_recovery.EPISODE_ENV] = "episode-durable-002"
+        os.environ[drawdown_recovery.EXPIRES_ENV] = (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat()
+        os.environ[drawdown_recovery.MAX_DD_ENV] = "0.18"
+        os.environ[drawdown_recovery.RISK_ENV] = "0.005"
+        with patch.object(cfg, "MAX_DRAWDOWN", 0.10), patch.object(cfg, "MAX_RISK_PCT", 0.01), \
+             patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
+             patch.object(drawdown_recovery, "save_key_values_atomic_cas", AsyncMock()) as cas:
+            ok, reason = await drawdown_recovery.ensure_durable_episode(0.1583)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "durable_rollover_policy_relaxed")
+        cas.assert_not_awaited()
+
     async def test_disarmed_receipt_cannot_rearm_on_restart(self):
         policy = drawdown_recovery.policy_from_env()
         raw = drawdown_recovery._state_payload(
