@@ -488,6 +488,10 @@ async def mark_entry_if_created(
 
 async def reconcile_episode(engine, *, equity: float, hwm: float, drawdown: float) -> None:
     """Fail-closed lifecycle reconciliation. Never closes/manages positions."""
+    # Disabled-by-default must be operationally inert: no additional DB read,
+    # no state mutation, and no effect on the existing hard gate.
+    if not approval_requested():
+        return
     raw = await db.load_key_value(STATE_KEY, strict=True)
     state = _parse_state(raw)
     if state is None or state["status"] == "DISARMED":
