@@ -201,6 +201,12 @@ async def _repair_known_20260930_zero_crossing(
     if not _close(equity, _ZERO_CROSSING_INCIDENT_POST_EQUITY):
         return None
 
+    peak_raw = await db.load_key_value(DURABLE_EQUITY_PEAK_KEY, strict=strict)
+    try:
+        if peak_raw is None or not _close(float(peak_raw), persisted, 1e-12):
+            return None
+    except (TypeError, ValueError):
+        return None
     ledger_raw = await db.load_key_value(cfl.LEDGER_KEY, strict=strict)
     provenance_raw = await db.load_key_value(
         hwm_namespace.provenance_key(), strict=strict
@@ -310,7 +316,7 @@ async def _repair_known_20260930_zero_crossing(
             (_ZERO_CROSSING_INCIDENT_MARKER_KEY, marker),
         ),
         expected={
-            DURABLE_EQUITY_PEAK_KEY: format(persisted, ".17g"),
+            DURABLE_EQUITY_PEAK_KEY: peak_raw,
             cfl.LEDGER_KEY: ledger_raw,
             hwm_namespace.provenance_key(): provenance_raw,
             _ZERO_CROSSING_INCIDENT_MARKER_KEY: None,
