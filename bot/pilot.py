@@ -133,6 +133,51 @@ def _venue_credential_blockers() -> List[str]:
     return []
 
 
+def _drawdown_hard_gate_blocks(engine) -> tuple[bool, str]:
+    """Return whether legacy gate 9B must still block this candidate.
+
+    Recovery is allowed to bridge only the legacy drawdown-threshold flag, and
+    only when the immediately preceding fresh pre-dispatch check minted a
+    one-shot durable episode token. The token is consumed here so it cannot be
+    reused by a later candidate. All mismatches fail closed.
+    """
+    if not bool(getattr(engine, "_drawdown_hard_gate_active", False)):
+        return False, "hard_gate_inactive"
+
+    episode = getattr(engine, "_drawdown_recovery_predispatch_episode", None)
+    if not episode:
+        return True, "missing_durable_recovery_token"
+
+    # One-shot binding: consume before validation so exceptions/mismatches
+    # cannot leave a reusable authorization behind.
+    engine._drawdown_recovery_predispatch_episode = None
+
+    risk = getattr(engine, "risk", None)
+    legacy = getattr(risk, "_legacy", risk)
+    candidates = [getattr(legacy, "drawdown", None)]
+    v3 = getattr(risk, "_v3", None)
+    if v3 is not None and getattr(v3, "confirmed", False):
+        candidates.append(getattr(v3, "drawdown", None))
+    try:
+        values = [float(v) for v in candidates if v is not None]
+    except (TypeError, ValueError):
+        return True, "drawdown_unreadable"
+    if not values or any(v != v or v < 0 or v == float("inf") for v in values):
+        return True, "drawdown_unreadable"
+
+    try:
+        from bot.drawdown_recovery import threshold_decision
+        allowed, reason, recovery = threshold_decision(max(values))
+    except Exception as exc:
+        return True, f"recovery_recheck_{type(exc).__name__}"
+
+    if not (allowed and reason == "recovery_threshold_exception"):
+        return True, f"recovery_recheck_{reason}"
+    if str(getattr(recovery, "episode_id", "")) != str(episode):
+        return True, "recovery_episode_mismatch"
+    return False, f"recovery_episode={episode}"
+
+
 class PilotGuard:
     """Additional fail-closed gates for real pilot execution."""
 
@@ -232,8 +277,16 @@ class PilotGuard:
             risk = getattr(engine, "risk", None)
             if risk is None or not getattr(risk, "_ready", False):
                 r.append("9_RISK: RiskManager não inicializado")
-            if getattr(engine, "_drawdown_hard_gate_active", False):
+            drawdown_blocks, drawdown_reason = _drawdown_hard_gate_blocks(engine)
+            if drawdown_blocks:
                 r.append("9B_DRAWDOWN: HARD_GATE ativo; novas entradas bloqueadas")
+            elif drawdown_reason.startswith("recovery_episode="):
+                log.critical(
+                    "[PILOT_DRAWDOWN_RECOVERY_BRIDGE] symbol=%s result=PASS %s "
+                    "scope=9B_DRAWDOWN_ONLY durable_token_consumed=true "
+                    "other_gates_unchanged=true",
+                    symbol, drawdown_reason,
+                )
 
             if ai_decision is None:
                 r.append("10_AI: nenhuma decisão do NEXUS AI recebida")

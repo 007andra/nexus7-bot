@@ -283,6 +283,11 @@ async def _entry_drawdown_allows_durable(engine, log) -> bool:
     unchanged. Only an above-threshold bounded Recovery exception performs
     PostgreSQL I/O here.
     """
+    # Clear any stale bridge before evaluating this fresh candidate. A token
+    # is minted below only after both durable episode confirmation and the
+    # atomic drawdown observation succeed.
+    engine._drawdown_recovery_predispatch_episode = None
+
     if not _entry_drawdown_allows(engine, log):
         return False
 
@@ -334,6 +339,11 @@ async def _entry_drawdown_allows_durable(engine, log) -> bool:
             recovery.episode_id, observation_reason,
         )
         return False
+
+    # Mint a one-shot bridge for PilotGuard's legacy 9B drawdown flag. This
+    # is deliberately after durable receipt + observation so threshold_decision
+    # alone can never bypass 9B.
+    engine._drawdown_recovery_predispatch_episode = recovery.episode_id
 
     log.critical(
         "[PILOT_PREDISPATCH_RECOVERY] result=PASS episode=%s drawdown=%.4f%% "
