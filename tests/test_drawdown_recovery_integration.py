@@ -11,6 +11,10 @@ from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
 
 
+EQUITY = 19.18862133
+HWM = 22.798693855106116
+
+
 class _Legacy:
     def __init__(self):
         self.balance = 100.0
@@ -116,6 +120,55 @@ class RecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             return_value=False,
         ):
             self.assertFalse(live._entry_drawdown_allows(engine, _Log()))
+
+    async def test_entry_refresh_forces_cashflow_reconciliation_even_without_balance_change(self):
+        risk = SimpleNamespace(
+            _legacy=SimpleNamespace(peak_balance=HWM, drawdown=0.158),
+        )
+        client = SimpleNamespace()
+        engine = SimpleNamespace(
+            client=client,
+            risk=risk,
+            _pilot_prev_account_equity=EQUITY,
+            _pilot_last_capital_flow_check=time.time(),
+        )
+        state = {
+            "equity": EQUITY,
+            "available": EQUITY,
+            "available_source": "availableBalance",
+        }
+
+        with patch.object(
+            live.account_semantics,
+            "read_account_state",
+            AsyncMock(return_value=state),
+        ), patch.object(
+            live.account_semantics,
+            "update_risk_from_equity",
+        ), patch.object(
+            live.capital_flows,
+            "reconcile_external_capital_flows",
+            AsyncMock(return_value={"applied": 0}),
+        ) as reconcile, patch.object(
+            live.hwm_incident_repair,
+            "repair_if_needed",
+            AsyncMock(return_value={"status": "NOT_MATCHED"}),
+        ), patch.object(
+            live.external_performance,
+            "evaluate",
+            AsyncMock(return_value="NORMAL"),
+        ), patch.object(
+            live,
+            "restore_update_real_account_peak",
+            AsyncMock(return_value=HWM),
+        ), patch.object(
+            live.drawdown_recovery,
+            "reconcile_episode",
+            AsyncMock(),
+        ):
+            await live._refresh_account(engine, _Log(), for_entry=True)
+
+        reconcile.assert_awaited_once()
 
     def test_recovery_and_broad_override_conflict_is_blocked_predispatch(self):
         ctx = self._context()
