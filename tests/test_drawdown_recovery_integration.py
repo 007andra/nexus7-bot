@@ -144,7 +144,11 @@ class RecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "available_source": "availableBalance",
         }
 
-        with patch.object(
+        with patch.dict(
+            "os.environ",
+            {recovery.APPROVED_ENV: "true"},
+            clear=True,
+        ), patch.object(
             live.account_semantics,
             "read_account_state",
             AsyncMock(return_value=state),
