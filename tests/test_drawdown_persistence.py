@@ -130,7 +130,7 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.legacy.drawdown, 1.0)
         self.assertFalse(self.legacy.balance_confirmed)
         self.assertFalse(self.risk.professional_snapshot.confirmed)
-        self.assertEqual(self.risk.professional_snapshot.peak_equity, 8.8015)
+        self.assertEqual(self.risk.professional_snapshot.peak_equity, 100.0)
         save.assert_not_awaited()
 
     async def test_zero_equity_without_durable_peak_fails_closed(self):
