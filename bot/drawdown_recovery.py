@@ -71,6 +71,14 @@ def _truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() == "true"
 
 
+def approval_requested() -> bool:
+    return _truthy(APPROVED_ENV)
+
+
+def broad_override_conflict() -> bool:
+    return approval_requested() and _truthy(BROAD_OVERRIDE_ENV)
+
+
 def _pct(raw: str, field: str) -> float:
     value = str(raw or "").strip()
     if not value:
@@ -98,9 +106,9 @@ def _expiry(raw: str) -> datetime:
 
 def load_config(*, now: datetime | None = None) -> tuple[RecoveryConfig | None, str]:
     """Parse explicit operator configuration. Never supplies risk defaults."""
-    if not _truthy(APPROVED_ENV):
+    if not approval_requested():
         return None, "disabled"
-    if _truthy(BROAD_OVERRIDE_ENV):
+    if broad_override_conflict():
         return None, "broad_override_conflict"
     try:
         episode_id = os.environ.get(EPISODE_ENV, "").strip()
@@ -513,9 +521,17 @@ async def reconcile_episode(engine, *, equity: float, hwm: float, drawdown: floa
         return
 
     if state["status"] == "IN_TRADE" and not getattr(engine, "positions", {}):
-        await _disarm(
-            state, raw, "recovery_trade_completed_reauth_required", drawdown=drawdown
-        )
+        entry_ids = {
+            str(value) for value in state.get("entry_client_oids", []) if value
+        }
+        pending_ids = {
+            str(getattr(order, "client_oid", "") or "")
+            for order in getattr(engine, "orders", object()).pending_orders()
+        } if getattr(engine, "orders", None) is not None else set()
+        if not (entry_ids & pending_ids):
+            await _disarm(
+                state, raw, "recovery_trade_completed_reauth_required", drawdown=drawdown
+            )
 
 
 def snapshot_order_ids(engine) -> set[str]:
