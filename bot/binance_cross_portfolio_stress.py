@@ -451,6 +451,52 @@ def install(TradingEngine, log) -> None:
             )
             return False
 
+        # Recovery authorization is candidate-scoped and all ordinary LIVE
+        # guards have already passed. Reserve the one-shot episode here, at the
+        # final Binance pre-dispatch boundary, before any exchange network I/O.
+        try:
+            from bot import drawdown_recovery
+
+            recovery_context = drawdown_recovery.current_context()
+            if recovery_context is not None:
+                risk = getattr(self, "risk", None)
+                legacy = getattr(risk, "_legacy", risk)
+                dd_values = [getattr(legacy, "drawdown", None)]
+                v3 = getattr(risk, "_v3", None)
+                if v3 is not None and getattr(v3, "confirmed", False):
+                    dd_values.append(getattr(v3, "drawdown", None))
+                drawdowns = [
+                    float(value) for value in dd_values if value is not None
+                ]
+                if (
+                    not drawdowns
+                    or any(not math.isfinite(value) or value < 0 for value in drawdowns)
+                ):
+                    raise ValueError("drawdown_unreadable")
+                reserved = await drawdown_recovery.reserve_dispatch(
+                    self,
+                    recovery_context,
+                    symbol=str(getattr(sig, "symbol", "") or ""),
+                    qty=qty,
+                    drawdown=max(drawdowns),
+                )
+                if not reserved:
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_DISPATCH] symbol=%s result=BLOCK "
+                        "reason=reservation_not_confirmed "
+                        "execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                        getattr(sig, "symbol", "?"),
+                    )
+                    return False
+        except Exception as exc:
+            log.critical(
+                "[DRAWDOWN_RECOVERY_DISPATCH] symbol=%s result=BLOCK reason=%s "
+                "execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                getattr(sig, "symbol", "?"),
+                type(exc).__name__,
+            )
+            return False
+
         log.warning(
             "[BINANCE_CROSS_STRESS] symbol=%s result=PASS reason=%s mode=%s "
             "risk_rate=%.4f limit=%.4f stressed_margin=%.8f "
