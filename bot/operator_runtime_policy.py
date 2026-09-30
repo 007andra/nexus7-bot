@@ -129,7 +129,7 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                     if not (recovery_allowed and recovery_reason == "recovery_threshold_exception"):
                         log.error(
                             "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
-                            "override=false recovery_reason=%s entries_blocked=true",
+                            "override=false entries_blocked=true recovery_reason=%s",
                             float(self.drawdown) * 100.0,
                             float(cfg.MAX_DRAWDOWN) * 100.0,
                             recovery_reason,
@@ -169,7 +169,7 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                     if not (recovery_allowed and recovery_reason == "recovery_threshold_exception"):
                         log.error(
                             "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
-                            "override=false recovery_reason=%s entries_blocked=true",
+                            "override=false entries_blocked=true recovery_reason=%s",
                             float(self.drawdown) * 100.0,
                             float(cfg.MAX_DRAWDOWN) * 100.0,
                             recovery_reason,
