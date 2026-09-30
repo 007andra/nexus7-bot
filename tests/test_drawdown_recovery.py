@@ -385,6 +385,12 @@ class DrawdownRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, env_config(), clear=True), patch.object(
             cfg, "MAX_DRAWDOWN", 0.10
         ), patch.object(cfg, "MAX_RISK_PCT", 0.01), patch.object(
+            recovery.durable_execution, "can_open", return_value=True
+        ), patch.object(
+            recovery, "_ownership_valid", AsyncMock(return_value=True)
+        ), patch.object(
+            recovery, "_private_stream_valid", return_value=True
+        ), patch.object(
             recovery.db, "load_key_value", AsyncMock(return_value=raw)
         ), patch.object(
             recovery, "save_key_values_atomic_cas", AsyncMock()
@@ -413,6 +419,12 @@ class DrawdownRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, env_config(), clear=True), patch.object(
             cfg, "MAX_DRAWDOWN", 0.10
         ), patch.object(cfg, "MAX_RISK_PCT", 0.01), patch.object(
+            recovery.durable_execution, "can_open", return_value=True
+        ), patch.object(
+            recovery, "_ownership_valid", AsyncMock(return_value=True)
+        ), patch.object(
+            recovery, "_private_stream_valid", return_value=True
+        ), patch.object(
             recovery.db, "load_key_value", AsyncMock(return_value=raw)
         ), patch.object(
             recovery, "save_key_values_atomic_cas", AsyncMock(side_effect=cas)
@@ -425,6 +437,64 @@ class DrawdownRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             captured["disarm_reason"], "recovery_trade_completed_reauth_required"
         )
+
+    async def test_ownership_degradation_disarms_episode(self):
+        state = self._armed()
+        raw = recovery._dump(state)
+        engine = fake_engine()
+        captured = {}
+
+        async def cas(items, expected, strict=True):
+            captured.update(json.loads(dict(items)[recovery.STATE_KEY]))
+            return True
+
+        with patch.dict(os.environ, env_config(), clear=True), patch.object(
+            cfg, "MAX_DRAWDOWN", 0.10
+        ), patch.object(cfg, "MAX_RISK_PCT", 0.01), patch.object(
+            recovery.durable_execution, "can_open", return_value=True
+        ), patch.object(
+            recovery, "_ownership_valid", AsyncMock(return_value=False)
+        ), patch.object(
+            recovery.db, "load_key_value", AsyncMock(return_value=raw)
+        ), patch.object(
+            recovery, "save_key_values_atomic_cas", AsyncMock(side_effect=cas)
+        ):
+            await recovery.reconcile_episode(
+                engine, equity=EQUITY, hwm=HWM, drawdown=DD
+            )
+
+        self.assertEqual(captured["status"], "DISARMED")
+        self.assertEqual(captured["disarm_reason"], "fencing_invalid")
+
+    async def test_private_stream_degradation_disarms_episode(self):
+        state = self._armed()
+        raw = recovery._dump(state)
+        engine = fake_engine()
+        captured = {}
+
+        async def cas(items, expected, strict=True):
+            captured.update(json.loads(dict(items)[recovery.STATE_KEY]))
+            return True
+
+        with patch.dict(os.environ, env_config(), clear=True), patch.object(
+            cfg, "MAX_DRAWDOWN", 0.10
+        ), patch.object(cfg, "MAX_RISK_PCT", 0.01), patch.object(
+            recovery.durable_execution, "can_open", return_value=True
+        ), patch.object(
+            recovery, "_ownership_valid", AsyncMock(return_value=True)
+        ), patch.object(
+            recovery, "_private_stream_valid", return_value=False
+        ), patch.object(
+            recovery.db, "load_key_value", AsyncMock(return_value=raw)
+        ), patch.object(
+            recovery, "save_key_values_atomic_cas", AsyncMock(side_effect=cas)
+        ):
+            await recovery.reconcile_episode(
+                engine, equity=EQUITY, hwm=HWM, drawdown=DD
+            )
+
+        self.assertEqual(captured["status"], "DISARMED")
+        self.assertEqual(captured["disarm_reason"], "private_stream_invalid")
 
     async def test_disabled_feature_is_db_inert(self):
         engine = fake_engine()
