@@ -35,9 +35,32 @@ EXPIRES_ENV = "LIVE_DRAWDOWN_RECOVERY_EXPIRES_AT"
 MAX_DRAWDOWN_ENV = "LIVE_DRAWDOWN_RECOVERY_MAX_DRAWDOWN"
 MAX_RISK_ENV = "LIVE_DRAWDOWN_RECOVERY_MAX_RISK_PCT"
 BROAD_OVERRIDE_ENV = "LIVE_RISK_OVERRIDE_APPROVED"
+EXCHANGE_ENV = "EXCHANGE"
 
-STATE_KEY = "risk:drawdown_recovery:episode:v1"
-STATE_VERSION = 1
+STATE_VERSION = 2
+
+def _namespace_part(value: str | None, fallback: str) -> str:
+    text = str(value or "").strip().lower() or fallback
+    return re.sub(r"[^a-z0-9_.-]+", "_", text)[:96]
+
+
+def _state_key() -> str:
+    environment = _namespace_part(
+        os.environ.get("RAILWAY_ENVIRONMENT_ID")
+        or os.environ.get("RAILWAY_ENVIRONMENT_NAME")
+        or os.environ.get("RAILWAY_ENVIRONMENT"),
+        "unknown",
+    )
+    exchange = _namespace_part(os.environ.get(EXCHANGE_ENV), "unknown")
+    return (
+        f"risk:drawdown_recovery:episode:v{STATE_VERSION}:"
+        f"environment={environment}:exchange={exchange}"
+    )
+
+
+# Bound once at process start. Railway environment/exchange identity is immutable
+# for one runtime process, which makes the durable authority deterministic.
+STATE_KEY = _state_key()
 CONTEXT_MAX_AGE_S = 30.0
 _EPISODE_RE = re.compile(r"^[A-Za-z0-9._:-]{6,96}$")
 _EPS = 1e-9
@@ -108,6 +131,8 @@ def load_config(*, now: datetime | None = None) -> tuple[RecoveryConfig | None, 
     """Parse explicit operator configuration. Never supplies risk defaults."""
     if not approval_requested():
         return None, "disabled"
+    if _namespace_part(os.environ.get(EXCHANGE_ENV), "unknown") != "binance":
+        return None, "unsupported_exchange"
     if broad_override_conflict():
         return None, "broad_override_conflict"
     try:
