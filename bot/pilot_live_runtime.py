@@ -255,15 +255,37 @@ def _entry_drawdown_allows(engine, log) -> bool:
                 recovery.episode_id,
             )
             return False
+        from bot.drawdown_recovery import ensure_durable_episode, record_drawdown_observation
+        durable_ok, durable_reason = await ensure_durable_episode(drawdown, strict=True)
+        if not durable_ok:
+            log.error(
+                "[PILOT_PREDISPATCH_RECOVERY] result=BLOCK episode=%s "
+                "reason=%s durable_receipt=false execution_effect=BLOCK_NEW_ENTRY",
+                recovery.episode_id, durable_reason,
+            )
+            return False
+        observation_ok, observation_reason = await record_drawdown_observation(
+            drawdown, strict=True
+        )
+        if not observation_ok:
+            log.error(
+                "[PILOT_PREDISPATCH_RECOVERY] result=BLOCK episode=%s "
+                "reason=%s execution_effect=BLOCK_NEW_ENTRY",
+                recovery.episode_id, observation_reason,
+            )
+            return False
         log.critical(
             "[PILOT_PREDISPATCH_RECOVERY] result=PASS episode=%s drawdown=%.4f%% "
             "normal_limit=%.4f%% recovery_ceiling=%.4f%% recovery_risk_pct=%.4f%% "
+            "durable_receipt=true restart_contract=%s observation=%s "
             "scope=drawdown_threshold_only other_gates_unchanged=true",
             recovery.episode_id,
             drawdown * 100.0,
             limit * 100.0,
             float(recovery.max_drawdown) * 100.0,
             float(recovery.risk_pct) * 100.0,
+            durable_reason,
+            observation_reason,
         )
         return True
 
