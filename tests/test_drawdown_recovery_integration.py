@@ -35,6 +35,12 @@ class _Log:
     def error(self, *args, **kwargs):
         pass
 
+    def warning(self, *args, **kwargs):
+        pass
+
+    def info(self, *args, **kwargs):
+        pass
+
 
 class RecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def _context(self):
