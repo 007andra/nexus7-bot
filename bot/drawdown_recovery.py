@@ -217,7 +217,7 @@ def _parse_state(raw: str | None) -> dict | None:
     if not str(state.get("episode_id") or ""):
         raise db.PersistenceError("drawdown recovery state missing episode")
     if str(state.get("status") or "") not in {
-        "ARMED", "IN_TRADE", "DISARMED"
+        "ARMED", "RESERVED", "IN_TRADE", "DISARMED"
     }:
         raise db.PersistenceError("drawdown recovery state status invalid")
     return state
@@ -439,6 +439,65 @@ async def authorize_candidate(
     return context
 
 
+async def reserve_dispatch(
+    engine,
+    context: RecoveryContext,
+    *,
+    symbol: str,
+    qty: float,
+    drawdown: float,
+) -> bool:
+    """Atomically consume the episode before the final Binance network boundary.
+
+    RESERVED is intentionally non-reusable. If the process crashes, the same
+    episode cannot authorize another dispatch. Later lifecycle reconciliation
+    either promotes it to IN_TRADE when exposure/intent exists or DISARMED when
+    the attempt is conclusively flat.
+    """
+    if current_context() is not context:
+        return False
+    try:
+        quantity = float(qty)
+        dd = float(drawdown)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(quantity) or quantity <= 0:
+        return False
+    if not math.isfinite(dd) or dd < 0:
+        return False
+    if str(symbol or "") != context.symbol:
+        return False
+    if not context_allows(dd, open_positions=len(getattr(engine, "positions", {}))):
+        return False
+
+    raw = await db.load_key_value(STATE_KEY, strict=True)
+    state = _parse_state(raw)
+    if (
+        state is None
+        or state.get("episode_id") != context.episode_id
+        or state.get("status") != "ARMED"
+        or int(state.get("entry_count", 0) or 0) != 0
+    ):
+        return False
+
+    updated = dict(state)
+    updated["status"] = "RESERVED"
+    updated["entry_count"] = 1
+    updated["entry_symbol"] = context.symbol
+    updated["reserved_qty"] = quantity
+    updated["reserved_at"] = datetime.now(timezone.utc).isoformat()
+    updated["drawdown_at_reserve"] = dd
+    updated["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await _save_state(updated, expected_raw=raw)
+    log.critical(
+        "[DRAWDOWN_RECOVERY] episode=%s event=DISPATCH_RESERVED symbol=%s "
+        "qty=%.12g entry_count=1 max_entries=1 "
+        "retry_same_episode=false execution_effect=ALLOW_THIS_DISPATCH_ONLY",
+        context.episode_id, context.symbol, quantity,
+    )
+    return True
+
+
 async def mark_entry_if_created(
     engine,
     context: RecoveryContext,
@@ -463,14 +522,13 @@ async def mark_entry_if_created(
     if (
         state is None
         or state.get("episode_id") != context.episode_id
-        or state.get("status") != "ARMED"
-        or int(state.get("entry_count", 0) or 0) != 0
+        or state.get("status") != "RESERVED"
+        or int(state.get("entry_count", 0) or 0) != 1
     ):
-        raise db.PersistenceError("drawdown recovery episode not consumable")
+        raise db.PersistenceError("drawdown recovery reservation not promotable")
 
     updated = dict(state)
     updated["status"] = "IN_TRADE"
-    updated["entry_count"] = 1
     updated["entry_symbol"] = context.symbol
     updated["entry_client_oids"] = [
         str(record.get("client_oid")) for record in new_increase
@@ -542,6 +600,31 @@ async def reconcile_episode(engine, *, equity: float, hwm: float, drawdown: floa
     if state["status"] == "ARMED" and drawdown > float(state["arm_drawdown"]) + _EPS:
         await _disarm(state, raw, "drawdown_worsened_before_entry", drawdown=drawdown)
         return
+
+    if state["status"] == "RESERVED":
+        positions = getattr(engine, "positions", {}) or {}
+        if positions:
+            updated = dict(state)
+            updated["status"] = "IN_TRADE"
+            updated["updated_at"] = datetime.now(timezone.utc).isoformat()
+            raw = await _save_state(updated, expected_raw=raw)
+            state = updated
+            log.critical(
+                "[DRAWDOWN_RECOVERY] episode=%s event=RESERVATION_PROMOTED "
+                "status=IN_TRADE execution_effect=BLOCK_ADDITIONAL_RECOVERY_ENTRIES",
+                state["episode_id"],
+            )
+        else:
+            orders = getattr(engine, "orders", None)
+            pending = orders.pending_orders() if orders is not None else []
+            if not pending:
+                await _disarm(
+                    state,
+                    raw,
+                    "reserved_attempt_completed_reauth_required",
+                    drawdown=drawdown,
+                )
+                return
 
     if state["status"] == "IN_TRADE" and not getattr(engine, "positions", {}):
         entry_ids = {
