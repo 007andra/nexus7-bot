@@ -138,7 +138,9 @@ async def repair_if_needed(risk, equity: float, *, strict: bool = True) -> dict:
     peak_raw = await db.load_key_value(ddp.DURABLE_EQUITY_PEAK_KEY, strict=strict)
     marker_raw = await db.load_key_value(MARKER_KEY, strict=strict)
     if peak_raw is None:
-        raise db.PersistenceError("incident repair cannot inspect missing HWM")
+        if marker_raw is not None:
+            raise db.PersistenceError("incident repair marker exists without HWM")
+        return {"status": "NO_HWM"}
     try:
         peak = float(peak_raw)
     except (TypeError, ValueError) as exc:
