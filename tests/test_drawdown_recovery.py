@@ -10,6 +10,7 @@ from bot.config import cfg
 class DrawdownRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.keys = (
+            "EXCHANGE",
             drawdown_recovery.AUTH_ENV,
             drawdown_recovery.EPISODE_ENV,
             drawdown_recovery.EXPIRES_ENV,
@@ -28,6 +29,7 @@ class DrawdownRecoveryTests(unittest.TestCase):
                 os.environ[key] = value
 
     def _configure(self, *, max_dd="0.18", risk="0.005", minutes=30):
+        os.environ["EXCHANGE"] = "binance"
         os.environ[drawdown_recovery.AUTH_ENV] = "true"
         os.environ[drawdown_recovery.EPISODE_ENV] = "recovery-test-001"
         os.environ[drawdown_recovery.EXPIRES_ENV] = (
