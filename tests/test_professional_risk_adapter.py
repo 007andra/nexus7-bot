@@ -134,6 +134,10 @@ class RuntimeProfessionalRiskPreparationTests(unittest.IsolatedAsyncioTestCase):
             ordering.append("cashflow")
             return {"applied": 0, "blocked": False}
 
+        async def repair(*args, **kwargs):
+            ordering.append("repair")
+            return {"status": "NOT_MATCHED"}
+
         async def restore(*args, **kwargs):
             ordering.append("hwm")
             return 100.0
@@ -147,6 +151,10 @@ class RuntimeProfessionalRiskPreparationTests(unittest.IsolatedAsyncioTestCase):
             "reconcile_external_capital_flows",
             AsyncMock(side_effect=reconcile),
         ), patch.object(
+            runtime_engine.hwm_incident_repair,
+            "repair_if_needed",
+            AsyncMock(side_effect=repair),
+        ), patch.object(
             runtime_engine,
             "restore_update_real_account_peak",
             AsyncMock(side_effect=restore),
@@ -155,7 +163,7 @@ class RuntimeProfessionalRiskPreparationTests(unittest.IsolatedAsyncioTestCase):
                 fake_engine, signal, decision
             )
 
-        self.assertEqual(ordering, ["cashflow", "hwm"])
+        self.assertEqual(ordering, ["cashflow", "repair", "hwm"])
         self.assertTrue(risk.professional_snapshot.confirmed)
 
     async def test_shadow_validation_lock_keeps_core_adapter_dormant(self):
