@@ -114,7 +114,11 @@ class DurableRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
             return True
         with patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
              patch.object(drawdown_recovery, "save_key_values_atomic_cas", side_effect=cas):
-            ok, reason = await drawdown_recovery.record_recovery_close(-0.25)
+            state = json.loads(raw)
+            armed_ms = int(datetime.fromisoformat(state["armed_at"]).timestamp() * 1000)
+            ok, reason = await drawdown_recovery.record_recovery_close(
+                -0.25, opening_fill_ms=armed_ms + 1000
+            )
         self.assertFalse(ok)
         self.assertEqual(reason, "recovery_trade_net_loss")
         state = json.loads(written[drawdown_recovery.STATE_KEY])
@@ -128,10 +132,60 @@ class DurableRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
             worst_drawdown=0.1583, reason="operator_armed",
         )
         with patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)):
-            ok, reason = await drawdown_recovery.record_recovery_close(0.10)
+            state = json.loads(raw)
+            armed_ms = int(datetime.fromisoformat(state["armed_at"]).timestamp() * 1000)
+            ok, reason = await drawdown_recovery.record_recovery_close(
+                0.10, opening_fill_ms=armed_ms + 1000
+            )
         self.assertTrue(ok)
         self.assertEqual(reason, "non_losing_close")
 
+
+    async def test_old_backfill_close_does_not_disarm_new_episode(self):
+        policy = drawdown_recovery.policy_from_env()
+        raw = drawdown_recovery._state_payload(
+            policy=policy, status="ARMED", armed_drawdown=0.1583,
+            worst_drawdown=0.1583, reason="operator_armed",
+        )
+        state = json.loads(raw)
+        armed_ms = int(datetime.fromisoformat(state["armed_at"]).timestamp() * 1000)
+        with patch.object(
+            drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)
+        ), patch.object(
+            drawdown_recovery, "save_key_values_atomic_cas", AsyncMock()
+        ) as cas:
+            ok, reason = await drawdown_recovery.record_recovery_close(
+                -99.0, opening_fill_ms=armed_ms - 1000
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "outside_episode")
+        cas.assert_not_awaited()
+
+    async def test_episode_close_with_unconfirmed_pnl_disarms(self):
+        policy = drawdown_recovery.policy_from_env()
+        raw = drawdown_recovery._state_payload(
+            policy=policy, status="ARMED", armed_drawdown=0.1583,
+            worst_drawdown=0.1583, reason="operator_armed",
+        )
+        state = json.loads(raw)
+        armed_ms = int(datetime.fromisoformat(state["armed_at"]).timestamp() * 1000)
+        written = {}
+        async def cas(items, *, expected, strict):
+            written.update(dict(items))
+            return True
+        with patch.object(
+            drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)
+        ), patch.object(
+            drawdown_recovery, "save_key_values_atomic_cas", side_effect=cas
+        ):
+            ok, reason = await drawdown_recovery.record_recovery_close(
+                float("nan"), opening_fill_ms=armed_ms + 1000
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "close_pnl_unconfirmed")
+        state = json.loads(written[drawdown_recovery.STATE_KEY])
+        self.assertEqual(state["status"], "DISARMED")
+        self.assertEqual(state["reason"], "close_pnl_unconfirmed")
 
 if __name__ == "__main__":
     unittest.main()
