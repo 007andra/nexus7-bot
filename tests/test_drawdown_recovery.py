@@ -19,6 +19,7 @@ HWM = 22.798693855106116
 
 def env_config(**overrides):
     values = {
+        recovery.EXCHANGE_ENV: "binance",
         recovery.APPROVED_ENV: "true",
         recovery.EPISODE_ENV: "recovery-episode-001",
         recovery.EXPIRES_ENV: "2099-01-01T00:00:00+00:00",
@@ -66,6 +67,13 @@ class DrawdownRecoveryConfigTests(unittest.TestCase):
             config, reason = recovery.load_config()
         self.assertIsNone(config)
         self.assertEqual(reason, "disabled")
+
+    def test_non_binance_recovery_is_unsupported(self):
+        values = env_config(**{recovery.EXCHANGE_ENV: "kucoin"})
+        with patch.dict(os.environ, values, clear=True):
+            config, reason = recovery.load_config()
+        self.assertIsNone(config)
+        self.assertEqual(reason, "unsupported_exchange")
 
     def test_missing_required_values_fail_closed(self):
         with patch.dict(os.environ, {recovery.APPROVED_ENV: "true"}, clear=True):
