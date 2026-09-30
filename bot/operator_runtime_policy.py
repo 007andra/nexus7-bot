@@ -123,6 +123,12 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                 _risk_override_enabled(),
             )
             if self.drawdown >= cfg.MAX_DRAWDOWN:
+                if drawdown_recovery.broad_override_conflict():
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_GATE] stage=LEGACY result=BLOCK "
+                        "reason=broad_override_conflict entries_blocked=true"
+                    )
+                    return False
                 if _risk_override_enabled():
                     log.critical(
                         "[DRAWDOWN_OVERRIDE] drawdown=%.2f%% configured_limit=%.2f%% "
@@ -176,6 +182,12 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
             if self.equity <= 0 or self.available_collateral <= 0:
                 return False
             if self.drawdown >= cfg.MAX_DRAWDOWN:
+                if drawdown_recovery.broad_override_conflict():
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_GATE] stage=RISK_V3 result=BLOCK "
+                        "reason=broad_override_conflict entries_blocked=true"
+                    )
+                    return False
                 if _risk_override_enabled():
                     log.critical(
                         "[DRAWDOWN_OVERRIDE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
