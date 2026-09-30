@@ -117,6 +117,10 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
                      "bot.pilot_live_runtime.restore_update_real_account_peak"):
             self.replace(name, AsyncMock())
         self.replace(
+            "bot.pilot_live_runtime.hwm_incident_repair.repair_if_needed",
+            AsyncMock(return_value={"status": "NOT_MATCHED"}),
+        )
+        self.replace(
             "bot.pilot_live_runtime.external_performance.evaluate",
             AsyncMock(return_value="NORMAL"),
         )
