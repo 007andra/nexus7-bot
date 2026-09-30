@@ -520,6 +520,29 @@ async def capture_exit(
         str(bool(receipt.get("realized_income_crosscheck"))).lower(),
         json.dumps(endpoint_state, sort_keys=True, separators=(",", ":")),
     )
+    # A recovery loss is disarmed only from confirmed Binance fill-based PnL.
+    # Unconfirmed/partial forensic evidence never mutates recovery authorization.
+    if bool(receipt.get("pnl_fill_authority")) and str(receipt.get("status")) == "RECONCILED":
+        try:
+            from bot.drawdown_recovery import record_recovery_close
+            recovery_ok, recovery_reason = await record_recovery_close(
+                float(receipt.get("net_after_funding", "nan")), strict=True
+            )
+            log.warning(
+                "[DRAWDOWN_RECOVERY_CLOSE] symbol=%s opening_order_id=%s "
+                "result=%s reason=%s pnl_authority=binance_fills",
+                symbol,
+                opening_order_id,
+                "ARMED" if recovery_ok else "DISARMED_OR_INACTIVE",
+                recovery_reason,
+            )
+        except Exception as exc:
+            log.critical(
+                "[DRAWDOWN_RECOVERY_CLOSE] symbol=%s opening_order_id=%s "
+                "result=UNCONFIRMED error_type=%s execution_effect=BLOCK_ON_NEXT_RECOVERY_CHECK",
+                symbol, opening_order_id, type(exc).__name__,
+            )
+
     return receipt
 
 
