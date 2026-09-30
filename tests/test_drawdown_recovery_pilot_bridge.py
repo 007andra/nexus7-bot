@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from bot import pilot, pilot_live_runtime
 from bot.config import cfg
@@ -76,7 +76,7 @@ class DurableRecoveryTokenMintTests(unittest.IsolatedAsyncioTestCase):
              patch("bot.drawdown_recovery.threshold_decision", return_value=(True, "recovery_threshold_exception", policy)), \
              patch("bot.drawdown_recovery.ensure_durable_episode", AsyncMock(return_value=(True, "durable_restart_match"))), \
              patch("bot.drawdown_recovery.record_drawdown_observation", AsyncMock(return_value=(True, "drawdown_observed"))):
-            ok = await pilot_live_runtime._entry_drawdown_allows_durable(engine, unittest.mock.Mock())
+            ok = await pilot_live_runtime._entry_drawdown_allows_durable(engine, Mock())
         self.assertTrue(ok)
         self.assertEqual(engine._drawdown_recovery_predispatch_episode, "episode-bridge-001")
 
@@ -90,7 +90,7 @@ class DurableRecoveryTokenMintTests(unittest.IsolatedAsyncioTestCase):
              patch.object(pilot_live_runtime, "_entry_drawdown_allows", return_value=True), \
              patch("bot.drawdown_recovery.threshold_decision", return_value=(True, "recovery_threshold_exception", policy)), \
              patch("bot.drawdown_recovery.ensure_durable_episode", AsyncMock(return_value=(False, "durable_episode_disarmed"))):
-            ok = await pilot_live_runtime._entry_drawdown_allows_durable(engine, unittest.mock.Mock())
+            ok = await pilot_live_runtime._entry_drawdown_allows_durable(engine, Mock())
         self.assertFalse(ok)
         self.assertIsNone(engine._drawdown_recovery_predispatch_episode)
 
