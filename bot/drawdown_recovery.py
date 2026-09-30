@@ -498,8 +498,27 @@ async def reconcile_episode(engine, *, equity: float, hwm: float, drawdown: floa
         return
 
     config, config_reason = load_config()
-    if config is None or config.episode_id != state["episode_id"]:
+    if config is None:
         await _disarm(state, raw, f"operator_{config_reason}", drawdown=drawdown)
+        return
+    if config.episode_id != state["episode_id"]:
+        await _disarm(state, raw, "operator_episode_changed", drawdown=drawdown)
+        return
+
+    if not durable_execution.can_open(engine):
+        await _disarm(state, raw, "durable_state_invalid", drawdown=drawdown)
+        return
+    if not bool(getattr(engine, "_execution_ownership_valid", False)):
+        await _disarm(state, raw, "ownership_invalid", drawdown=drawdown)
+        return
+    if not await _ownership_valid(engine):
+        await _disarm(state, raw, "fencing_invalid", drawdown=drawdown)
+        return
+    if not _private_stream_valid(engine):
+        await _disarm(state, raw, "private_stream_invalid", drawdown=drawdown)
+        return
+    if getattr(engine, "_external_performance_quarantine", False):
+        await _disarm(state, raw, "external_performance_quarantine", drawdown=drawdown)
         return
 
     if drawdown < float(cfg.MAX_DRAWDOWN):
