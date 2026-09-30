@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
 import os
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bot import drawdown_recovery
 from bot.config import cfg
@@ -105,6 +106,89 @@ class DrawdownRecoveryTests(unittest.TestCase):
         allowed, reason, _ = drawdown_recovery.threshold_decision(float("nan"))
         self.assertFalse(allowed)
         self.assertEqual(reason, "drawdown_unreadable")
+
+    def _durable_payload(self, *, status="ARMED", armed=0.1583, worst=0.1583):
+        policy = drawdown_recovery.policy_from_env()
+        return drawdown_recovery._state_payload(
+            policy=policy,
+            status=status,
+            armed_drawdown=armed,
+            worst_drawdown=worst,
+            reason="test",
+        )
+
+    def test_durable_restart_requires_exact_same_episode_contract(self):
+        self._configure(max_dd="0.18", risk="0.005")
+        raw = self._durable_payload()
+        with patch("bot.drawdown_recovery.db.load_key_value", new=AsyncMock(return_value=raw)):
+            ok, reason = __import__("asyncio").run(
+                drawdown_recovery.ensure_durable_episode(0.1583)
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "durable_restart_match")
+
+    def test_restart_with_different_episode_fails_closed(self):
+        self._configure(max_dd="0.18", risk="0.005")
+        raw = self._durable_payload()
+        os.environ[drawdown_recovery.EPISODE_ENV] = "different-episode"
+        with patch("bot.drawdown_recovery.db.load_key_value", new=AsyncMock(return_value=raw)):
+            ok, reason = __import__("asyncio").run(
+                drawdown_recovery.ensure_durable_episode(0.1583)
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "durable_episode_mismatch")
+
+    def test_disarmed_episode_cannot_rearm_on_restart(self):
+        self._configure(max_dd="0.18", risk="0.005")
+        raw = self._durable_payload(status="DISARMED")
+        with patch("bot.drawdown_recovery.db.load_key_value", new=AsyncMock(return_value=raw)):
+            ok, reason = __import__("asyncio").run(
+                drawdown_recovery.ensure_durable_episode(0.1583)
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "durable_episode_disarmed")
+
+    def test_worsening_drawdown_persists_disarm(self):
+        self._configure(max_dd="0.18", risk="0.005")
+        raw = self._durable_payload(armed=0.1583, worst=0.1583)
+        cas = AsyncMock(return_value=True)
+        with patch("bot.drawdown_recovery.db.load_key_value", new=AsyncMock(return_value=raw)), patch(
+            "bot.drawdown_recovery.save_key_values_atomic_cas", new=cas
+        ):
+            ok, reason = __import__("asyncio").run(
+                drawdown_recovery.record_drawdown_observation(0.1590)
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "drawdown_worsened")
+        saved = json.loads(cas.await_args.args[0][0][1])
+        self.assertEqual(saved["status"], "DISARMED")
+        self.assertEqual(saved["reason"], "drawdown_worsened")
+
+    def test_confirmed_net_loss_persists_disarm(self):
+        self._configure(max_dd="0.18", risk="0.005")
+        raw = self._durable_payload()
+        cas = AsyncMock(return_value=True)
+        with patch("bot.drawdown_recovery.db.load_key_value", new=AsyncMock(return_value=raw)), patch(
+            "bot.drawdown_recovery.save_key_values_atomic_cas", new=cas
+        ):
+            ok, reason = __import__("asyncio").run(
+                drawdown_recovery.record_recovery_close(-0.25)
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "recovery_trade_net_loss")
+        saved = json.loads(cas.await_args.args[0][0][1])
+        self.assertEqual(saved["status"], "DISARMED")
+        self.assertAlmostEqual(saved["realized_net_pnl"], -0.25)
+
+    def test_non_losing_close_does_not_disarm(self):
+        self._configure(max_dd="0.18", risk="0.005")
+        raw = self._durable_payload()
+        with patch("bot.drawdown_recovery.db.load_key_value", new=AsyncMock(return_value=raw)):
+            ok, reason = __import__("asyncio").run(
+                drawdown_recovery.record_recovery_close(0.10)
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "non_losing_close")
 
 
 if __name__ == "__main__":
