@@ -7,6 +7,7 @@ atomically paired with durable provenance. No execution authorization exists her
 """
 from __future__ import annotations
 
+import json
 import math
 
 from bot import database as db
@@ -25,6 +26,13 @@ _TRANSFER_RATIO_INCIDENT_BAD_PEAK = 42_709_241_923.064377
 _TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK = 63.7942573
 _TRANSFER_RATIO_INCIDENT_TOLERANCE = 1.0
 _MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO = 1_000.0
+_ZERO_CROSSING_INCIDENT_RECONCILIATION_ID = "auto-176be1f3ca8bbe91"
+_ZERO_CROSSING_INCIDENT_TRAN_IDS = ("416195536884", "416435307318")
+_ZERO_CROSSING_INCIDENT_PRE_EQUITY = 7.40782133
+_ZERO_CROSSING_INCIDENT_POST_EQUITY = 19.18862133
+_ZERO_CROSSING_INCIDENT_LAST_GOOD_PEAK = 8.8015
+_ZERO_CROSSING_INCIDENT_MARKER_KEY = "risk:hwm_repair:2026-09-30-zero-crossing:v1"
+_ZERO_CROSSING_TOLERANCE = 1e-8
 
 
 def _positive_finite(value, label: str) -> float:
@@ -161,11 +169,183 @@ async def restore_zero_equity_peak_fail_closed(risk, *, strict: bool = True) -> 
     return peak
 
 
+
+def _close(a: float, b: float, tol: float = _ZERO_CROSSING_TOLERANCE) -> bool:
+    return math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=tol)
+
+
+async def _repair_known_20260930_zero_crossing(
+    risk, persisted: float, equity: float, *, strict: bool
+) -> float | None:
+    """Repair only the proven 2026-09-30 full-withdrawal/redeposit HWM incident.
+
+    The ordinary TWR ratio is undefined across zero equity. Production first
+    promoted the redeposit to HWM before cash-flow reconciliation, then applied
+    the two-flow batch ratio to that contaminated HWM. This repair preserves
+    the last proven pre-withdrawal drawdown ratio across the zero-capital gap.
+
+    Every exchange-ledger/provenance field is bound before a CAS write. Any
+    mismatch returns without mutation; a CAS conflict fails closed.
+    """
+    from bot import cash_flow_ledger as cfl
+
+    # Cheap signature gate: do not add ledger/provenance I/O to ordinary HWM
+    # restores after this incident is repaired.
+    expected_bad = (
+        _ZERO_CROSSING_INCIDENT_POST_EQUITY
+        * _ZERO_CROSSING_INCIDENT_POST_EQUITY
+        / _ZERO_CROSSING_INCIDENT_PRE_EQUITY
+    )
+    if not _close(persisted, expected_bad, 1e-7):
+        return None
+    if not _close(equity, _ZERO_CROSSING_INCIDENT_POST_EQUITY):
+        return None
+
+    ledger_raw = await db.load_key_value(cfl.LEDGER_KEY, strict=strict)
+    provenance_raw = await db.load_key_value(
+        hwm_namespace.provenance_key(), strict=strict
+    )
+    marker_raw = await db.load_key_value(
+        _ZERO_CROSSING_INCIDENT_MARKER_KEY, strict=strict
+    )
+    if ledger_raw is None or provenance_raw is None or marker_raw is not None:
+        return None
+
+    try:
+        ledger = json.loads(ledger_raw)
+        provenance = json.loads(provenance_raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(ledger, dict) or not isinstance(provenance, dict):
+        return None
+
+    records = [
+        r for r in ledger.get("applied", [])
+        if isinstance(r, dict)
+        and r.get("reconciliation_id") == _ZERO_CROSSING_INCIDENT_RECONCILIATION_ID
+    ]
+    if len(records) != 1:
+        return None
+    record = records[0]
+    if tuple(sorted(str(x) for x in record.get("tran_ids", []))) != tuple(
+        sorted(_ZERO_CROSSING_INCIDENT_TRAN_IDS)
+    ):
+        return None
+    if record.get("method") != "LEDGER_RECONSTRUCTED":
+        return None
+    numeric_checks = (
+        (record.get("pre_flow_equity"), _ZERO_CROSSING_INCIDENT_PRE_EQUITY),
+        (record.get("post_flow_equity"), _ZERO_CROSSING_INCIDENT_POST_EQUITY),
+        (record.get("previous_hwm"), _ZERO_CROSSING_INCIDENT_POST_EQUITY),
+        (record.get("adjusted_hwm"), persisted),
+        (record.get("equity_at_reconciliation"), _ZERO_CROSSING_INCIDENT_POST_EQUITY),
+    )
+    try:
+        if not all(_close(a, b, 1e-7) for a, b in numeric_checks):
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    expected_evidence = (
+        "cash_flow_ledger:LEDGER_RECONSTRUCTED:"
+        + _ZERO_CROSSING_INCIDENT_RECONCILIATION_ID
+    )
+    if (
+        provenance.get("reason") != "external_capital_flow_rebase"
+        or provenance.get("evidence_ref") != expected_evidence
+    ):
+        return None
+    try:
+        if not (
+            _close(provenance.get("old_peak"), _ZERO_CROSSING_INCIDENT_POST_EQUITY, 1e-7)
+            and _close(provenance.get("new_peak"), persisted, 1e-7)
+            and _close(
+                provenance.get("account_equity"),
+                _ZERO_CROSSING_INCIDENT_POST_EQUITY,
+                1e-7,
+            )
+        ):
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    # Preserve the last proven pre-withdrawal performance ratio:
+    # E_old / P_old == E_new / P_repaired.
+    repaired = (
+        equity
+        * _ZERO_CROSSING_INCIDENT_LAST_GOOD_PEAK
+        / _ZERO_CROSSING_INCIDENT_PRE_EQUITY
+    )
+    repaired = _positive_finite(repaired, "zero-crossing repaired HWM")
+    marker = json.dumps(
+        {
+            "version": 1,
+            "incident": "2026-09-30-zero-crossing-cashflow-order",
+            "reconciliation_id": _ZERO_CROSSING_INCIDENT_RECONCILIATION_ID,
+            "old_peak": persisted,
+            "new_peak": repaired,
+            "pre_withdrawal_equity": _ZERO_CROSSING_INCIDENT_PRE_EQUITY,
+            "pre_withdrawal_peak": _ZERO_CROSSING_INCIDENT_LAST_GOOD_PEAK,
+            "post_redeposit_equity": equity,
+            "method": "PRESERVE_PRE_WITHDRAWAL_DRAWDOWN_ACROSS_ZERO_CAPITAL_GAP",
+            "execution_effect": "NONE",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    new_provenance = hwm_provenance.build_hwm_provenance(
+        reason="incident_repair",
+        old_peak=persisted,
+        new_peak=repaired,
+        account_equity=equity,
+        evidence_ref=(
+            "2026-09-30:zero-crossing:"
+            + _ZERO_CROSSING_INCIDENT_RECONCILIATION_ID
+        ),
+    )
+    ok = await save_key_values_atomic_cas(
+        (
+            (DURABLE_EQUITY_PEAK_KEY, format(repaired, ".17g")),
+            (hwm_namespace.provenance_key(), new_provenance),
+            (_ZERO_CROSSING_INCIDENT_MARKER_KEY, marker),
+        ),
+        expected={
+            DURABLE_EQUITY_PEAK_KEY: format(persisted, ".17g"),
+            cfl.LEDGER_KEY: ledger_raw,
+            hwm_namespace.provenance_key(): provenance_raw,
+            _ZERO_CROSSING_INCIDENT_MARKER_KEY: None,
+        },
+        strict=strict,
+    )
+    if strict and not ok:
+        raise db.PersistenceError("zero-crossing HWM repair CAS not confirmed")
+
+    setattr(risk, _CACHE_ATTR, repaired)
+    _apply_peak(risk, repaired, equity, allow_lower=True)
+    log.critical(
+        "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-30-zero-crossing "
+        "reconciliation_id=%s old_peak=%.8f repaired_peak=%.8f equity=%.8f "
+        "drawdown=%.4f%% method=PRESERVE_PRE_WITHDRAWAL_DRAWDOWN "
+        "provenance=durable_atomic_cas marker=committed execution_effect=NONE",
+        _ZERO_CROSSING_INCIDENT_RECONCILIATION_ID,
+        persisted,
+        repaired,
+        equity,
+        max(0.0, (repaired - equity) / repaired) * 100.0,
+    )
+    return repaired
+
+
 async def restore_update_real_account_peak(risk, equity: float, *, strict: bool = True) -> float:
     equity = _positive_finite(equity, "account equity")
     persisted, _ = await _load_peak(risk, strict=strict)
     repaired = False
     if persisted is not None:
+        zero_crossing_repaired = await _repair_known_20260930_zero_crossing(
+            risk, persisted, equity, strict=strict
+        )
+        if zero_crossing_repaired is not None:
+            return zero_crossing_repaired
         if _matches_known_20260914_corruption(persisted):
             old_peak = persisted
             persisted = max(_INCIDENT_LAST_GOOD_PEAK, equity)
