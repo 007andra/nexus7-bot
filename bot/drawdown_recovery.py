@@ -196,8 +196,9 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
     """Create/validate the durable recovery receipt.
 
     Restart semantics are deterministic: the same configured episode must match
-    the durable receipt exactly and remain ARMED. A different episode cannot
-    overwrite an existing receipt. Persistence ambiguity fails closed.
+    the durable receipt exactly and remain ARMED. A different episode may replace
+    a prior receipt only after expiry, by atomic CAS, with no drawdown worsening
+    and no relaxation of recovery ceiling/risk. Persistence ambiguity fails closed.
     """
     allowed, reason, policy = threshold_decision(drawdown)
     if not (allowed and reason == "recovery_threshold_exception"):
