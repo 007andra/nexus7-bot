@@ -154,6 +154,32 @@ def _state_payload(*, policy: RecoveryPolicy, status: str, armed_drawdown: float
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _policy_from_state(state: dict) -> RecoveryPolicy:
+    expires = _expiry(str(state.get("expires_at") or ""))
+    try:
+        max_dd = float(state.get("max_drawdown"))
+        risk_pct = float(state.get("risk_pct"))
+    except (TypeError, ValueError) as exc:
+        raise db.PersistenceError("recovery durable policy malformed") from exc
+    if (
+        not str(state.get("episode_id") or "")
+        or expires is None
+        or not math.isfinite(max_dd)
+        or not math.isfinite(risk_pct)
+        or max_dd <= 0
+        or risk_pct <= 0
+    ):
+        raise db.PersistenceError("recovery durable policy malformed")
+    return RecoveryPolicy(
+        True,
+        str(state.get("episode_id")),
+        expires,
+        max_dd,
+        risk_pct,
+        "configured",
+    )
+
+
 def _decode_state(raw: str | None) -> dict | None:
     if raw is None:
         return None
@@ -199,6 +225,12 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
     if str(state.get("status") or "") != "ARMED":
         return False, "durable_episode_disarmed"
     try:
+        armed_at = datetime.fromisoformat(str(state.get("armed_at") or "").replace("Z", "+00:00"))
+        if armed_at.tzinfo is None:
+            raise ValueError("naive armed_at")
+    except (TypeError, ValueError):
+        return False, "durable_armed_at_malformed"
+    try:
         armed_drawdown = float(state.get("armed_drawdown"))
         worst_drawdown = float(state.get("worst_drawdown"))
     except (TypeError, ValueError):
@@ -235,7 +267,7 @@ async def record_drawdown_observation(drawdown: float, *, strict: bool = True) -
     worst = max(float(state.get("worst_drawdown", armed)), dd)
     status = "DISARMED" if dd > armed + 1e-12 else "ARMED"
     reason = "drawdown_worsened" if status == "DISARMED" else "drawdown_observed"
-    policy = policy_from_env()
+    policy = _policy_from_state(state)
     payload = _state_payload(
         policy=policy, status=status, armed_drawdown=armed,
         worst_drawdown=worst, reason=reason,
@@ -276,7 +308,7 @@ async def record_recovery_close(
     except (TypeError, ValueError, OverflowError):
         armed_ms = -1
 
-    policy = policy_from_env()
+    policy = _policy_from_state(state)
     if armed_ms <= 0 or opening_fill_ms is None or int(opening_fill_ms) <= 0:
         payload = _state_payload(
             policy=policy, status="DISARMED",
@@ -298,7 +330,20 @@ async def record_recovery_close(
 
     pnl = float(net_pnl)
     if not math.isfinite(pnl):
-        return False, "pnl_unreadable"
+        payload = _state_payload(
+            policy=policy, status="DISARMED",
+            armed_drawdown=float(state.get("armed_drawdown")),
+            worst_drawdown=float(state.get("worst_drawdown")),
+            reason="close_pnl_unconfirmed",
+            armed_at=str(state.get("armed_at") or ""),
+        )
+        try:
+            await save_key_values_atomic_cas(
+                ((STATE_KEY, payload),), expected={STATE_KEY: raw}, strict=strict,
+            )
+        except CompareAndSwapConflict:
+            return False, "durable_close_conflict"
+        return False, "close_pnl_unconfirmed"
     if pnl >= 0:
         return True, "non_losing_close"
 
