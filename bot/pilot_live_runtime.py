@@ -29,6 +29,7 @@ from decimal import Decimal, ROUND_FLOOR
 
 from bot import account_balance_semantics as account_semantics
 from bot import capital_flow_reconciliation as capital_flows
+from bot import drawdown_recovery
 from bot import external_position_performance as external_performance
 from bot import binance_hwm_incident_repair as hwm_incident_repair
 from bot.drawdown_persistence import (
@@ -138,7 +139,10 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
         previous_equity is None
         or abs(equity - float(previous_equity)) >= max(0.02, abs(float(previous_equity)) * 0.01)
     )
-    if material_change or (now - last_flow_check) >= 300.0:
+    recovery_entry_check = bool(
+        for_entry and drawdown_recovery.approval_requested()
+    )
+    if recovery_entry_check or material_change or (now - last_flow_check) >= 300.0:
         await capital_flows.reconcile_external_capital_flows(
             engine.client,
             engine.risk,
@@ -158,6 +162,14 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
         )
     else:
         await restore_update_real_account_peak(engine.risk, equity, strict=True)
+
+    legacy = getattr(engine.risk, "_legacy", engine.risk)
+    await drawdown_recovery.reconcile_episode(
+        engine,
+        equity=equity,
+        hwm=float(getattr(legacy, "peak_balance", 0.0) or 0.0),
+        drawdown=float(getattr(legacy, "drawdown", 0.0) or 0.0),
+    )
 
     engine._pilot_prev_account_equity = equity
     engine._pilot_prev_account_observed_ms = external_performance.server_now_ms(
@@ -230,6 +242,26 @@ def _entry_drawdown_allows(engine, log) -> bool:
         return False
     drawdown = max(values)
     if drawdown < limit:
+        return True
+    if drawdown_recovery.broad_override_conflict():
+        log.critical(
+            "[PILOT_PREDISPATCH_DRAWDOWN] result=BLOCK "
+            "reason=recovery_broad_override_conflict execution_effect=BLOCK_NEW_ENTRY"
+        )
+        return False
+    if drawdown_recovery.context_allows(
+        drawdown, open_positions=len(getattr(engine, "positions", {}))
+    ):
+        ctx = drawdown_recovery.current_context()
+        log.critical(
+            "[PILOT_PREDISPATCH_DRAWDOWN] result=RECOVERY episode=%s "
+            "drawdown=%.4f%% limit=%.4f%% recovery_ceiling=%.4f%% "
+            "execution_effect=ALLOW_CANDIDATE_ONLY",
+            getattr(ctx, "episode_id", "unknown"),
+            drawdown * 100.0,
+            limit * 100.0,
+            float(getattr(ctx, "max_drawdown", 0.0)) * 100.0,
+        )
         return True
     if _risk_override_enabled():
         log.critical(
@@ -439,6 +471,29 @@ def install(TradingEngine, log) -> None:
                     getattr(sig, "symbol", "?"),
                 )
                 return None
+
+            legacy = getattr(self.risk, "_legacy", self.risk)
+            drawdown = float(getattr(legacy, "drawdown", 0.0) or 0.0)
+            recovery_context = None
+            if drawdown >= float(
+                getattr(__import__("bot.config", fromlist=["cfg"]).cfg, "MAX_DRAWDOWN")
+            ):
+                recovery_context = await drawdown_recovery.authorize_candidate(
+                    self,
+                    symbol=str(getattr(sig, "symbol", "") or ""),
+                    equity=float(sizing_state["equity"]),
+                    hwm=float(getattr(legacy, "peak_balance", 0.0) or 0.0),
+                    drawdown=drawdown,
+                )
+                if recovery_context is None:
+                    log.warning(
+                        "[DRAWDOWN_RECOVERY] event=CANDIDATE result=BLOCK symbol=%s "
+                        "drawdown=%.4f%% execution_effect=BLOCK_NEW_ENTRY",
+                        getattr(sig, "symbol", "?"),
+                        drawdown * 100.0,
+                    )
+                    return None
+
             target_notional = available * _PILOT_NOTIONAL_PCT
             log.warning(
                 "[PILOT_LEGACY_TARGET] diagnostic_only=true superseded_by=final_sizing_invariants "
@@ -461,9 +516,34 @@ def install(TradingEngine, log) -> None:
 
         self._pilot_open_in_progress = True
         token = _PILOT_TARGET_NOTIONAL.set(target_notional)
+        recovery_token = None
+        before_recovery_order_ids = set()
+        if recovery_context is not None:
+            before_recovery_order_ids = drawdown_recovery.snapshot_order_ids(self)
+            recovery_token = drawdown_recovery.bind_context(recovery_context)
         try:
-            return await original_open(self, sig, *args, **kwargs)
+            result = await original_open(self, sig, *args, **kwargs)
+            if recovery_context is not None:
+                try:
+                    await drawdown_recovery.mark_entry_if_created(
+                        self,
+                        recovery_context,
+                        before_order_ids=before_recovery_order_ids,
+                    )
+                except Exception as exc:
+                    from bot import durable_execution as _durable_recovery
+
+                    _durable_recovery._block(self, "drawdown_recovery")
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY] episode=%s event=ENTRY_ACCOUNTING "
+                        "result=BLOCKED reason=%s action=BLOCK_FUTURE_NEW_ENTRIES",
+                        recovery_context.episode_id,
+                        type(exc).__name__,
+                    )
+            return result
         finally:
+            if recovery_token is not None:
+                drawdown_recovery.reset_context(recovery_token)
             _PILOT_TARGET_NOTIONAL.reset(token)
             self._pilot_open_in_progress = False
             # Restore risk.balance to the account-equity basis even if the
