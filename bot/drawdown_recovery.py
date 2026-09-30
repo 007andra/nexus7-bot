@@ -135,7 +135,8 @@ def recovery_size_multiplier(drawdown: float, *, now: datetime | None = None) ->
 
 
 def _state_payload(*, policy: RecoveryPolicy, status: str, armed_drawdown: float,
-                   worst_drawdown: float, reason: str, realized_net_pnl: float | None = None) -> str:
+                   worst_drawdown: float, reason: str, realized_net_pnl: float | None = None,
+                   armed_at: str | None = None) -> str:
     payload = {
         "version": 1,
         "episode_id": policy.episode_id,
@@ -143,6 +144,7 @@ def _state_payload(*, policy: RecoveryPolicy, status: str, armed_drawdown: float
         "expires_at": policy.expires_at.isoformat() if policy.expires_at else None,
         "max_drawdown": policy.max_drawdown,
         "risk_pct": policy.risk_pct,
+        "armed_at": armed_at or datetime.now(timezone.utc).isoformat(),
         "armed_drawdown": armed_drawdown,
         "worst_drawdown": worst_drawdown,
         "reason": reason,
@@ -237,6 +239,7 @@ async def record_drawdown_observation(drawdown: float, *, strict: bool = True) -
     payload = _state_payload(
         policy=policy, status=status, armed_drawdown=armed,
         worst_drawdown=worst, reason=reason,
+        armed_at=str(state.get("armed_at") or ""),
     )
     try:
         await save_key_values_atomic_cas(
@@ -247,23 +250,64 @@ async def record_drawdown_observation(drawdown: float, *, strict: bool = True) -
     return status == "ARMED", reason
 
 
-async def record_recovery_close(net_pnl: float, *, strict: bool = True) -> tuple[bool, str]:
-    """Disarm an armed recovery episode after a confirmed net losing close."""
+async def record_recovery_close(
+    net_pnl: float,
+    *,
+    opening_fill_ms: int | None = None,
+    strict: bool = True,
+) -> tuple[bool, str]:
+    """Apply a confirmed close only when it belongs to the armed episode.
+
+    Old startup/backfill exits must never disarm a newly armed recovery episode.
+    We bind by Binance opening fill time versus the durable armed_at timestamp.
+    Missing/invalid lineage is conservative: the episode is disarmed because
+    attribution cannot be proven safe.
+    """
     raw = await db.load_key_value(STATE_KEY, strict=strict)
     state = _decode_state(raw)
     if state is None or str(state.get("status") or "") != "ARMED":
         return False, "not_armed"
+
+    try:
+        armed_at = datetime.fromisoformat(str(state.get("armed_at") or "").replace("Z", "+00:00"))
+        if armed_at.tzinfo is None:
+            raise ValueError("naive armed_at")
+        armed_ms = int(armed_at.astimezone(timezone.utc).timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError):
+        armed_ms = -1
+
+    policy = policy_from_env()
+    if armed_ms <= 0 or opening_fill_ms is None or int(opening_fill_ms) <= 0:
+        payload = _state_payload(
+            policy=policy, status="DISARMED",
+            armed_drawdown=float(state.get("armed_drawdown")),
+            worst_drawdown=float(state.get("worst_drawdown")),
+            reason="close_lineage_unbound",
+            armed_at=str(state.get("armed_at") or ""),
+        )
+        try:
+            await save_key_values_atomic_cas(
+                ((STATE_KEY, payload),), expected={STATE_KEY: raw}, strict=strict,
+            )
+        except CompareAndSwapConflict:
+            return False, "durable_close_conflict"
+        return False, "close_lineage_unbound"
+
+    if int(opening_fill_ms) < armed_ms:
+        return True, "outside_episode"
+
     pnl = float(net_pnl)
     if not math.isfinite(pnl):
         return False, "pnl_unreadable"
     if pnl >= 0:
         return True, "non_losing_close"
-    policy = policy_from_env()
+
     payload = _state_payload(
         policy=policy, status="DISARMED",
         armed_drawdown=float(state.get("armed_drawdown")),
         worst_drawdown=float(state.get("worst_drawdown")),
         reason="recovery_trade_net_loss", realized_net_pnl=pnl,
+        armed_at=str(state.get("armed_at") or ""),
     )
     try:
         await save_key_values_atomic_cas(
@@ -272,3 +316,4 @@ async def record_recovery_close(net_pnl: float, *, strict: bool = True) -> tuple
     except CompareAndSwapConflict:
         return False, "durable_close_conflict"
     return False, "recovery_trade_net_loss"
+
