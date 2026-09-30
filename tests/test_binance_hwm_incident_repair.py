@@ -102,6 +102,26 @@ class HwmIncidentRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(marker["incident_id"], repair.INCIDENT_ID)
         self.assertEqual(marker["reconciliation_id"], repair.RECONCILIATION_ID)
 
+    async def test_missing_hwm_without_marker_is_noop_for_normal_bootstrap(self):
+        risk = self._risk()
+
+        async def load(key, strict=True):
+            if key == ddp.DURABLE_EQUITY_PEAK_KEY:
+                return None
+            if key == repair.MARKER_KEY:
+                return None
+            raise AssertionError(key)
+
+        with patch.object(
+            repair.db, "load_key_value", AsyncMock(side_effect=load)
+        ), patch.object(
+            repair, "save_key_values_atomic_cas", AsyncMock()
+        ) as save:
+            result = await repair.repair_if_needed(risk, 10.0)
+
+        self.assertEqual(result["status"], "NO_HWM")
+        save.assert_not_awaited()
+
     async def test_unrelated_peak_is_noop(self):
         risk = self._risk()
 
