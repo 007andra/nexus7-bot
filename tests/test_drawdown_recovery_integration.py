@@ -146,7 +146,7 @@ class RecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(
             "os.environ",
-            {recovery.APPROVED_ENV: "true"},
+            {recovery.EXCHANGE_ENV: "binance", recovery.APPROVED_ENV: "true"},
             clear=True,
         ), patch.object(
             live.account_semantics,
@@ -195,6 +195,7 @@ class RecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(cfg, "MAX_DRAWDOWN", 0.10), patch.dict(
                 "os.environ",
                 {
+                    recovery.EXCHANGE_ENV: "binance",
                     recovery.APPROVED_ENV: "true",
                     recovery.BROAD_OVERRIDE_ENV: "true",
                 },
