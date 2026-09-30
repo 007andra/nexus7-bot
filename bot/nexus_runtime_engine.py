@@ -13,6 +13,7 @@ import math
 
 from bot import account_balance_semantics
 from bot import capital_flow_reconciliation as capital_flows
+from bot import binance_hwm_incident_repair as hwm_incident_repair
 from bot import missed_opportunity_audit
 from bot.account_capital_reader import read_account_capital
 from bot.config import cfg
@@ -114,6 +115,9 @@ class TradingEngine(CoreTradingEngine):
             await capital_flows.reconcile_external_capital_flows(
                 self.client, self.risk, equity, strict=True
             )
+            await hwm_incident_repair.repair_if_needed(
+                self.risk, equity, strict=True
+            )
             await restore_update_real_account_peak(self.risk, equity, strict=True)
 
             if equity > 0:
@@ -201,6 +205,9 @@ class TradingEngine(CoreTradingEngine):
             # then allow authenticated equity to update the performance HWM.
             await capital_flows.reconcile_external_capital_flows(
                 self.client, self.risk, equity, strict=True
+            )
+            await hwm_incident_repair.repair_if_needed(
+                self.risk, equity, strict=True
             )
             await restore_update_real_account_peak(
                 self.risk, equity, strict=True
