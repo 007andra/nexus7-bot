@@ -124,7 +124,7 @@ class _MarketClient:
 
 
 class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
-    async def _exercise(self, *, ticker, book):
+    async def _exercise(self, *, ticker, book, stop=99.6):
         from bot import engine as engine_module
 
         original_module_minimum = engine_module.minimum_base_quantity
@@ -158,7 +158,7 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
         class Sig:
             symbol = "DOTUSDT"
             entry = 100.0
-            sl = 99.6  # Explicit stop required by final projected-loss contract.
+            sl = stop
             direction = "LONG"
 
         try:
@@ -204,6 +204,15 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["orderId"], "should-only-exist-on-pass")
         self.assertEqual(instance.client.place_calls, 1)
+
+    async def test_loss_budget_breach_blocks_at_final_predispatch(self):
+        instance, result = await self._exercise(
+            ticker={"bid": 99.98, "ask": 100.02, "lastPrice": 100.0},
+            book={"b": [[99.98, 100]], "a": [[100.02, 100]]},
+            stop=98.0,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(instance.client.place_calls, 0)
 
 
 class PilotRiskCapEngineOrderRegressionTests(unittest.IsolatedAsyncioTestCase):
