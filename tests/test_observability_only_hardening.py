@@ -308,14 +308,15 @@ class FinalSizingTelemetryTests(unittest.TestCase):
             pilot_cap._PILOT_ENGINE.reset(token_engine)
         return qty, stored, log
 
-    # Contract change (2026-09-26 audit P0-1): the final quantity is
-    # min(stop_risk_qty, operator_margin_cap_qty). With cap=5 and RiskManagerV3
-    # qty=0.25, the executed and logged quantity is 0.25, not the cap.
-    def test_final_sizing_warn_logs_final_min_qty_and_risk_authority(self):
+    # The final quantity is min(stop_risk_qty, operator_margin_cap_qty), but
+    # that positive quantity is still subject to the independent final
+    # loss-budget gate. WARN rejects only this candidate; runtime remains active.
+    def test_final_sizing_warn_blocks_candidate_and_preserves_risk_telemetry(self):
         qty, stored, log = self._exercise(99.12)
-        self.assertEqual(qty, 0.25)
-        self.assertEqual(stored, 0.25)
-        msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
+        self.assertEqual(qty, 0.0)
+        self.assertEqual(stored, 0.0)
+        rendered = log.rendered()
+        msg = [m for _, m in rendered if "[FINAL_LOSS_BUDGET]" in m][0]
         self.assertIn("stage=FINAL_SIZING_INVARIANT", msg)
         self.assertIn("result=WARN", msg)
         self.assertIn("projected_loss_exceeds_50pct_entry_margin", msg)
@@ -325,6 +326,9 @@ class FinalSizingTelemetryTests(unittest.TestCase):
         self.assertIn("stop_risk_qty=0.25", msg)
         self.assertIn("risk_v3_qty_authority=BINDING_UPPER_BOUND", msg)
         self.assertNotIn("NON_AUTHORITATIVE", msg)
+        block = [m for _, m in rendered if "[FINAL_SIZING_INVARIANT]" in m and "result=BLOCK" in m][0]
+        self.assertIn("candidate_only=true", block)
+        self.assertIn("runtime_paused=false", block)
 
     def test_final_sizing_pass_uses_stop_risk_quantity_below_cap(self):
         qty, stored, log = self._exercise(99.6)
