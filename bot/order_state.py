@@ -343,6 +343,49 @@ class ManagedOrder:
         return order
 
 
+
+def _legacy_binance_ws_terminal_artifact(record: dict) -> bool:
+    """Recognize one pre-PR455 synthetic Binance child-order artifact.
+
+    Before the Algo child-order isolation fix, ORDER_TRADE_UPDATE could create
+    a ManagedOrder directly from Binance WS fields. Binance emits side as
+    uppercase BUY/SELL, while every legitimate BGX opening intent is created by
+    engine._open with canonical Buy/Sell before dispatch. Only terminal,
+    pre-protection-plan records carrying WS/LIVE_REST lineage are quarantined.
+    Anything else remains fail-closed.
+    """
+    if not isinstance(record, dict):
+        return False
+    client_oid = str(record.get("client_oid") or "")
+    symbol = str(record.get("symbol") or "")
+    side = str(record.get("side") or "")
+    state = str(record.get("state") or "")
+    order_id = str(record.get("order_id") or "")
+    if (
+        not client_oid.startswith("bgx7-")
+        or not symbol
+        or side not in {"BUY", "SELL"}
+        or state not in {item.value for item in TERMINAIS}
+        or not order_id
+        or record.get("protection_plan") is not None
+    ):
+        return False
+    try:
+        qty = float(record.get("qty", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(qty) or qty <= 0:
+        return False
+    sources = {str(record.get("last_source") or "").upper()}
+    history = record.get("history", [])
+    if not isinstance(history, list):
+        return False
+    for event in history:
+        if isinstance(event, (list, tuple)) and len(event) >= 4 and isinstance(event[3], dict):
+            sources.add(str(event[3].get("source") or "").upper())
+    return bool(sources.intersection({"WS", "LIVE_REST"}))
+
+
 def normalize_protection_plan(plan) -> Optional[dict]:
     """Return a validated protective plan or None (never a partial plan)."""
     if not isinstance(plan, dict):
@@ -388,6 +431,7 @@ class OrderRegistry:
     def __init__(self):
         self._orders: dict = {}
         self._by_order_id: dict = {}   # order_id -> client_oid
+        self._legacy_quarantined_records: list = []
 
     def get_or_create(self, client_oid: str, symbol: str,
                       side: str, qty: float) -> tuple:
@@ -456,13 +500,26 @@ class OrderRegistry:
     def snapshot(self) -> list:
         return [order.to_record() for order in self._orders.values()]
 
-    def restore(self, records: list):
-        """Replace registry state only after validating the whole snapshot."""
+    def restore(self, records: list) -> int:
+        """Replace registry state after validation; return quarantined legacy count.
+
+        A single, well-defined pre-PR455 Binance WS artifact may be omitted from
+        execution authority instead of poisoning the entire snapshot. All other
+        malformed/ambiguous records still abort restore fail-closed.
+        """
         if not isinstance(records, list):
             raise ValueError("order registry snapshot must be a list")
         restored = {}
         by_order_id = {}
+        quarantined = []
         for record in records:
+            if _legacy_binance_ws_terminal_artifact(record):
+                quarantined.append({
+                    "symbol": str(record.get("symbol") or ""),
+                    "order_id_present": bool(record.get("order_id")),
+                    "reason": "legacy_binance_algo_child_ws_artifact",
+                })
+                continue
             order = ManagedOrder.from_record(record)
             if order.client_oid in restored:
                 raise ValueError("duplicate client_oid in order registry snapshot")
@@ -473,6 +530,11 @@ class OrderRegistry:
             restored[order.client_oid] = order
         self._orders = restored
         self._by_order_id = by_order_id
+        self._legacy_quarantined_records = quarantined
+        return len(quarantined)
+
+    def legacy_quarantined_records(self) -> list:
+        return list(self._legacy_quarantined_records)
 
     def pending_orders(self) -> List[ManagedOrder]:
         """Include submissions whose exchange acknowledgement may be lost."""
