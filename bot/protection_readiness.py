@@ -302,18 +302,53 @@ async def refresh_protection_readiness(engine) -> bool:
         }
 
         close_reconciled = 0
-        for order in list(unresolved_reader() or []):
+        flat_unresolved = list(unresolved_reader() or [])
+        for order in flat_unresolved:
             canon = _canon(getattr(order, "symbol", ""))
             if str(getattr(order, "exposure_intent", "INCREASE")) != "REDUCE":
                 continue
             previous = getattr(order, "previous_position_qty", None)
             filled = max(0.0, float(getattr(order, "filled_qty", 0.0) or 0.0))
-            if (
+            requested = max(0.0, float(getattr(order, "qty", 0.0) or 0.0))
+            known_full_close = (
                 previous is not None
                 and filled + 1e-9 >= float(previous)
+            )
+
+            # Compatibility repair for Binance REDUCE records written before
+            # reduce lineage captured previous_position_qty.  This does not
+            # infer a position from the order itself.  It is permitted only
+            # under stronger exchange truth: the whole account is already
+            # confirmed flat (this branch), this is the sole unresolved fill
+            # for the symbol, the REDUCE order itself is fully FILLED, and no
+            # durable/local/active-entry exposure remains.
+            same_symbol_unresolved = [
+                candidate
+                for candidate in flat_unresolved
+                if _canon(getattr(candidate, "symbol", "")) == canon
+            ]
+            legacy_flat_repair = (
+                previous is None
+                and requested > 0
+                and filled + 1e-9 >= requested
+                and len(same_symbol_unresolved) == 1
+            )
+            if (
+                (known_full_close or legacy_flat_repair)
                 and canon not in pending_symbols
                 and canon not in active_entry_symbols
+                and canon not in local_position_symbols
             ):
+                if legacy_flat_repair:
+                    log.warning(
+                        "[PROTECTION_STATE_RECONCILIATION] symbol=%s "
+                        "decision=REPAIR_LEGACY_REDUCE_LINEAGE "
+                        "exchange_global_flat=true filled_qty=%s requested_qty=%s "
+                        "previous_position_qty=UNKNOWN execution_effect=NONE",
+                        order.symbol,
+                        filled,
+                        requested,
+                    )
                 close_reconciled += mark_reconciled(order.symbol)
         if close_reconciled:
             from bot import durable_execution as durable

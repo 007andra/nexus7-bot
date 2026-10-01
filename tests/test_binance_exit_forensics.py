@@ -1,5 +1,7 @@
 import asyncio
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from bot import binance_exit_forensics as forensic
 
@@ -176,6 +178,72 @@ def test_force_orders_proves_liquidation_without_guessing_from_price():
     )
     assert receipt["cause"] == "EXCHANGE_LIQUIDATION"
     assert receipt["cause_authority"] is True
+
+
+def test_confirmed_binance_exit_handoffs_exact_pnl_to_durable_ledger():
+    engine = SimpleNamespace()
+    receipt = {
+        "status": "RECONCILED",
+        "pnl_fill_authority": True,
+        "close_fill_ms": 1790839555000,
+        "net_after_funding": "0.809514",
+        "close_order_ids": ["27098929423", "27100972276"],
+    }
+    logger = Mock()
+    with patch(
+        "bot.durable_daily_pnl.reconcile_confirmed_exchange",
+        new=AsyncMock(return_value=True),
+    ) as reconcile:
+        ok = run(
+            forensic._handoff_confirmed_daily_pnl(
+                engine,
+                receipt,
+                symbol="AAVEUSDT",
+                opening_order_id="27098648014",
+                log=logger,
+            )
+        )
+
+    assert ok is True
+    reconcile.assert_awaited_once()
+    called_engine, row, verified = reconcile.await_args.args
+    assert called_engine is engine
+    assert row["symbol"] == "AAVEUSDT"
+    assert row["pnl"] == 0.809514
+    assert row["closeTime"] == 1790839555000
+    assert "27098648014" in row["closeId"]
+    assert verified == {
+        "ownership": "BGX_ORDER_IDS",
+        "fills_reconciled": True,
+        "lineage_reconciled": True,
+        "opening_order_ids": ["27098648014"],
+        "exchange": "BINANCE",
+    }
+
+
+def test_unconfirmed_binance_exit_never_mutates_durable_pnl():
+    engine = SimpleNamespace()
+    receipt = {
+        "status": "RECONCILED",
+        "pnl_fill_authority": False,
+        "close_fill_ms": 1790839555000,
+        "net_after_funding": "0.809514",
+    }
+    with patch(
+        "bot.durable_daily_pnl.reconcile_confirmed_exchange",
+        new=AsyncMock(return_value=True),
+    ) as reconcile:
+        ok = run(
+            forensic._handoff_confirmed_daily_pnl(
+                engine,
+                receipt,
+                symbol="AAVEUSDT",
+                opening_order_id="27098648014",
+                log=Mock(),
+            )
+        )
+    assert ok is False
+    reconcile.assert_not_awaited()
 
 
 def test_forensic_module_contains_no_exchange_mutation_calls():

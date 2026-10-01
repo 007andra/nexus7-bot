@@ -293,6 +293,49 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(order.exposure_reconciliation_complete)
         self.assertEqual(engine._unprotected_symbols, set())
 
+    async def test_legacy_full_reduce_without_previous_qty_repairs_only_when_globally_flat(self):
+        orders, order = self._filled_reduce("bgx7-legacy-close", 2.8, 2.8)
+        order.previous_position_qty = None
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=orders, positions={},
+        )
+        with patch(
+            "bot.durable_execution.persist_orders",
+            new=AsyncMock(return_value=True),
+        ) as persist:
+            self.assertTrue(await refresh_protection_readiness(engine))
+            persist.assert_awaited_once()
+        self.assertTrue(order.exposure_reconciliation_complete)
+        self.assertEqual(engine._unprotected_symbols, set())
+
+    async def test_legacy_reduce_missing_previous_qty_stays_blocked_when_symbol_has_other_unreconciled_fill(self):
+        orders, close_order = self._filled_reduce("bgx7-legacy-close-ambiguous", 2.8, 2.8)
+        close_order.previous_position_qty = None
+        entry, _ = orders.get_or_create(
+            "bgx7-legacy-entry-unreconciled", "SOLUSDT", "Buy", 2.8
+        )
+        entry.transition(OrderState.SUBMITTING, source="REST")
+        entry.transition(OrderState.SUBMITTED, order_id="legacy-entry", source="REST")
+        entry.transition(OrderState.FILLED, filled_qty=2.8, source="REST")
+
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=orders, positions={},
+        )
+        self.assertFalse(await refresh_protection_readiness(engine))
+        self.assertFalse(close_order.exposure_reconciliation_complete)
+        self.assertFalse(entry.exposure_reconciliation_complete)
+        self.assertEqual(engine._unprotected_symbols, {"SOLUSDT"})
+
     async def test_full_close_persistence_failure_keeps_blocked(self):
         orders, order = self._filled_reduce("bgx7-close-db-fail", 4.2, 4.2)
         client = SimpleNamespace(

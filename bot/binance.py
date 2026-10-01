@@ -983,6 +983,8 @@ class BinanceClient:
             if managed.state == OrderState.CREATED:
                 managed.transition(OrderState.SUBMITTING, source="LOCAL")
 
+        engine = getattr(self, "_engine", None)
+
         if not reduce_only:
             from bot.critical_state import critical_state
             from bot.runtime_readiness import assert_ready_for_new_entries
@@ -993,7 +995,6 @@ class BinanceClient:
             )
 
             critical_state.assert_available_for_new_risk()
-            engine = getattr(self, "_engine", None)
             if engine is None:
                 raise RuntimeError(
                     "READY_FOR_NEW_ENTRIES=false: execution engine unavailable"
@@ -1007,15 +1008,62 @@ class BinanceClient:
                 engine, ownership, event="predispatch_validated"
             )
             assert_ready_for_new_entries(engine)
-            if managed is not None:
+
+        # Durable exposure lineage must describe both risk-increasing entries
+        # and risk-reducing exits. Previously this snapshot lived inside the
+        # not-reduce-only branch, leaving Binance REDUCE fills without
+        # previous_position_qty and making confirmed-flat reconciliation
+        # impossible after the close.
+        #
+        # Lineage capture is accounting metadata only: a missing/invalid local
+        # snapshot must never prevent a risk-reducing close from reaching the
+        # exchange. New-risk entries retain the existing fail-closed behavior.
+        if managed is not None:
+            if engine is None:
+                if reduce_only:
+                    log.warning(
+                        "[BINANCE_REDUCE_LINEAGE] symbol=%s "
+                        "previous_position_qty=UNAVAILABLE reason=engine_missing "
+                        "execution_effect=NONE",
+                        symbol,
+                    )
+            else:
                 local_position = (getattr(engine, "positions", {}) or {}).get(symbol)
                 if local_position is None:
-                    managed.previous_position_qty = 0.0
+                    if not reduce_only:
+                        managed.previous_position_qty = 0.0
                 else:
-                    previous_qty = abs(float(getattr(local_position, "qty", 0.0) or 0.0))
+                    try:
+                        previous_qty = abs(
+                            float(getattr(local_position, "qty", 0.0) or 0.0)
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        previous_qty = float("nan")
                     if not math.isfinite(previous_qty):
-                        raise RuntimeError("BINANCE_PREVIOUS_POSITION_QTY_INVALID")
-                    managed.previous_position_qty = previous_qty
+                        if reduce_only:
+                            log.warning(
+                                "[BINANCE_REDUCE_LINEAGE] symbol=%s "
+                                "previous_position_qty=UNAVAILABLE "
+                                "reason=local_position_qty_invalid "
+                                "execution_effect=NONE",
+                                symbol,
+                            )
+                        else:
+                            raise RuntimeError(
+                                "BINANCE_PREVIOUS_POSITION_QTY_INVALID"
+                            )
+                    else:
+                        managed.previous_position_qty = previous_qty
+                        if reduce_only:
+                            log.info(
+                                "[BINANCE_REDUCE_LINEAGE] symbol=%s "
+                                "previous_position_qty=%.12g "
+                                "requested_reduce_qty=%.12g "
+                                "execution_effect=NONE",
+                                symbol,
+                                previous_qty,
+                                float(qty),
+                            )
 
         data = await self._post(
             "/fapi/v1/order",
