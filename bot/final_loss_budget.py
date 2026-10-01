@@ -93,6 +93,7 @@ def reason_from_exception(exc):
 def emit_telemetry(
     log, *, symbol, setup_id, stage, qty, entry, stop, direction, leverage,
     cost_fraction, result, specific_reason, risk_v3_advisory_qty=None,
+    execution_effect="OBSERVABILITY_ONLY",
 ):
     """Best-effort logging only. Any telemetry failure is isolated from trading."""
     try:
@@ -110,7 +111,7 @@ def emit_telemetry(
             "stop_fraction=%.12g cost_fraction=%.12g projected_loss=%.12g "
             "loss_limit=%.12g projected_loss_pct_notional=%.8f "
             "allowed_loss_pct_notional=%.8f headroom_usdt=%.12g "
-            "headroom_pct=%.8f decision_effect=NONE execution_effect=OBSERVABILITY_ONLY",
+            "headroom_pct=%.8f decision_effect=NONE execution_effect=%s",
             symbol, setup_id or 'UNKNOWN', stage, str(result).upper(),
             specific_reason, metrics['qty'], risk_qty, metrics['entry'],
             metrics['stop'], metrics['direction'], metrics['leverage'],
@@ -118,7 +119,7 @@ def emit_telemetry(
             metrics['projected_loss'], metrics['loss_limit'],
             metrics['projected_loss_pct_notional'],
             metrics['allowed_loss_pct_notional'], metrics['headroom_usdt'],
-            metrics['headroom_pct'],
+            metrics['headroom_pct'], str(execution_effect),
         )
     except Exception as exc:
         _report_telemetry_failure(log, symbol, setup_id, stage, result, exc)
