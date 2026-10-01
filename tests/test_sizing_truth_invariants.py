@@ -4,8 +4,10 @@ Exercises the real chain used in production: ``final_sizing_invariants`` (the
 last ``minimum_base_quantity`` hook) -> ``ProfessionalRiskAdapter.size`` ->
 ``RiskManagerV3.size_for_stop`` -> ``final_loss_budget.diagnose``.
 
-Contract (2026-09-26 audit P0-1):
-    final_qty = min(stop_risk_qty, operator_margin_cap_qty)
+Contract:
+    proposed_qty = min(stop_risk_qty, operator_margin_cap_qty)
+    final_qty = proposed_qty only when final_loss_budget is PASS; otherwise 0.
+The loss-budget rejection is candidate-local and does not pause the runtime.
 """
 import logging
 import math
@@ -130,19 +132,20 @@ class SizingTruthInvariantTests(unittest.TestCase):
                     self.assertLessEqual(required_margin, 10.0 * 0.50 + tol)
 
     def test_matrix_is_not_vacuous(self):
-        """Pin which leverages size vs block, so the invariants above are exercised."""
+        """Pin which leverages size vs candidate-block, exercising both paths."""
         sized = {lev: self._run(leverage=lev).final_qty for lev in LEVERAGES}
         # 1x: RiskManagerV3 collateral cap (MAX_MARGIN_PCT) cannot meet minNotional.
         self.assertEqual(sized[1], 0.0)
         for lev in (10, 20, 50):
             self.assertGreater(sized[lev], 0.0, lev)
-        # The historical final_loss_budget ceiling is diagnostic-only.
-        # Higher leverage therefore does not create a second geometry veto;
-        # RiskManagerV3/operator margin remain the binding sizing authorities.
+        # At higher leverage, 50% of entry initial margin represents a smaller
+        # fraction of notional. With this fixed stop/cost geometry the final
+        # loss-budget gate rejects the candidate instead of allowing a second
+        # sizing authority or pausing the runtime.
         for lev in (75, 100, 125):
-            self.assertGreater(sized[lev], 0.0, lev)
+            self.assertEqual(sized[lev], 0.0, lev)
         self.assertEqual(
-            len({sized[lev] for lev in (20, 50, 75, 100, 125)}),
+            len({sized[lev] for lev in (20, 50)}),
             1,
             sized,
         )
