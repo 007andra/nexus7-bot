@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import time
 import unittest
@@ -55,6 +55,153 @@ class OperatorRuntimePolicyTests(unittest.TestCase):
             os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
             if previous_override is not None:
                 os.environ[policy.RISK_OVERRIDE_ENV] = previous_override
+
+    def test_valid_bounded_recovery_neutralizes_only_legacy_active_pause(self):
+        import asyncio
+        from bot import drawdown_recovery
+        from bot import operator_runtime_policy as policy
+
+        keys = (
+            drawdown_recovery.AUTH_ENV,
+            drawdown_recovery.EPISODE_ENV,
+            drawdown_recovery.EXPIRES_ENV,
+            drawdown_recovery.MAX_DD_ENV,
+            drawdown_recovery.RISK_ENV,
+            policy.RISK_OVERRIDE_ENV,
+        )
+        old_env = {key: os.environ.get(key) for key in keys}
+        old_dd = cfg.MAX_DRAWDOWN
+        old_risk = cfg.MAX_RISK_PCT
+        try:
+            os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
+            os.environ[drawdown_recovery.AUTH_ENV] = "true"
+            os.environ[drawdown_recovery.EPISODE_ENV] = "legacy-active-bridge-test"
+            os.environ[drawdown_recovery.EXPIRES_ENV] = (
+                datetime.now(timezone.utc) + timedelta(minutes=30)
+            ).isoformat()
+            os.environ[drawdown_recovery.MAX_DD_ENV] = "0.62"
+            os.environ[drawdown_recovery.RISK_ENV] = "0.005"
+            cfg.MAX_DRAWDOWN = 0.17
+            cfg.MAX_RISK_PCT = 1.0
+
+            engine = SimpleNamespace(
+                active=True,
+                risk=SimpleNamespace(drawdown=0.6158),
+                _dd_alerted=False,
+            )
+
+            async def legacy_update():
+                engine.active = False
+                return "updated"
+
+            guarded = policy._protect_drawdown_update(
+                engine, legacy_update, _Log(), source="TEST"
+            )
+            self.assertEqual(asyncio.run(guarded()), "updated")
+            self.assertTrue(engine.active)
+            self.assertTrue(engine._dd_alerted)
+        finally:
+            cfg.MAX_DRAWDOWN = old_dd
+            cfg.MAX_RISK_PCT = old_risk
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_recovery_above_ceiling_preserves_legacy_active_pause(self):
+        import asyncio
+        from bot import drawdown_recovery
+        from bot import operator_runtime_policy as policy
+
+        keys = (
+            drawdown_recovery.AUTH_ENV,
+            drawdown_recovery.EPISODE_ENV,
+            drawdown_recovery.EXPIRES_ENV,
+            drawdown_recovery.MAX_DD_ENV,
+            drawdown_recovery.RISK_ENV,
+            policy.RISK_OVERRIDE_ENV,
+        )
+        old_env = {key: os.environ.get(key) for key in keys}
+        old_dd = cfg.MAX_DRAWDOWN
+        old_risk = cfg.MAX_RISK_PCT
+        try:
+            os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
+            os.environ[drawdown_recovery.AUTH_ENV] = "true"
+            os.environ[drawdown_recovery.EPISODE_ENV] = "legacy-active-bridge-test"
+            os.environ[drawdown_recovery.EXPIRES_ENV] = (
+                datetime.now(timezone.utc) + timedelta(minutes=30)
+            ).isoformat()
+            os.environ[drawdown_recovery.MAX_DD_ENV] = "0.62"
+            os.environ[drawdown_recovery.RISK_ENV] = "0.005"
+            cfg.MAX_DRAWDOWN = 0.17
+            cfg.MAX_RISK_PCT = 1.0
+
+            engine = SimpleNamespace(
+                active=True,
+                risk=SimpleNamespace(drawdown=0.6201),
+                _dd_alerted=False,
+            )
+
+            async def legacy_update():
+                engine.active = False
+                return "updated"
+
+            guarded = policy._protect_drawdown_update(
+                engine, legacy_update, _Log(), source="TEST"
+            )
+            self.assertEqual(asyncio.run(guarded()), "updated")
+            self.assertFalse(engine.active)
+        finally:
+            cfg.MAX_DRAWDOWN = old_dd
+            cfg.MAX_RISK_PCT = old_risk
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_disabled_recovery_preserves_legacy_active_pause(self):
+        import asyncio
+        from bot import drawdown_recovery
+        from bot import operator_runtime_policy as policy
+
+        keys = (
+            drawdown_recovery.AUTH_ENV,
+            drawdown_recovery.EPISODE_ENV,
+            drawdown_recovery.EXPIRES_ENV,
+            drawdown_recovery.MAX_DD_ENV,
+            drawdown_recovery.RISK_ENV,
+            policy.RISK_OVERRIDE_ENV,
+        )
+        old_env = {key: os.environ.get(key) for key in keys}
+        old_dd = cfg.MAX_DRAWDOWN
+        try:
+            for key in keys:
+                os.environ.pop(key, None)
+            cfg.MAX_DRAWDOWN = 0.17
+            engine = SimpleNamespace(
+                active=True,
+                risk=SimpleNamespace(drawdown=0.6158),
+                _dd_alerted=False,
+            )
+
+            async def legacy_update():
+                engine.active = False
+                return "updated"
+
+            guarded = policy._protect_drawdown_update(
+                engine, legacy_update, _Log(), source="TEST"
+            )
+            self.assertEqual(asyncio.run(guarded()), "updated")
+            self.assertFalse(engine.active)
+        finally:
+            cfg.MAX_DRAWDOWN = old_dd
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def test_live_pilot_target_is_fifty_percent_available_margin(self):
         from bot import engine as engine_module
