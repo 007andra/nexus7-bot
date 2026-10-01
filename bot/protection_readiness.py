@@ -203,8 +203,21 @@ async def refresh_protection_readiness(engine) -> bool:
     ]
 
     reconciled_now = 0
+    from bot.ambiguous_entry_recovery import _unresolved_entry_intents
+    local_symbols = {
+        _canon(symbol) for symbol in (getattr(engine, "positions", {}) or {}).keys()
+    }
+    ambiguous_symbols = {
+        _canon(order.symbol) for order in _unresolved_entry_intents(engine)
+    }
     for order in entry_unresolved:
-        if live_qty.get(_canon(getattr(order, "symbol", "")), 0.0) > 0:
+        canon = _canon(getattr(order, "symbol", ""))
+        # A never-materialized BGX entry (ambiguous submit) is absorbed only by
+        # a local Position, so ambiguous_entry_recovery can still prove lineage
+        # and protect it; live exposure alone must not retire that intent.
+        if canon in ambiguous_symbols and canon not in local_symbols:
+            continue
+        if live_qty.get(canon, 0.0) > 0:
             reconciled_now += mark_reconciled(order.symbol)
     for order in reduce_unresolved:
         previous = getattr(order, "previous_position_qty", None)

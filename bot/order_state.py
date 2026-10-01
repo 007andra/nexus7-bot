@@ -91,6 +91,10 @@ class ManagedOrder:
     reduce_only: bool = False
     exposure_intent: str = "INCREASE"  # INCREASE | REDUCE
     previous_position_qty: Optional[float] = None
+    # Durable protective intent of a BGX entry, persisted before dispatch so an
+    # ambiguous submit can still be protected after the fill is proven:
+    # {"direction": LONG|SHORT, "entry": float, "sl": float, "tp": float}.
+    protection_plan: Optional[dict] = None
 
     def transition(self, novo: OrderState, **info):
         """
@@ -204,6 +208,9 @@ class ManagedOrder:
             "reduce_only": bool(self.reduce_only),
             "exposure_intent": str(self.exposure_intent),
             "previous_position_qty": self.previous_position_qty,
+            "protection_plan": (
+                dict(self.protection_plan) if self.protection_plan else None
+            ),
         }
 
     @classmethod
@@ -248,7 +255,39 @@ class ManagedOrder:
         order.previous_position_qty = (
             None if previous_qty is None else max(0.0, float(previous_qty))
         )
+        order.protection_plan = normalize_protection_plan(
+            record.get("protection_plan")
+        )
         return order
+
+
+def normalize_protection_plan(plan) -> Optional[dict]:
+    """Return a validated protective plan or None (never a partial plan)."""
+    if not isinstance(plan, dict):
+        return None
+    direction = str(plan.get("direction") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return None
+    try:
+        entry = float(plan.get("entry"))
+        sl = float(plan.get("sl"))
+        tp = float(plan.get("tp", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (entry, sl, tp)):
+        return None
+    if entry <= 0 or sl <= 0 or tp < 0:
+        return None
+    if direction == "LONG" and not sl < entry:
+        return None
+    if direction == "SHORT" and not sl > entry:
+        return None
+    return {
+        "direction": direction, "entry": entry, "sl": sl, "tp": tp,
+        # True once a local Position was materialized for this intent; only
+        # never-materialized intents are candidates for ambiguous recovery.
+        "materialized": bool(plan.get("materialized", False)),
+    }
 
 
 class OrderRegistry:
@@ -294,6 +333,9 @@ class OrderRegistry:
         exchange retorna o orderId (dentro de place_order)."""
         if order_id and client_oid:
             self._by_order_id[order_id] = client_oid
+
+    def all_orders(self) -> List[ManagedOrder]:
+        return list(self._orders.values())
 
     def snapshot(self) -> list:
         return [order.to_record() for order in self._orders.values()]

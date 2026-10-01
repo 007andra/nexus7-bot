@@ -251,8 +251,16 @@ def install(TradingEngine, log) -> None:
             return result
 
         if not _owned_locally(self, symbol):
-            # A real position may exist even if local creation failed. Without
-            # exact ownership proof, do not mutate it; block further entries.
+            # A real position may exist even if local creation failed (for
+            # example an ambiguous submit that Binance filled). Only the exact
+            # durable BGX lineage proof may adopt and protect it.
+            from bot import ambiguous_entry_recovery
+
+            await ambiguous_entry_recovery.recover_unadopted_entries(
+                self, symbol=symbol
+            )
+            if _owned_locally(self, symbol):
+                return result
             try:
                 live = await _live_position(self, symbol)
             except Exception:
@@ -264,6 +272,10 @@ def install(TradingEngine, log) -> None:
                     "reason=local_ownership_state_missing mutation=false",
                     symbol,
                 )
+                if not ambiguous_entry_recovery._unresolved_entry_intents(self, symbol):
+                    await ambiguous_entry_recovery.alert_unattributed_exposure(
+                        self, symbol, "post_open_local_state_missing"
+                    )
             return result
 
         await _enforce(
@@ -305,6 +317,9 @@ def install(TradingEngine, log) -> None:
 
     TradingEngine._open = _open_with_protection
     TradingEngine._guard_naked_positions = _guard_with_conditional_protection
+    # Shared enforcement authority for exposure adopted with exact BGX lineage
+    # (ambiguous_entry_recovery); same repair / confirmed-close policy.
+    TradingEngine._bgx_enforce_owned_protection = staticmethod(_enforce)
     TradingEngine._binance_protection_failclosed_patched = True
     log.warning(
         "[BINANCE_PROTECTION_FAIL_CLOSED] installed=true "
