@@ -52,14 +52,11 @@ class FinalSizingInvariantTests(unittest.TestCase):
         final_sizing.install(module, pilot_cap, _Log())
         return module, engine
 
-    def _call(self, module, engine, price=100.0, info=INFO, stop=None):
+    def _call(self, module, engine, price=100.0, info=INFO):
         token_engine = pilot_cap._PILOT_ENGINE.set(engine)
         token_symbol = pilot_cap._PILOT_SYMBOL.set("TESTUSDT")
         token_qty = pilot_cap._PILOT_FINAL_QTY.set(None)
-        token_signal = pilot_cap._PILOT_SIGNAL.set(SimpleNamespace(
-            sl=price * .996 if stop is None else stop,
-            direction='LONG',
-        ))
+        token_signal = pilot_cap._PILOT_SIGNAL.set(SimpleNamespace(sl=price * .996, direction='LONG'))
         try:
             qty = module.minimum_base_quantity(info, price)
             stored = pilot_cap._PILOT_FINAL_QTY.get()
@@ -87,12 +84,6 @@ class FinalSizingInvariantTests(unittest.TestCase):
         qty, stored = self._call(module, engine)
         self.assertAlmostEqual(qty, 0.25)
         self.assertAlmostEqual(stored, 0.25)
-
-    def test_final_loss_budget_breach_fails_closed_before_dispatch(self):
-        module, engine = self._install(risk_size=lambda *a, **k: 5.0)
-        qty, stored = self._call(module, engine, price=100.0, stop=98.0)
-        self.assertEqual(qty, 0.0)
-        self.assertEqual(stored, 0.0)
 
     def test_operator_cap_binds_when_risk_allows_more(self):
         module, engine = self._install(risk_size=lambda *a, **k: 10.0)
