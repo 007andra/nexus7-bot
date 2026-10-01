@@ -33,7 +33,7 @@ class BinanceReduceLineageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(order.reduce_only)
         self.assertEqual(order.exposure_intent, "REDUCE")
         self.assertAlmostEqual(order.previous_position_qty, 2.8)
-        self.assertEqual(result["orderId"], "12345")
+        self.assertEqual(result["orderId"], 12345)
         submitted = client._post.await_args.args[1]
         self.assertEqual(submitted["reduceOnly"], "true")
 
@@ -58,7 +58,7 @@ class BinanceReduceLineageTests(unittest.IsolatedAsyncioTestCase):
 
         order = registry.get("bgx7-close-no-engine")
         self.assertIsNone(order.previous_position_qty)
-        self.assertEqual(result["orderId"], "54321")
+        self.assertEqual(result["orderId"], 54321)
         client._post.assert_awaited_once()
 
 
