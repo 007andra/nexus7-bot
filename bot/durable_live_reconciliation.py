@@ -129,7 +129,9 @@ def apply_exchange_order_truth(
     if remote_side and remote_side != order.side:
         raise ValueError("durable/exchange side mismatch")
     if remote_order_id:
-        engine.orders.index_order_id(remote_order_id, order.client_oid)
+        # Read-only: an orderId owned by another clientOid is rejected
+        # (OrderIdentityConflict is a ValueError) before anything is written.
+        engine.orders.validate_order_id_binding(remote_order_id, order.client_oid)
 
     requested = float(order.qty)
     filled = float(data.get("filledSize", data.get("dealSize", 0)) or 0)
@@ -138,6 +140,10 @@ def apply_exchange_order_truth(
     if requested <= 0:
         raise ValueError("invalid durable requested quantity")
     avg_price = _average_price(data, filled)
+
+    # Identity fully validated: only now may the orderId index be written.
+    if remote_order_id:
+        engine.orders.index_order_id(remote_order_id, order.client_oid)
 
     if order.is_terminal:
         # Terminal state never regresses; authoritative REST may only complete

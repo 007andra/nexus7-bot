@@ -2303,10 +2303,6 @@ class BinanceClient:
                 order.get("S", ""),
                 float(order.get("q", 0) or 0),
             )
-            if order_id:
-                registry.index_order_id(
-                    order_id, client_oid
-                )
         except Exception as exc:
             log.warning(
                 "[BINANCE_PRIVATE_WS] event=ORDER_TRADE_UPDATE "
@@ -2331,7 +2327,12 @@ class BinanceClient:
         # o.ap average price) is absorbed first, monotonically, on any state:
         # a WS FILLED that beats the REST recovery must never leave
         # FILLED/filled_qty=0, and a later/duplicate event never shrinks it.
+        # Identity is validated in full (registry binding first, read-only)
+        # before any evidence is absorbed, and the orderId index is written
+        # only afterwards: a rejected event can never contaminate either.
         try:
+            if order_id:
+                registry.validate_order_id_binding(order_id, client_oid)
             evidence_changed = managed.absorb_execution_evidence(
                 order_id=order_id or None,
                 filled_qty=order.get("z"),
@@ -2341,6 +2342,8 @@ class BinanceClient:
                 client_oid=client_oid,
                 source="WS",
             )
+            if order_id:
+                registry.index_order_id(order_id, client_oid)
         except (InvalidTransition, TypeError, ValueError) as exc:
             log.critical(
                 "[BINANCE_PRIVATE_WS] event=ORDER_TRADE_UPDATE symbol=%s status=%s "

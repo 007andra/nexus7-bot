@@ -594,6 +594,107 @@ class AmbiguousEntryRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(getattr(self, "stop_calls", []))
         self.assert_entries_blocked()
         self.assertEqual(len(self.opening_posts()), 1)
+        # Neither the WS (999) nor the REST (777) conflicting id is indexed.
+        registry = self.engine.orders
+        self.assertEqual(order.order_id, "888")
+        self.assertIs(registry.get_by_order_id("888"), order)
+        self.assertIsNone(registry.get_by_order_id("999"))
+        self.assertIsNone(registry.get_by_order_id("777"))
+
+    # ── orderId index can never be contaminated by a rejected event ──────
+    async def test_IDX_A_ws_conflicting_order_id_never_reaches_index(self):
+        await self.ambiguous_open()
+        await self.ws("FILLED", self.requested_qty, order_id="777")
+        order = self.intent()
+        registry = self.engine.orders
+        self.assertIs(registry.get_by_order_id("777"), order)
+        await self.ws("FILLED", self.requested_qty, order_id="999")    # rejected
+        self.assertEqual(order.order_id, "777")
+        self.assertIs(registry.get_by_order_id("777"), order)
+        self.assertIsNone(registry.get_by_order_id("999"))
+        result = await recovery.recover_unadopted_entries(self.engine)
+        self.assertEqual(list(result.values()), [recovery.ADOPTED_PROTECTED])
+        self.assertEqual(len(self.stop_calls), 1)
+        self.assertEqual(len(self.opening_posts()), 1)
+
+    async def test_IDX_A2_ws_order_id_owned_by_other_intent_is_rejected_before_absorb(self):
+        await self.ambiguous_open()
+        order = self.intent()
+        registry = self.engine.orders
+        other = ManagedOrder("bgx7-other-intent", "BTCUSDT", "Buy", 1.0)
+        registry._orders[other.client_oid] = other
+        registry.index_order_id("999", other.client_oid)
+        await self.ws("FILLED", self.requested_qty, order_id="999")   # 999 belongs to other
+        self.assertIsNone(order.order_id)                 # no evidence absorbed
+        self.assertEqual(order.filled_qty, 0.0)
+        self.assertEqual(order.state, OrderState.SUBMITTING)
+        self.assertIs(registry.get_by_order_id("999"), other)
+        self.assertEqual(self.engine.positions, {})
+        self.assertEqual(len(self.opening_posts()), 1)
+
+    async def test_IDX_D_rest_conflicting_order_id_rejected_without_index_write(self):
+        await self.ambiguous_open()
+        await self.ws("FILLED", self.requested_qty, order_id="777")
+        order = self.intent()
+        registry = self.engine.orders
+        from bot.durable_live_reconciliation import apply_exchange_order_truth
+        with self.assertRaises(ValueError):
+            apply_exchange_order_truth(self.engine, order, {
+                "clientOid": order.client_oid, "orderId": "999", "symbol": "ETHUSDT",
+                "side": "BUY", "isActive": False, "status": "FILLED",
+                "filledSize": str(self.requested_qty),
+            })
+        self.assertEqual(order.order_id, "777")
+        self.assertIs(registry.get_by_order_id("777"), order)
+        self.assertIsNone(registry.get_by_order_id("999"))
+        # REST orderId already owned by another intent: rejected, nothing written.
+        fresh = ManagedOrder("bgx7-fresh", "ETHUSDT", "Buy", 1.0, state=OrderState.SUBMITTING)
+        registry._orders[fresh.client_oid] = fresh
+        with self.assertRaises(ValueError):
+            apply_exchange_order_truth(self.engine, fresh, {
+                "clientOid": fresh.client_oid, "orderId": "777", "symbol": "ETHUSDT",
+                "side": "BUY", "isActive": False, "status": "FILLED", "filledSize": "1.0",
+            })
+        self.assertIsNone(fresh.order_id)
+        self.assertEqual(fresh.state, OrderState.SUBMITTING)
+        self.assertIs(registry.get_by_order_id("777"), order)
+
+
+class OrderIdIndexIntegrity(unittest.TestCase):
+    def setUp(self):
+        self.registry = OrderRegistry()
+        self.order, _ = self.registry.get_or_create("bgx7-abc", "ETHUSDT", "Buy", 1.0)
+        self.other, _ = self.registry.get_or_create("bgx7-other", "ETHUSDT", "Buy", 1.0)
+
+    def test_B_order_id_owned_by_another_client_is_rejected(self):
+        self.registry.index_order_id("999", "bgx7-other")
+        with self.assertRaises(ValueError):
+            self.registry.index_order_id("999", "bgx7-abc")
+        self.assertIs(self.registry.get_by_order_id("999"), self.other)
+
+    def test_B2_client_with_different_known_order_id_is_rejected(self):
+        self.order.transition(OrderState.SUBMITTING, source="REST")
+        self.order.transition(OrderState.SUBMITTED, order_id="777", source="REST")
+        self.registry.index_order_id("777", "bgx7-abc")
+        with self.assertRaises(ValueError):
+            self.registry.index_order_id("999", "bgx7-abc")
+        self.assertIsNone(self.registry.get_by_order_id("999"))
+        self.assertIs(self.registry.get_by_order_id("777"), self.order)
+        self.assertEqual(self.order.order_id, "777")
+
+    def test_B3_client_already_indexed_to_other_order_id_is_rejected(self):
+        self.registry.index_order_id("777", "bgx7-abc")     # before transition sets order_id
+        with self.assertRaises(ValueError):
+            self.registry.index_order_id("999", "bgx7-abc")
+        self.assertIsNone(self.registry.get_by_order_id("999"))
+
+    def test_C_same_association_is_idempotent(self):
+        for _ in range(3):
+            self.registry.index_order_id("777", "bgx7-abc")
+        self.assertIs(self.registry.get_by_order_id("777"), self.order)
+        self.assertEqual(
+            [k for k, v in self.registry._by_order_id.items() if v == "bgx7-abc"], ["777"]
+        )
 
 
 for _name in ("replace", "account", "brackets", "fence",

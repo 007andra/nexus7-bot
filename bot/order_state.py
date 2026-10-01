@@ -62,6 +62,10 @@ class InvalidTransition(Exception):
     pass
 
 
+class OrderIdentityConflict(ValueError):
+    """Exchange identity (order_id <-> client_oid) conflicts with the registry."""
+
+
 @dataclass
 class ManagedOrder:
     """
@@ -409,10 +413,41 @@ class OrderRegistry:
         coid = self._by_order_id.get(order_id)
         return self._orders.get(coid) if coid else None
 
+    def validate_order_id_binding(self, order_id: str, client_oid: str) -> None:
+        """Raise ``OrderIdentityConflict`` if order_id <-> client_oid conflicts.
+
+        Read-only: callers validate before absorbing exchange evidence so a
+        rejected event can never leave a partial write behind.
+        """
+        if not order_id or not client_oid:
+            return
+        oid = str(order_id)
+        owner = self._by_order_id.get(order_id, self._by_order_id.get(oid))
+        if owner is not None and owner != client_oid:
+            raise OrderIdentityConflict(
+                f"order_id {oid} já associado a outro clientOid"
+            )
+        for indexed_oid, indexed_owner in self._by_order_id.items():
+            if indexed_owner == client_oid and str(indexed_oid) != oid:
+                raise OrderIdentityConflict(
+                    f"clientOid {client_oid[:16]} já associado a outro order_id"
+                )
+        order = self._orders.get(client_oid)
+        known = getattr(order, "order_id", None)
+        if known and str(known) != oid:
+            raise OrderIdentityConflict(
+                f"clientOid {client_oid[:16]} possui order_id diferente"
+            )
+
     def index_order_id(self, order_id: str, client_oid: str):
-        """Registra o vínculo order_id -> client_oid assim que a
-        exchange retorna o orderId (dentro de place_order)."""
+        """Registra o vínculo order_id -> client_oid (fail-closed).
+
+        A mesma associação é idempotente; qualquer associação conflitante
+        (order_id de outro clientOid, ou clientOid com outro order_id) é
+        rejeitada e nunca sobrescreve o índice existente.
+        """
         if order_id and client_oid:
+            self.validate_order_id_binding(order_id, client_oid)
             self._by_order_id[order_id] = client_oid
 
     def all_orders(self) -> List[ManagedOrder]:
