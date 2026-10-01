@@ -112,6 +112,13 @@ class _Risk:
     def size(self, symbol, entry, instruments, size_mult=1.0, open_positions=None):
         return 6.0
 
+    def validate_fresh_executable_risk(self, symbol, executable_entry, qty):
+        return True, {
+            "risk_budget": 10.0,
+            "projected_loss": 6.0,
+            "headroom_usdt": 4.0,
+        }
+
 
 class _MarketClient:
     def __init__(self):
