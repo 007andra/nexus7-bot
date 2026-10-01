@@ -84,9 +84,29 @@ def _filled(order) -> float:
     return value if math.isfinite(value) and value > 0 else 0.0
 
 
+def _zero_fill_confirmed(order) -> bool:
+    return bool((getattr(order, "protection_plan", None) or {}).get("zero_fill_confirmed"))
+
+
+def _evidence_incomplete(order) -> bool:
+    """Terminal state whose execution quantity is not proven (UNKNOWN).
+
+    FILLED with zero quantity is contradictory, and CANCELLED with zero fill
+    may only mean the cumulative quantity was never observed (e.g. a WS cancel
+    that lost ``o.z``). Neither is NOT_ACCEPTED until exchange truth says so.
+    """
+    if _filled(order) > 0:
+        return False
+    if order.state == OrderState.FILLED:
+        return True
+    return order.state == OrderState.CANCELLED and not _zero_fill_confirmed(order)
+
+
 def _not_accepted(order) -> bool:
     return order.state in (OrderState.REJECTED, OrderState.FAILED) or (
-        order.state == OrderState.CANCELLED and _filled(order) <= 0
+        order.state == OrderState.CANCELLED
+        and _filled(order) <= 0
+        and _zero_fill_confirmed(order)
     )
 
 
@@ -227,12 +247,24 @@ async def _refresh_from_exchange(engine, order) -> str:
         return f"lookup_{type(exc).__name__}"
     if not data:
         return "lookup_inconclusive"
-    remote_side = _side_of(data.get("side")) if isinstance(data, dict) else ""
-    if remote_side and remote_side != order.side:
-        raise ValueError("durable/exchange side mismatch")
     from bot.durable_live_reconciliation import apply_exchange_order_truth
 
+    # Single evidence authority: identity (clientOid/orderId/symbol/side) is
+    # validated and execution evidence merged monotonically, terminal or not.
     changed, _terminal = apply_exchange_order_truth(engine, order, data, source=SOURCE)
+    try:
+        remote_filled = float(data.get("filledSize", data.get("dealSize", 0)) or 0)
+    except (TypeError, ValueError):
+        remote_filled = float("nan")
+    if (
+        order.state == OrderState.CANCELLED
+        and _filled(order) <= 0
+        and data.get("isActive") is False
+        and remote_filled == 0.0
+        and not _zero_fill_confirmed(order)
+    ):
+        order.protection_plan["zero_fill_confirmed"] = True
+        changed = True
     if changed and not await _persist(engine, "ambiguous_entry_exchange_truth"):
         return "persist_failed"
     return "applied"
@@ -417,7 +449,7 @@ async def _adopt_and_protect(engine, order, row: dict) -> str:
 
 async def _recover_one(engine, order) -> str:
     symbol = order.symbol
-    if not order.is_terminal:
+    if not order.is_terminal or _evidence_incomplete(order):
         try:
             outcome = await _refresh_from_exchange(engine, order)
         except ValueError as exc:
@@ -426,6 +458,12 @@ async def _recover_one(engine, order) -> str:
             return LINEAGE_REJECTED
     else:
         outcome = "terminal"
+
+    if _evidence_incomplete(order):
+        # Execution happened or may have happened, quantity unproven: UNKNOWN.
+        _block_entries(engine, symbol)
+        await _alert_once(engine, SUBMIT_UNKNOWN, order, f"execution_evidence_incomplete:{outcome}")
+        return SUBMIT_UNKNOWN
 
     if _not_accepted(order):
         pending = set(getattr(engine, PENDING_ATTR, set()) or set())

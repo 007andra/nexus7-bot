@@ -434,7 +434,169 @@ class AmbiguousEntryRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn(order, recovery._unresolved_entry_intents(self.engine))
 
 
-for _name in ("asyncTearDown", "replace", "account", "brackets", "fence",
+    # ── WS execution evidence arriving before any REST recovery ──────────
+    def ws_event(self, status, z, ap="100.5", order_id="777", side="BUY"):
+        return {"e": "ORDER_TRADE_UPDATE", "E": 1, "o": {
+            "c": self.intent().client_oid, "i": order_id, "s": "ETHUSDT",
+            "S": side, "q": str(self.requested_qty), "X": status,
+            "z": str(z), "ap": str(ap),
+        }}
+
+    async def ws(self, *args, **kwargs):
+        await self.client._handle_private_order_event(self.ws_event(*args, **kwargs))
+
+    async def test_A_ws_filled_before_rest_lookup_is_adopted_and_protected(self):
+        await self.ambiguous_open()                      # REST lookups inconclusive
+        await self.ws("FILLED", self.requested_qty, ap="100.5")
+        order = self.intent()
+        self.assertEqual(order.state, OrderState.FILLED)
+        self.assertEqual(order.order_id, "777")
+        self.assertAlmostEqual(order.filled_qty, self.requested_qty)
+        self.assertAlmostEqual(order.avg_price, 100.5)
+        result = await recovery.recover_unadopted_entries(self.engine)
+        self.assertEqual(list(result.values()), [recovery.ADOPTED_PROTECTED])
+        self.assertAlmostEqual(self.engine.positions["ETHUSDT"].qty, self.requested_qty)
+        self.assertTrue(self.stop_installed)
+        self.assertNotIn("ETHUSDT", self.engine._unprotected_symbols)
+        self.assertEqual(len(self.opening_posts()), 1)
+
+    async def test_B_ws_partial_then_canceled_keeps_fill_and_adopts_partial(self):
+        self.fill_qty = 0.25
+        await self.ambiguous_open()
+        await self.ws("PARTIALLY_FILLED", 0.25)
+        await self.ws("CANCELED", 0.25)
+        order = self.intent()
+        self.assertEqual(order.state, OrderState.CANCELLED)
+        self.assertAlmostEqual(order.filled_qty, 0.25)
+        result = await recovery.recover_unadopted_entries(self.engine)
+        self.assertEqual(list(result.values()), [recovery.ADOPTED_PROTECTED])
+        self.assertNotIn(recovery.NOT_ACCEPTED, result.values())
+        self.assertAlmostEqual(self.engine.positions["ETHUSDT"].qty, 0.25)
+        self.assertTrue(self.stop_installed)
+        self.assertEqual(len(self.opening_posts()), 1)
+
+    async def test_B2_ws_expired_from_submitting_with_fill_is_not_not_accepted(self):
+        self.fill_qty = 0.25
+        await self.ambiguous_open()
+        await self.ws("EXPIRED", 0.25)
+        order = self.intent()
+        self.assertEqual(order.state, OrderState.CANCELLED)
+        self.assertAlmostEqual(order.filled_qty, 0.25)
+        result = await recovery.recover_unadopted_entries(self.engine)
+        self.assertEqual(list(result.values()), [recovery.ADOPTED_PROTECTED])
+        self.assertAlmostEqual(self.engine.positions["ETHUSDT"].qty, 0.25)
+
+    def restarted_engine(self, snapshot):
+        client2 = BinanceClient()
+        client2._instruments = self.engine.instruments
+        engine2 = RuntimeTradingEngine(client2)
+        engine2.paper_trade = False
+        engine2._durable_state_enforced = True
+        engine2._durable_state_ok = True
+        engine2._durable_state_errors = set()
+        engine2._durable_order_lock = asyncio.Lock()
+        engine2.instruments = self.engine.instruments
+        engine2._execution_ownership_valid = True
+        engine2.orders.restore(snapshot)
+        client2.rehydrate_order_identity_maps(snapshot)
+        client2._request = AsyncMock(side_effect=self.binance)
+        client2.get_positions = AsyncMock(side_effect=self.positions_read)
+        client2.set_position_stops = AsyncMock(side_effect=self.install_stop)
+        client2._execution_ownership = SimpleNamespace(expires_at="2099-01-01T00:00:00+00:00")
+        engine2.positions = {}
+        self.clients_to_close = getattr(self, "clients_to_close", []) + [client2]
+        return engine2
+
+    async def asyncTearDown(self):
+        for client in getattr(self, "clients_to_close", []):
+            await client.close()
+        await harness.DispatchProof.asyncTearDown(self)
+
+    async def test_C_restored_filled_without_quantity_is_completed_by_rest(self):
+        await self.ambiguous_open()
+        order = self.intent()
+        # Legacy/racy evidence: FILLED with orderId but no executed quantity.
+        order.transition(OrderState.SUBMITTED, order_id="777", source="WS")
+        order.transition(OrderState.FILLED, source="WS")
+        self.assertEqual(order.filled_qty, 0.0)
+        engine2 = self.restarted_engine(self.engine.orders.snapshot())
+        restored = engine2.orders.get(order.client_oid)
+        self.assertEqual((restored.state, restored.filled_qty), (OrderState.FILLED, 0.0))
+        self.assertFalse(restored.protection_plan["materialized"])
+        # Evidence still incomplete: UNKNOWN, never NOT_ACCEPTED.
+        result = await recovery.recover_unadopted_entries(engine2)
+        self.assertEqual(list(result.values()), [recovery.SUBMIT_UNKNOWN])
+        self.assertIn(recovery.BLOCK_REASON, engine2._durable_state_errors)
+        # Authoritative clientOrderId fallback completes the evidence.
+        self.lookup_mode = "filled"
+        result = await recovery.recover_unadopted_entries(engine2)
+        self.assertEqual(list(result.values()), [recovery.ADOPTED_PROTECTED])
+        self.assertAlmostEqual(restored.filled_qty, self.requested_qty)
+        self.assertIn("ETHUSDT", engine2.positions)
+        self.assertTrue(self.stop_installed)
+        self.assertEqual(len(self.opening_posts()), 1)
+
+    async def test_C2_restored_cancelled_zero_fill_needs_rest_confirmation(self):
+        self.fill_qty = 0.25
+        await self.ambiguous_open()
+        order = self.intent()
+        order.transition(OrderState.SUBMITTED, order_id="777", source="WS")
+        order.transition(OrderState.CANCELLED, source="WS")       # z lost
+        engine2 = self.restarted_engine(self.engine.orders.snapshot())
+        result = await recovery.recover_unadopted_entries(engine2)
+        self.assertEqual(list(result.values()), [recovery.SUBMIT_UNKNOWN])
+        self.lookup_mode = "partial"
+        result = await recovery.recover_unadopted_entries(engine2)
+        self.assertEqual(list(result.values()), [recovery.ADOPTED_PROTECTED])
+        self.assertAlmostEqual(engine2.positions["ETHUSDT"].qty, 0.25)
+
+    async def test_D_duplicate_ws_filled_three_times_before_and_after_recovery(self):
+        await self.ambiguous_open()
+        for _ in range(3):
+            await self.ws("FILLED", self.requested_qty)
+        await recovery.recover_unadopted_entries(self.engine)
+        for _ in range(3):
+            await self.ws("FILLED", self.requested_qty)
+            await recovery.recover_unadopted_entries(self.engine)
+        order = self.intent()
+        self.assertEqual(order.state, OrderState.FILLED)
+        self.assertAlmostEqual(order.filled_qty, self.requested_qty)
+        self.assertEqual(list(self.engine.positions), ["ETHUSDT"])
+        self.assertEqual(len(self.stop_calls), 1)
+        self.assertEqual(len(self.opening_posts()), 1)
+
+    async def test_E_later_smaller_fill_evidence_never_reduces_known_fill(self):
+        await self.ambiguous_open()
+        await self.ws("FILLED", self.requested_qty)
+        await self.ws("PARTIALLY_FILLED", self.requested_qty / 2)
+        order = self.intent()
+        self.assertEqual(order.state, OrderState.FILLED)
+        self.assertAlmostEqual(order.filled_qty, self.requested_qty)
+        from bot.durable_live_reconciliation import apply_exchange_order_truth
+        apply_exchange_order_truth(self.engine, order, {
+            "clientOid": order.client_oid, "orderId": "777", "symbol": "ETHUSDT",
+            "isActive": False, "status": "FILLED", "filledSize": str(self.requested_qty / 3),
+        })
+        self.assertAlmostEqual(order.filled_qty, self.requested_qty)
+        self.assertEqual(order.state, OrderState.FILLED)
+
+    async def test_F_conflicting_order_id_fails_closed_without_adoption(self):
+        await self.ambiguous_open()
+        await self.ws("FILLED", 0, order_id="888")       # incomplete, foreign orderId
+        await self.ws("FILLED", self.requested_qty, order_id="999")   # conflicting: rejected
+        order = self.intent()
+        self.assertEqual(order.order_id, "888")
+        self.assertEqual(order.filled_qty, 0.0)
+        self.lookup_mode = "filled"                      # exchange truth: orderId 777
+        result = await recovery.recover_unadopted_entries(self.engine)
+        self.assertEqual(list(result.values()), [recovery.LINEAGE_REJECTED])
+        self.assertEqual(self.engine.positions, {})
+        self.assertFalse(getattr(self, "stop_calls", []))
+        self.assert_entries_blocked()
+        self.assertEqual(len(self.opening_posts()), 1)
+
+
+for _name in ("replace", "account", "brackets", "fence",
               "ownership", "request", "evaluate"):
     setattr(AmbiguousEntryRecovery, _name, getattr(harness.DispatchProof, _name))
 
@@ -502,6 +664,32 @@ class EffectiveRuntimeCallables(unittest.TestCase):
         self.assertIn("_guard_naked_positions", sources[-1])
         for name in ("_open", "run", "_guard_naked_positions", "_load_existing_positions"):
             self.assertNotIn(name, vars(cls), name)
+
+    def test_runtime_contract_proves_enforcement_identity(self):
+        import builtins
+        from bot import runtime_contract_guard as guard
+
+        snapshot = getattr(builtins, "_nexus_runtime_contract_snapshot", {})
+        self.assertEqual(
+            snapshot.get("TradingEngine._bgx_enforce_owned_protection"),
+            "binance_protection_failclosed.py",
+        )
+        self.assertTrue(snapshot.get("TradingEngine.ambiguous_entry_protection_authority"))
+
+        def _enforce(*_a, **_k):     # impostor with the right name, wrong origin
+            return True
+
+        ok, errors = guard.verify((guard.ContractItem(
+            "TradingEngine._bgx_enforce_owned_protection", _enforce,
+            "binance_protection_failclosed.py",
+        ),))
+        self.assertFalse(ok)
+        self.assertIn("expected=binance_protection_failclosed.py", errors[0])
+        ok, _ = guard.verify((guard.ContractItem(
+            "TradingEngine._bgx_enforce_owned_protection", lambda *a: True,
+            "binance_protection_failclosed.py",
+        ),))
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":
