@@ -9,9 +9,12 @@ The controlled LIVE pilot applies the operator margin ceiling:
   ``min(stop_risk_qty, operator_margin_cap_qty)`` with RiskManagerV3 as risk
   authority. The hook installed here is shadowed in a pilot context.
 
-A drawdown breach is fail-closed by default. It may be bypassed only when the
-operator explicitly enables LIVE_RISK_OVERRIDE_APPROVED=true. The override
-never bypasses balance, position-count, protection, duplicate-order,
+A drawdown breach is fail-closed by default. It may be bypassed only by the
+explicit global LIVE_RISK_OVERRIDE_APPROVED=true override, or by the bounded
+drawdown-recovery policy when that policy is fully configured and currently
+eligible. Recovery only neutralizes the legacy engine pause so the candidate
+can reach the normal risk and durable pre-dispatch recovery gates; it never
+bypasses balance, daily-stop, position-count, protection, duplicate-order,
 reconciliation, instrument or other execution-safety gates.
 """
 from __future__ import annotations
@@ -51,13 +54,36 @@ def _protect_drawdown_update(self, bound_update, log, *, source: str):
                     float(cfg.MAX_DRAWDOWN) * 100.0,
                 )
             else:
-                log.error(
-                    "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "override=false entries_blocked=true execution_effect=BLOCK_NEW_ENTRIES",
-                    source,
-                    drawdown_before * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
+                from bot.drawdown_recovery import threshold_decision
+                recovery_allowed, recovery_reason, recovery = threshold_decision(
+                    drawdown_before
                 )
+                if (
+                    recovery_allowed
+                    and recovery_reason == "recovery_threshold_exception"
+                ):
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_%s] episode=%s drawdown=%.2f%% "
+                        "configured_limit=%.2f%% recovery_ceiling=%.2f%% "
+                        "legacy_pause_may_be_neutralized=true "
+                        "final_authority=can_open+durable_predispatch "
+                        "execution_effect=NONE",
+                        source,
+                        recovery.episode_id,
+                        drawdown_before * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                        float(recovery.max_drawdown) * 100.0,
+                    )
+                else:
+                    log.error(
+                        "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "override=false entries_blocked=true recovery_reason=%s "
+                        "execution_effect=BLOCK_NEW_ENTRIES",
+                        source,
+                        drawdown_before * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                        recovery_reason,
+                    )
 
         try:
             return await bound_update(*args, **kwargs)
@@ -77,13 +103,42 @@ def _protect_drawdown_update(self, bound_update, log, *, source: str):
                         float(cfg.MAX_DRAWDOWN) * 100.0,
                     )
                 else:
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "legacy_pause_preserved=true active_restored=false override=false",
-                        source,
-                        drawdown * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                    from bot.drawdown_recovery import threshold_decision
+                    recovery_allowed, recovery_reason, recovery = threshold_decision(
+                        drawdown
                     )
+                    if (
+                        recovery_allowed
+                        and recovery_reason == "recovery_threshold_exception"
+                    ):
+                        # Keep the engine loop alive only long enough for the
+                        # normal daily-stop/risk gates and durable pre-dispatch
+                        # recovery receipt to decide the candidate. This does
+                        # not authorize an order by itself.
+                        self.active = True
+                        self._dd_alerted = True
+                        log.critical(
+                            "[DRAWDOWN_RECOVERY_%s] episode=%s drawdown=%.2f%% "
+                            "configured_limit=%.2f%% recovery_ceiling=%.2f%% "
+                            "legacy_pause_neutralized=true active_restored=true "
+                            "final_authority=can_open+daily_stop+durable_predispatch "
+                            "execution_effect=NONE",
+                            source,
+                            recovery.episode_id,
+                            drawdown * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            float(recovery.max_drawdown) * 100.0,
+                        )
+                    else:
+                        log.error(
+                            "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                            "legacy_pause_preserved=true active_restored=false "
+                            "override=false recovery_reason=%s",
+                            source,
+                            drawdown * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            recovery_reason,
+                        )
 
     return _guarded_update
 
