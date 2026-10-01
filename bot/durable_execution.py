@@ -302,7 +302,7 @@ async def restore_engine_state(engine) -> bool:
             state = json.loads(raw_orders)
             if not isinstance(state, dict) or state.get("version") != 1:
                 raise ValueError("unsupported order registry schema")
-            engine.orders.restore(state.get("orders"))
+            quarantined = int(engine.orders.restore(state.get("orders")) or 0)
             identity_hook = getattr(
                 getattr(engine, "client", None),
                 "rehydrate_order_identity_maps",
@@ -311,9 +311,29 @@ async def restore_engine_state(engine) -> bool:
             if callable(identity_hook):
                 identity_hook(engine.orders.snapshot())
             log.info(
-                "[DURABLE_ORDER] restored orders=%s pending=%s",
-                len(engine.orders), len(engine.orders.pending_orders()),
+                "[DURABLE_ORDER] restored orders=%s pending=%s quarantined_legacy=%s",
+                len(engine.orders), len(engine.orders.pending_orders()), quarantined,
             )
+            if quarantined:
+                log.critical(
+                    "[DURABLE_ORDER_MIGRATION] quarantined=%s "
+                    "reason=legacy_binance_algo_child_ws_artifact "
+                    "execution_authority=false valid_orders_preserved=true",
+                    quarantined,
+                )
+                # Rewrite only the validated registry. If this cleanup cannot
+                # be persisted, remain fail-closed so the same corrupt snapshot
+                # can never silently authorize a later restart.
+                if not await persist_orders(
+                    engine, "legacy_binance_ws_artifact_quarantined", strict=True
+                ):
+                    _block(engine, "orders")
+                    return can_open(engine)
+                log.warning(
+                    "[DURABLE_ORDER_MIGRATION] cleanup_persisted=true "
+                    "quarantined=%s snapshot_version=1",
+                    quarantined,
+                )
         _clear(engine, "orders")
     except Exception as exc:
         _block(engine, "orders")
