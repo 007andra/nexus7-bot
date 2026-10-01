@@ -62,6 +62,10 @@ class InvalidTransition(Exception):
     pass
 
 
+class OrderIdentityConflict(ValueError):
+    """Exchange identity (order_id <-> client_oid) conflicts with the registry."""
+
+
 @dataclass
 class ManagedOrder:
     """
@@ -91,6 +95,10 @@ class ManagedOrder:
     reduce_only: bool = False
     exposure_intent: str = "INCREASE"  # INCREASE | REDUCE
     previous_position_qty: Optional[float] = None
+    # Durable protective intent of a BGX entry, persisted before dispatch so an
+    # ambiguous submit can still be protected after the fill is proven:
+    # {"direction": LONG|SHORT, "entry": float, "sl": float, "tp": float}.
+    protection_plan: Optional[dict] = None
 
     def transition(self, novo: OrderState, **info):
         """
@@ -144,6 +152,12 @@ class ManagedOrder:
                 f"{self.state.value} → {novo.value} é INVÁLIDA "
                 f"(permitidas: {sorted(x.value for x in permitidos) or 'nenhuma (terminal)'})"
             )
+        incoming_order_id = str(info.get("order_id") or "") or None
+        if incoming_order_id and self.order_id and incoming_order_id != self.order_id:
+            raise InvalidTransition(
+                f"{self.symbol} [{self.client_oid[:8]}]: order_id conflitante "
+                f"({incoming_order_id} != {self.order_id})"
+            )
 
         anterior = self.state
         self.state = novo
@@ -151,12 +165,13 @@ class ManagedOrder:
         self.last_source = info.get("source", self.last_source)
         self.history.append((time.time(), anterior.value, novo.value, info))
 
-        if "order_id" in info and info["order_id"]:
-            self.order_id = info["order_id"]
-        if "filled_qty" in info:
-            self.filled_qty = float(info["filled_qty"])
-        if "avg_price" in info and info["avg_price"]:
-            self.avg_price = float(info["avg_price"])
+        # Execution evidence is cumulative and monotonic: a transition can add
+        # an orderId / fill / price but never erase or shrink known evidence.
+        self._merge_execution_evidence(
+            order_id=incoming_order_id,
+            filled_qty=info.get("filled_qty"),
+            avg_price=info.get("avg_price"),
+        )
         if novo == OrderState.FILLED:
             self.exposure_reconciliation_complete = False
 
@@ -164,6 +179,77 @@ class ManagedOrder:
             f"📋 {self.symbol} [{self.client_oid[:8]}]: "
             f"{anterior.value} → {novo.value}"
         )
+
+    def _merge_execution_evidence(self, *, order_id=None, filled_qty=None,
+                                  avg_price=None) -> bool:
+        changed = False
+        if order_id and not self.order_id:
+            self.order_id = str(order_id)
+            changed = True
+        fill_grew = False
+        if filled_qty is not None:
+            try:
+                fill = float(filled_qty)
+            except (TypeError, ValueError):
+                fill = float("nan")
+            if math.isfinite(fill) and fill > float(self.filled_qty or 0.0) + 1e-12:
+                self.filled_qty = fill
+                changed = fill_grew = True
+        if avg_price is not None:
+            try:
+                price = float(avg_price)
+            except (TypeError, ValueError):
+                price = float("nan")
+            if math.isfinite(price) and price > 0 and (
+                fill_grew or float(self.avg_price or 0.0) <= 0
+            ):
+                if price != self.avg_price:
+                    self.avg_price = price
+                    changed = True
+        return changed
+
+    def absorb_execution_evidence(self, *, order_id=None, filled_qty=None,
+                                  avg_price=None, symbol=None, side=None,
+                                  client_oid=None, source: str = "") -> bool:
+        """Single authority for exchange execution evidence on any state.
+
+        Monotonic and identity-checked: a conflicting clientOid / orderId /
+        symbol / side raises ``InvalidTransition``; ``filled_qty`` only grows;
+        a known fill is never turned into zero; ``state`` is never changed.
+        Terminal orders may therefore be enriched (e.g. a WS FILLED that
+        arrived before REST carried the cumulative quantity) without any
+        regression. Returns True when evidence changed.
+        """
+        if client_oid and str(client_oid) != self.client_oid:
+            raise InvalidTransition(f"{self.symbol}: clientOid conflitante")
+        if symbol and str(symbol).upper() != str(self.symbol).upper():
+            raise InvalidTransition(f"{self.symbol}: símbolo conflitante ({symbol})")
+        if side:
+            normalized = {"buy": "Buy", "long": "Buy", "sell": "Sell", "short": "Sell"}.get(
+                str(side).strip().lower(), ""
+            )
+            if normalized and normalized != self.side:
+                raise InvalidTransition(f"{self.symbol}: side conflitante ({side})")
+        incoming = str(order_id or "") or None
+        if incoming and self.order_id and incoming != self.order_id:
+            raise InvalidTransition(
+                f"{self.symbol} [{self.client_oid[:8]}]: order_id conflitante "
+                f"({incoming} != {self.order_id})"
+            )
+        changed = self._merge_execution_evidence(
+            order_id=incoming, filled_qty=filled_qty, avg_price=avg_price,
+        )
+        if changed:
+            self.updated_at = time.time()
+            if source:
+                self.last_source = str(source)[:24]
+            self.history.append((
+                self.updated_at, self.state.value, self.state.value,
+                {"source": source, "execution_evidence": True,
+                 "order_id": self.order_id, "filled_qty": self.filled_qty,
+                 "avg_price": self.avg_price},
+            ))
+        return changed
 
     @property
     def is_terminal(self) -> bool:
@@ -204,6 +290,9 @@ class ManagedOrder:
             "reduce_only": bool(self.reduce_only),
             "exposure_intent": str(self.exposure_intent),
             "previous_position_qty": self.previous_position_qty,
+            "protection_plan": (
+                dict(self.protection_plan) if self.protection_plan else None
+            ),
         }
 
     @classmethod
@@ -248,7 +337,42 @@ class ManagedOrder:
         order.previous_position_qty = (
             None if previous_qty is None else max(0.0, float(previous_qty))
         )
+        order.protection_plan = normalize_protection_plan(
+            record.get("protection_plan")
+        )
         return order
+
+
+def normalize_protection_plan(plan) -> Optional[dict]:
+    """Return a validated protective plan or None (never a partial plan)."""
+    if not isinstance(plan, dict):
+        return None
+    direction = str(plan.get("direction") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return None
+    try:
+        entry = float(plan.get("entry"))
+        sl = float(plan.get("sl"))
+        tp = float(plan.get("tp", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (entry, sl, tp)):
+        return None
+    if entry <= 0 or sl <= 0 or tp < 0:
+        return None
+    if direction == "LONG" and not sl < entry:
+        return None
+    if direction == "SHORT" and not sl > entry:
+        return None
+    return {
+        "direction": direction, "entry": entry, "sl": sl, "tp": tp,
+        # True once a local Position was materialized for this intent; only
+        # never-materialized intents are candidates for ambiguous recovery.
+        "materialized": bool(plan.get("materialized", False)),
+        # True only after authoritative exchange truth proved a terminal
+        # CANCELLED intent executed zero quantity (UNKNOWN != NOT_ACCEPTED).
+        "zero_fill_confirmed": bool(plan.get("zero_fill_confirmed", False)),
+    }
 
 
 class OrderRegistry:
@@ -289,11 +413,45 @@ class OrderRegistry:
         coid = self._by_order_id.get(order_id)
         return self._orders.get(coid) if coid else None
 
+    def validate_order_id_binding(self, order_id: str, client_oid: str) -> None:
+        """Raise ``OrderIdentityConflict`` if order_id <-> client_oid conflicts.
+
+        Read-only: callers validate before absorbing exchange evidence so a
+        rejected event can never leave a partial write behind.
+        """
+        if not order_id or not client_oid:
+            return
+        oid = str(order_id)
+        owner = self._by_order_id.get(order_id, self._by_order_id.get(oid))
+        if owner is not None and owner != client_oid:
+            raise OrderIdentityConflict(
+                f"order_id {oid} já associado a outro clientOid"
+            )
+        for indexed_oid, indexed_owner in self._by_order_id.items():
+            if indexed_owner == client_oid and str(indexed_oid) != oid:
+                raise OrderIdentityConflict(
+                    f"clientOid {client_oid[:16]} já associado a outro order_id"
+                )
+        order = self._orders.get(client_oid)
+        known = getattr(order, "order_id", None)
+        if known and str(known) != oid:
+            raise OrderIdentityConflict(
+                f"clientOid {client_oid[:16]} possui order_id diferente"
+            )
+
     def index_order_id(self, order_id: str, client_oid: str):
-        """Registra o vínculo order_id -> client_oid assim que a
-        exchange retorna o orderId (dentro de place_order)."""
+        """Registra o vínculo order_id -> client_oid (fail-closed).
+
+        A mesma associação é idempotente; qualquer associação conflitante
+        (order_id de outro clientOid, ou clientOid com outro order_id) é
+        rejeitada e nunca sobrescreve o índice existente.
+        """
         if order_id and client_oid:
+            self.validate_order_id_binding(order_id, client_oid)
             self._by_order_id[order_id] = client_oid
+
+    def all_orders(self) -> List[ManagedOrder]:
+        return list(self._orders.values())
 
     def snapshot(self) -> list:
         return [order.to_record() for order in self._orders.values()]

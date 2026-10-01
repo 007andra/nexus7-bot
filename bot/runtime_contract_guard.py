@@ -230,6 +230,24 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
                 binance_runtime.WS_PRIVATE_BASE.endswith("/private"),
             )
         )
+        # Ambiguous-submit recovery (F-01) must protect adopted BGX exposure
+        # through the canonical Binance enforcement authority: identity is
+        # proven by code origin (file) and function name, not mere callability.
+        enforce = getattr(TradingEngine, "_bgx_enforce_owned_protection", None)
+        items.append(
+            ContractItem(
+                "TradingEngine._bgx_enforce_owned_protection",
+                enforce,
+                "binance_protection_failclosed.py",
+            )
+        )
+        markers.append(
+            MarkerItem(
+                "TradingEngine.ambiguous_entry_protection_authority",
+                callable(enforce)
+                and getattr(getattr(enforce, "__code__", None), "co_name", "") == "_enforce",
+            )
+        )
 
     items = tuple(items)
     markers = tuple(markers)

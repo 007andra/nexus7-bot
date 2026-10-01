@@ -81,6 +81,23 @@ def _reject_terminal(order, *, order_id: str, source: str) -> bool:
     return True
 
 
+def _average_price(data: dict, filled: float) -> float | None:
+    for key in ("avgPrice", "avgDealPrice", "ap"):
+        try:
+            value = float(data.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if math.isfinite(value) and value > 0:
+            return value
+    try:
+        deal_value = float(data.get("dealValue") or 0)
+    except (TypeError, ValueError):
+        deal_value = 0.0
+    if filled > 0 and math.isfinite(deal_value) and deal_value > 0:
+        return deal_value / filled
+    return None
+
+
 def apply_exchange_order_truth(
     engine, order, data: dict, *, source: str = "LIVE_REST"
 ) -> tuple[bool, bool]:
@@ -105,8 +122,16 @@ def apply_exchange_order_truth(
     remote_order_id = str(data.get("orderId") or data.get("id") or "")
     if order.order_id and remote_order_id and order.order_id != remote_order_id:
         raise ValueError("durable/exchange orderId mismatch")
+
+    remote_side = {"buy": "Buy", "long": "Buy", "sell": "Sell", "short": "Sell"}.get(
+        str(data.get("side") or "").strip().lower(), ""
+    )
+    if remote_side and remote_side != order.side:
+        raise ValueError("durable/exchange side mismatch")
     if remote_order_id:
-        engine.orders.index_order_id(remote_order_id, order.client_oid)
+        # Read-only: an orderId owned by another clientOid is rejected
+        # (OrderIdentityConflict is a ValueError) before anything is written.
+        engine.orders.validate_order_id_binding(remote_order_id, order.client_oid)
 
     requested = float(order.qty)
     filled = float(data.get("filledSize", data.get("dealSize", 0)) or 0)
@@ -114,6 +139,22 @@ def apply_exchange_order_truth(
         raise ValueError("non-finite durable order quantity")
     if requested <= 0:
         raise ValueError("invalid durable requested quantity")
+    avg_price = _average_price(data, filled)
+
+    # Identity fully validated: only now may the orderId index be written.
+    if remote_order_id:
+        engine.orders.index_order_id(remote_order_id, order.client_oid)
+
+    if order.is_terminal:
+        # Terminal state never regresses; authoritative REST may only complete
+        # missing execution evidence (e.g. WS FILLED that carried no quantity).
+        changed = order.absorb_execution_evidence(
+            order_id=remote_order_id or None,
+            filled_qty=filled,
+            avg_price=avg_price,
+            source=source,
+        )
+        return changed, True
 
     has_active_flag = "isActive" in data
     active = bool(data.get("isActive")) if has_active_flag else None
@@ -143,6 +184,7 @@ def apply_exchange_order_truth(
                 OrderState.PARTIALLY_FILLED,
                 order_id=remote_order_id,
                 filled_qty=filled,
+                avg_price=avg_price,
                 source=source,
             )
             changed = True
@@ -177,6 +219,7 @@ def apply_exchange_order_truth(
                 OrderState.FILLED,
                 order_id=remote_order_id,
                 filled_qty=filled,
+                avg_price=avg_price,
                 source=source,
             )
             changed = True

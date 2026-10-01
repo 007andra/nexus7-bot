@@ -2303,10 +2303,6 @@ class BinanceClient:
                 order.get("S", ""),
                 float(order.get("q", 0) or 0),
             )
-            if order_id:
-                registry.index_order_id(
-                    order_id, client_oid
-                )
         except Exception as exc:
             log.warning(
                 "[BINANCE_PRIVATE_WS] event=ORDER_TRADE_UPDATE "
@@ -2327,16 +2323,59 @@ class BinanceClient:
             "REJECTED": OrderState.REJECTED,
         }.get(status)
 
+        # Exchange execution evidence (o.i orderId, o.z cumulative filled qty,
+        # o.ap average price) is absorbed first, monotonically, on any state:
+        # a WS FILLED that beats the REST recovery must never leave
+        # FILLED/filled_qty=0, and a later/duplicate event never shrinks it.
+        # Identity is validated in full (registry binding first, read-only)
+        # before any evidence is absorbed, and the orderId index is written
+        # only afterwards: a rejected event can never contaminate either.
+        try:
+            if order_id:
+                registry.validate_order_id_binding(order_id, client_oid)
+            evidence_changed = managed.absorb_execution_evidence(
+                order_id=order_id or None,
+                filled_qty=order.get("z"),
+                avg_price=order.get("ap"),
+                symbol=symbol or None,
+                side=order.get("S") or None,
+                client_oid=client_oid,
+                source="WS",
+            )
+            if order_id:
+                registry.index_order_id(order_id, client_oid)
+        except (InvalidTransition, TypeError, ValueError) as exc:
+            log.critical(
+                "[BINANCE_PRIVATE_WS] event=ORDER_TRADE_UPDATE symbol=%s status=%s "
+                "result=EVIDENCE_CONFLICT_REJECTED error=%s execution_effect=NONE",
+                symbol or "UNKNOWN",
+                status or "UNKNOWN",
+                exc,
+            )
+            return
+
+        state_changed = False
         if (
             target is not None
             and managed.state != target
         ):
             try:
+                if (
+                    target == OrderState.CANCELLED
+                    and managed.state == OrderState.SUBMITTING
+                ):
+                    # Cancel/expiry proves the exchange accepted the order.
+                    managed.transition(
+                        OrderState.SUBMITTED,
+                        order_id=order_id or None,
+                        source="WS",
+                    )
                 managed.transition(
                     target,
                     order_id=order_id or None,
                     source="WS",
                 )
+                state_changed = True
             except (InvalidTransition, TypeError) as exc:
                 log.warning(
                     "[BINANCE_PRIVATE_WS] event=ORDER_TRADE_UPDATE "
@@ -2346,6 +2385,18 @@ class BinanceClient:
                     status or "UNKNOWN",
                     type(exc).__name__,
                 )
+        if evidence_changed or state_changed:
+            persist_callback = getattr(registry, "persist_callback", None)
+            if callable(persist_callback):
+                try:
+                    await persist_callback(managed)
+                except Exception as exc:  # noqa: BLE001 - durability failure blocks elsewhere
+                    log.critical(
+                        "[BINANCE_PRIVATE_WS] event=ORDER_TRADE_UPDATE symbol=%s "
+                        "result=PERSIST_FAILED error=%s",
+                        symbol or "UNKNOWN",
+                        type(exc).__name__,
+                    )
 
     def _handle_private_algo_event(self, message: dict) -> None:
         """Track BGX conditional-order lifecycle without inventing order state.

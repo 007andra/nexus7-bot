@@ -162,7 +162,13 @@ def install(TradingEngine, log, exchange_name: str = "kucoin"):
 
             external = set()
             recovered = set()
+            deferred = set()
             proofs = {}
+            # A durable BGX entry intent that is still unresolved (submit result
+            # unknown, or fill not yet absorbed) keeps its symbol out of both
+            # EXTERNAL and the heuristic loader until exchange truth decides.
+            from bot.ambiguous_entry_recovery import pending_recovery_symbols
+            intent_symbols = pending_recovery_symbols(self)
             for row in live_rows:
                 sym = str(row.get("symbol", "") or "")
                 if row_counts.get(sym, 0) != 1:
@@ -189,6 +195,15 @@ def install(TradingEngine, log, exchange_name: str = "kucoin"):
                         proof.base_qty,
                         proof.protection,
                     )
+                elif sym in intent_symbols:
+                    deferred.add(sym)
+                    log.critical(
+                        "[RESTART_OWNERSHIP] symbol=%s result=RECOVERY_PENDING reason=%s "
+                        "basis=unresolved_durable_bgx_entry_intent "
+                        "action=no_load_no_mutation_until_exchange_truth entries_blocked=true",
+                        sym,
+                        proof.reason,
+                    )
                 else:
                     external.add(sym)
                     log.warning(
@@ -201,6 +216,7 @@ def install(TradingEngine, log, exchange_name: str = "kucoin"):
             self._external_position_symbols = external
             self._recovered_position_symbols = recovered
             self._restart_ownership_proofs = proofs
+            self._ambiguous_recovery_symbols = deferred
 
             result = await original_load(self, *args, **kwargs)
 
@@ -234,9 +250,12 @@ def install(TradingEngine, log, exchange_name: str = "kucoin"):
                         sym,
                     )
 
-            for sym in external:
+            for sym in external | deferred:
                 self.positions.pop(sym, None)
                 self._trade_ids.pop(sym, None)
+            if deferred:
+                unprotected = set(getattr(self, "_unprotected_symbols", set()) or set())
+                self._unprotected_symbols = unprotected | deferred
 
             self._external_position_symbols = external
             self._recovered_position_symbols = recovered
@@ -285,6 +304,7 @@ def install(TradingEngine, log, exchange_name: str = "kucoin"):
             # classified external at startup. An external symbol can never use
             # this escape hatch.
             external = set(getattr(self, "_external_position_symbols", set()) or set())
+            external |= set(getattr(self, "_ambiguous_recovery_symbols", set()) or set())
             if only_symbol:
                 if only_symbol in external:
                     log.critical(

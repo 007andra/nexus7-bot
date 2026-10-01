@@ -540,6 +540,14 @@ class TradingEngine:
                         # Serializa a gestão de posições sob um único lock,
                         # impedindo ordens concorrentes na mesma posição.
                         async with self._pos_lock:
+                            if is_binance():
+                                # Ambiguous BGX entries (submit result unknown)
+                                # are resolved from exchange truth and, when the
+                                # fill lineage is exact, adopted and protected.
+                                from bot.ambiguous_entry_recovery import (
+                                    recover_unadopted_entries,
+                                )
+                                await recover_unadopted_entries(self)
                             await self._guard_naked_positions()
                             await self._sync_positions()
                             await self._check_stagnation_and_invalidation()
@@ -3197,6 +3205,15 @@ class TradingEngine:
                         _managed.transition(OrderState.SUBMITTING, source="REST")
                     except InvalidTransition as _ie:
                         log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
+                    if _managed.protection_plan is None:
+                        # Durable protective intent travels with the clientOid
+                        # so an ambiguous submit can still be protected once
+                        # the BGX fill is proven (ambiguous_entry_recovery).
+                        from bot.order_state import normalize_protection_plan
+                        _managed.protection_plan = normalize_protection_plan({
+                            "direction": sig.direction, "entry": sig.entry,
+                            "sl": sig.sl, "tp": sig.tp,
+                        })
 
                     # The exact exchange clientOid and SUBMITTING intent must
                     # be durable before place_order can perform network I/O.
@@ -3597,6 +3614,9 @@ class TradingEngine:
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
+            _plan = getattr(_managed, "protection_plan", None)
+            if isinstance(_plan, dict):
+                _plan["materialized"] = True
             # Diagnostic filled-position count only. Submission was consumed
             # before sending, including every ambiguous/error path.
             if self.pilot.enabled:
