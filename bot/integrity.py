@@ -243,10 +243,32 @@ class IntegrityGuard:
         except Exception as e:
             add("RISK_ENGINE_UNAVAILABLE", Severity.BLOCKED, str(e))
 
-        n429 = getattr(client, "_rate_limit_hits", 0)
+        # RATE_LIMITED must represent a current exchange condition, not a
+        # lifetime process counter. BinanceClient exposes a rolling window and
+        # shared cooldown; retain the historical counter only as a fallback for
+        # older adapters.
+        rate_status = None
+        try:
+            status_reader = getattr(client, "rate_limit_status", None)
+            if callable(status_reader):
+                rate_status = status_reader()
+        except Exception:
+            rate_status = None
+
+        if isinstance(rate_status, dict):
+            n429 = int(rate_status.get("recent_hits", 0) or 0)
+            window_s = float(rate_status.get("window_seconds", 0) or 0)
+            detail = (
+                f"{n429} respostas 429 nos últimos {window_s:.0f}s"
+                if window_s > 0
+                else f"{n429} respostas 429 recentes"
+            )
+        else:
+            n429 = int(getattr(client, "_rate_limit_hits", 0) or 0)
+            detail = f"{n429} respostas 429 recentes"
+
         if n429 >= int(os.environ.get("RATE_LIMIT_BLOCK_AFTER", "5")):
-            add("RATE_LIMITED", Severity.BLOCKED,
-                f"{n429} respostas 429 recentes")
+            add("RATE_LIMITED", Severity.BLOCKED, detail)
 
         if any(i.severity == Severity.BLOCKED for i in issues):
             sev = Severity.BLOCKED

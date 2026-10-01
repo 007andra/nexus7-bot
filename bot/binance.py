@@ -298,7 +298,13 @@ class BinanceClient:
         self._rate_lock = asyncio.Lock()
         self._rate_sem = asyncio.Semaphore(8)
         self._last_request_ts = 0.0
+        # Keep the historical total for observability, but entry authorization
+        # must use a rolling window. A cumulative counter would permanently
+        # block the runtime after enough isolated 429s even after Binance had
+        # recovered.
         self._rate_limit_hits = 0
+        self._rate_limit_events = deque()
+        self._rate_limit_until = 0.0
         self._order_registry = None
         self._order_id_symbol: dict[str, str] = {}
         self._client_oid_symbol: dict[str, str] = {}
@@ -345,10 +351,39 @@ class BinanceClient:
             timeout = aiohttp.ClientTimeout(total=15)
             self._session = aiohttp.ClientSession(timeout=timeout)
 
+    def _rate_limit_window_seconds(self) -> float:
+        try:
+            value = float(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "300"))
+        except (TypeError, ValueError):
+            value = 300.0
+        return min(3600.0, max(30.0, value))
+
+    def _prune_rate_limit_events(self, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else float(now)
+        cutoff = now - self._rate_limit_window_seconds()
+        while self._rate_limit_events and self._rate_limit_events[0] < cutoff:
+            self._rate_limit_events.popleft()
+        return len(self._rate_limit_events)
+
+    def _record_rate_limit(self, wait: float) -> None:
+        now = time.monotonic()
+        self._rate_limit_hits += 1
+        self._rate_limit_events.append(now)
+        self._prune_rate_limit_events(now)
+        # Shared cooldown: one task receiving 429/418 throttles all REST
+        # callers on this client instead of allowing concurrent coroutines to
+        # keep consuming request weight during Binance's retry window.
+        self._rate_limit_until = max(
+            self._rate_limit_until,
+            now + max(0.25, float(wait)),
+        )
+
     async def _throttle(self):
         async with self._rate_lock:
             now = time.monotonic()
-            wait = 0.04 - (now - self._last_request_ts)
+            spacing_wait = 0.04 - (now - self._last_request_ts)
+            cooldown_wait = self._rate_limit_until - now
+            wait = max(spacing_wait, cooldown_wait, 0.0)
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last_request_ts = time.monotonic()
@@ -412,12 +447,12 @@ class BinanceClient:
                             data = {"_raw": raw[:300]}
 
                         if resp.status in (418, 429):
-                            self._rate_limit_hits += 1
                             retry = resp.headers.get("Retry-After")
                             try:
                                 wait = min(30.0, max(0.25, float(retry)))
                             except (TypeError, ValueError):
                                 wait = min(8.0, 2 ** attempt)
+                            self._record_rate_limit(wait)
                             log.warning(
                                 "🚦 Binance rate limit HTTP %s em %s %s — %.1fs",
                                 resp.status,
@@ -591,7 +626,15 @@ class BinanceClient:
             raise
 
     def rate_limit_status(self) -> dict:
-        return {"recent_hits": self._rate_limit_hits, "exchange": "binance"}
+        now = time.monotonic()
+        recent_hits = self._prune_rate_limit_events(now)
+        return {
+            "recent_hits": recent_hits,
+            "total_hits": self._rate_limit_hits,
+            "window_seconds": self._rate_limit_window_seconds(),
+            "cooldown_remaining_seconds": max(0.0, self._rate_limit_until - now),
+            "exchange": "binance",
+        }
 
     async def get_balance(self) -> float:
         rows = await self._get("/fapi/v3/balance", auth=True)
