@@ -1,14 +1,14 @@
 """Projected-loss diagnostic retained for observability after final sizing.
 
 The final quantity is ``min(stop_risk_qty, operator_margin_cap_qty)`` (see
-``final_sizing_invariants``). The historical 50%-of-entry-initial-margin
-ceiling remains available through ``validate()`` for deterministic regression
-coverage, but executable runtime callers use ``diagnose()`` only.
+``final_sizing_invariants``). The historical 50%-of-entry-initial-margin ceiling is measured here. Runtime
+final sizing consumes ``diagnose()`` and treats any non-PASS result as a
+candidate-local rejection; it never pauses the scanner/runtime globally.
 
 RiskManagerV3 owns the monetary stop-risk budget and Binance CROSS stress owns
-account-level solvency/liquidation safety. This module therefore reports whether
-the legacy ceiling would pass, warn, or be unavailable; it must not resize,
-move technical stops, or authorize/block execution.
+account-level solvency/liquidation safety. This module remains arithmetic and
+telemetry only: it does not resize, move technical stops, or mutate execution
+state itself.
 """
 import math
 
