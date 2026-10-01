@@ -236,6 +236,9 @@ def install(engine_module, pilot_cap, log) -> None:
         except Exception as exc:  # noqa: BLE001 - diagnostic must not affect sizing
             result = "UNAVAILABLE"
             specific_reason = f"diagnostic_{type(exc).__name__}"
+        loss_execution_effect = (
+            "NONE" if str(result).upper() == "PASS" else "BLOCK_NEW_ENTRY"
+        )
         emit_telemetry(
             log, symbol=symbol, setup_id=setup_id,
             stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
@@ -244,7 +247,17 @@ def install(engine_module, pilot_cap, log) -> None:
             leverage=leverage, cost_fraction=cost_fraction, result=result,
             specific_reason=specific_reason,
             risk_v3_advisory_qty=risk_qty,
+            execution_effect=loss_execution_effect,
         )
+        if str(result).upper() != "PASS":
+            log.critical(
+                "[FINAL_LOSS_BUDGET_GATE] symbol=%s setup_id=%s "
+                "stage=FINAL_SIZING_INVARIANT result=BLOCK reason=%s "
+                "execution_effect=BLOCK_NEW_ENTRY",
+                symbol, setup_id, specific_reason,
+            )
+            pilot_cap._PILOT_FINAL_QTY.set(0.0)
+            return 0.0
 
         pilot_cap._PILOT_FINAL_QTY.set(final_qty)
         log.warning(
