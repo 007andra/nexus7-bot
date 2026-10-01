@@ -80,7 +80,7 @@ class PilotRiskCapInstallTests(unittest.TestCase):
             def __init__(self):
                 self.paper_trade = False
                 self.pilot = _Pilot()
-                self.risk = _Risk(6.0, fresh_risk_allowed=fresh_risk_allowed)
+                self.risk = _Risk(6.0)
                 self.instruments = {"DOTUSDT": {"multiplier": 1}}
                 self.positions = {}
                 self.observed_qty = None
@@ -145,7 +145,7 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.paper_trade = False
                 self.pilot = _Pilot()
-                self.risk = _Risk(6.0)
+                self.risk = _Risk(6.0, fresh_risk_allowed=fresh_risk_allowed)
                 self.instruments = {"DOTUSDT": {"multiplier": 1.0}}
                 self.positions = {}
                 self.client = _MarketClient(ticker, book)
