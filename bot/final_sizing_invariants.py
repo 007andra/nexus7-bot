@@ -245,6 +245,19 @@ def install(engine_module, pilot_cap, log) -> None:
             specific_reason=specific_reason,
             risk_v3_advisory_qty=risk_qty,
         )
+        # The loss-budget geometry is quantity-invariant: shrinking qty reduces
+        # projected loss and entry margin by the same factor. Therefore WARN or
+        # UNAVAILABLE cannot be repaired by resizing. Reject only this candidate;
+        # the runtime/scanner remains active.
+        if result != "PASS":
+            log.critical(
+                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK "
+                "reason=final_loss_budget_%s candidate_only=true "
+                "runtime_paused=false",
+                symbol, specific_reason,
+            )
+            pilot_cap._PILOT_FINAL_QTY.set(0.0)
+            return 0.0
 
         pilot_cap._PILOT_FINAL_QTY.set(final_qty)
         log.warning(

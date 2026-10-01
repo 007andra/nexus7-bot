@@ -65,7 +65,7 @@ class FinalLossBudgetDiagnosticTests(unittest.TestCase):
                 1.0, 100.0, 98.0, "LONG", 50.0, 0.0032
             )
 
-    def test_final_sizing_keeps_risk_quantity_when_legacy_ceiling_warns(self):
+    def test_final_sizing_blocks_only_candidate_when_loss_budget_warns(self):
         old_leverage = cfg.LEVERAGE
         cfg.LEVERAGE = 50
         log = CaptureLog()
@@ -100,12 +100,14 @@ class FinalLossBudgetDiagnosticTests(unittest.TestCase):
             pilot_guard._PILOT_ENGINE.reset(token_engine)
             cfg.LEVERAGE = old_leverage
 
-        self.assertEqual(qty, 0.25)
-        self.assertEqual(stored, 0.25)
+        self.assertEqual(qty, 0.0)
+        self.assertEqual(stored, 0.0)
         telemetry = "\n".join(message for _, message in log.records)
         self.assertIn("[FINAL_LOSS_BUDGET]", telemetry)
         self.assertIn("result=WARN", telemetry)
         self.assertIn("execution_effect=OBSERVABILITY_ONLY", telemetry)
+        self.assertIn("candidate_only=true", telemetry)
+        self.assertIn("runtime_paused=false", telemetry)
 
 
 class _Risk:

@@ -200,19 +200,29 @@ class IncidentReproductionTests(RuntimeHarness):
             self.assertEqual(below, 0.0, symbol)
             self.assertEqual(above, float(d["min_valid_qty"]), symbol)
 
-    def test_final_loss_budget_warns_without_overriding_risk_sizing_at_50x(self):
-        # The historical 50%-of-entry-margin ceiling is diagnostic only.
-        # These candidates still exceed its legacy 1% notional boundary at 50x,
-        # but final quantity remains the RiskManagerV3/operator-cap result.
+    def test_final_loss_budget_warn_blocks_only_candidate_at_50x(self):
+        # RiskManagerV3 may produce a positive stop-risk quantity, but the final
+        # loss-budget geometry is now an independent candidate-level gate.
+        # A WARN rejects this candidate without pausing the runtime/scanner.
         for symbol, (info, entry, stop) in CANDIDATES.items():
             final, risk_qty, log = self.run_hook(symbol, info, entry, stop, equity=1000.0)
             self.assertGreater(risk_qty, 0.0, symbol)
-            self.assertEqual(final, risk_qty, symbol)
+            self.assertEqual(final, 0.0, symbol)
             self.assertTrue(
                 any(
                     "result=WARN" in t
                     and "projected_loss_exceeds_50pct_entry_margin" in t
                     and "execution_effect=OBSERVABILITY_ONLY" in t
+                    for _, t in log.records
+                ),
+                symbol,
+            )
+            self.assertTrue(
+                any(
+                    "[FINAL_SIZING_INVARIANT]" in t
+                    and "result=BLOCK" in t
+                    and "candidate_only=true" in t
+                    and "runtime_paused=false" in t
                     for _, t in log.records
                 ),
                 symbol,
