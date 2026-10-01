@@ -411,6 +411,51 @@ class ReconciliationAndSafetyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(order.state, OrderState.FILLED, coid)
             self.assertEqual(order.order_id, oid)
 
+    async def test_algo_actual_order_is_correlated_without_managed_order_mutation(self):
+        client = binance.BinanceClient()
+        registry = Mock()
+        registry.get_or_create.side_effect = AssertionError(
+            "algo actual order must never enter OrderRegistry"
+        )
+        client._order_registry = registry
+
+        await client._handle_private_order_event({
+            "e": "ALGO_UPDATE",
+            "E": 100,
+            "o": {
+                "caid": "bgx7-sl-atom",
+                "aid": 55,
+                "ai": 991122,
+                "s": "ATOMUSDT",
+                "S": "SELL",
+                "X": "TRIGGERED",
+                "o": "STOP_MARKET",
+            },
+        })
+        self.assertEqual(
+            client._algo_actual_order_client["991122"],
+            "bgx7-sl-atom",
+        )
+
+        await client._handle_private_order_event({
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 101,
+            "o": {
+                "s": "ATOMUSDT",
+                "c": "bgx7-sl-atom",
+                "S": "SELL",
+                "q": "100",
+                "X": "FILLED",
+                "i": 991122,
+                "z": "100",
+                "ap": "3.00",
+            },
+        })
+        registry.get_or_create.assert_not_called()
+        cached = client._algo_order_cache["bgx7-sl-atom"]
+        self.assertEqual(cached["actualOrderStatus"], "FILLED")
+        self.assertEqual(cached["actualExecutedQty"], "100")
+
     async def test_preflight_clears_reconcile_only_after_rest_reconciliation(self):
         from bot import pilot_live_runtime as plr
 
