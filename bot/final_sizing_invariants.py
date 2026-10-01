@@ -11,7 +11,8 @@ Canonical sizing contract, which every sizing log reports verbatim:
 * ``final_quantity_policy=min(stop_risk_qty,operator_margin_cap_qty)``.
 
 Any invalid/non-positive input on either side yields ``qty=0`` (fail closed).
-The historical projected-loss ceiling in ``final_loss_budget`` is diagnostic only.
+The projected-loss ceiling in ``final_loss_budget`` is enforced fail-closed
+after final sizing; the fresh pre-dispatch path rechecks it at executable price.
 Earlier pilot hooks (``pilot_live_runtime``, ``pilot_risk_cap_hardening``,
 ``operator_runtime_policy``) are shadowed by this one in a pilot context.
 """
