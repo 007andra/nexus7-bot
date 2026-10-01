@@ -401,6 +401,68 @@ def _receipt_key(symbol: str, opening_order_id: str) -> str:
     return "binance:exit_forensics:" + token
 
 
+async def _handoff_confirmed_daily_pnl(
+    engine, receipt: dict, *, symbol: str, opening_order_id: str, log
+) -> bool:
+    """Bridge fills-authoritative Binance exit evidence into durable daily PnL.
+
+    This is accounting-only. It never changes orders, sizing, leverage, signals,
+    or risk thresholds. A local estimate remains authoritative unless the
+    existing forensic receipt proves the exact BGX opening lineage and
+    fills-authoritative net PnL.
+    """
+    if not isinstance(receipt, dict):
+        return False
+    if (
+        receipt.get("status") != "RECONCILED"
+        or receipt.get("pnl_fill_authority") is not True
+    ):
+        return False
+    try:
+        close_ms = int(receipt.get("close_fill_ms", 0) or 0)
+        confirmed = float(receipt.get("net_after_funding", "nan"))
+        if close_ms <= 0 or not math.isfinite(confirmed):
+            return False
+        row = {
+            "closeId": (
+                f"BINANCE:{opening_order_id}:"
+                f"{','.join(str(x) for x in receipt.get('close_order_ids', []) if x)}:"
+                f"{close_ms}"
+            ),
+            "symbol": str(symbol),
+            "closeTime": close_ms,
+            "pnl": confirmed,
+        }
+        verified = {
+            "ownership": "BGX_ORDER_IDS",
+            "fills_reconciled": True,
+            "lineage_reconciled": True,
+            "opening_order_ids": [str(opening_order_id)],
+            "exchange": "BINANCE",
+        }
+        from bot.durable_daily_pnl import reconcile_confirmed_exchange
+        updated = bool(
+            await reconcile_confirmed_exchange(engine, row, verified)
+        )
+        log.warning(
+            "[BINANCE_DAILY_PNL_HANDOFF] symbol=%s opening_order_id=%s "
+            "result=%s pnl_fill_authority=true execution_effect=ACCOUNTING_ONLY",
+            symbol,
+            opening_order_id,
+            "RECONCILED" if updated else "NO_MATCHING_ESTIMATE",
+        )
+        return updated
+    except Exception as exc:
+        log.warning(
+            "[BINANCE_DAILY_PNL_HANDOFF] symbol=%s opening_order_id=%s "
+            "result=UNCONFIRMED error_type=%s execution_effect=NONE",
+            symbol,
+            opening_order_id,
+            type(exc).__name__,
+        )
+        return False
+
+
 async def capture_exit(
     engine,
     *,
@@ -468,6 +530,14 @@ async def capture_exit(
             opening_order_id,
             type(exc).__name__,
         )
+
+    await _handoff_confirmed_daily_pnl(
+        engine,
+        receipt,
+        symbol=symbol,
+        opening_order_id=opening_order_id,
+        log=log,
+    )
 
     # Bind any recovery post-trade decision to the Binance opening fill time.
     # Startup backfills older than the durable episode are ignored. A close that
