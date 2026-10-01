@@ -257,6 +257,9 @@ def install(TradingEngine, log) -> None:
         except Exception as exc:  # noqa: BLE001 - diagnostic must not affect dispatch
             result_name = "UNAVAILABLE"
             specific_reason = f"diagnostic_{type(exc).__name__}"
+        loss_execution_effect = (
+            "NONE" if str(result_name).upper() == "PASS" else "BLOCK_NEW_ENTRY"
+        )
         emit_telemetry(
             log, symbol=symbol, setup_id=setup_id,
             stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
@@ -264,7 +267,16 @@ def install(TradingEngine, log) -> None:
             direction=direction, leverage=cfg.LEVERAGE,
             cost_fraction=cost_fraction, result=result_name,
             specific_reason=specific_reason,
+            execution_effect=loss_execution_effect,
         )
+        if str(result_name).upper() != "PASS":
+            log.critical(
+                "[FINAL_LOSS_BUDGET_GATE] symbol=%s setup_id=%s "
+                "stage=FRESH_PREDISPATCH_RECHECK result=BLOCK reason=%s "
+                "execution_effect=BLOCK_NEW_ENTRY",
+                symbol, setup_id, specific_reason,
+            )
+            return False
 
         log.info(
             "[LIVE_PREDISPATCH_MARKET] symbol=%s result=PASS "
