@@ -2274,6 +2274,21 @@ class BinanceClient:
                     message.get("E", 0) or 0
                 )
                 self._algo_order_cache[algo_client_oid] = updated
+            log.info(
+                "[BINANCE_ALGO_ACTUAL_ORDER_WS] symbol=%s status=%s "
+                "actual_order_id=%s client_algo_id=%s "
+                "managed_order_mutation=false authority=REST_ALGO_HISTORY "
+                "execution_effect=NONE",
+                symbol or "UNKNOWN",
+                status or "UNKNOWN",
+                order_id or "UNKNOWN",
+                algo_client_oid,
+            )
+            # The actual order emitted by a triggered conditional Algo order
+            # belongs to the Algo lifecycle. It must never create or mutate a
+            # normal ManagedOrder; doing so leaves a synthetic CREATED/pending
+            # order and produces invalid CREATED->FILLED transitions.
+            return
 
         registry = self._order_registry
         if (

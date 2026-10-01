@@ -35,13 +35,23 @@ class _Pilot:
 
 
 class _Risk:
-    def __init__(self, qty):
+    def __init__(self, qty, fresh_risk_allowed=True):
         self.qty = qty
         self.calls = []
+        self.fresh_risk_allowed = fresh_risk_allowed
 
     def size(self, symbol, entry, instruments, size_mult=1.0, open_positions=None):
         self.calls.append((symbol, entry, instruments, open_positions))
         return self.qty
+
+    def validate_fresh_executable_risk(self, symbol, executable_entry, qty):
+        budget = 1.0
+        projected = 0.5 if self.fresh_risk_allowed else 1.5
+        return self.fresh_risk_allowed, {
+            "risk_budget": budget,
+            "projected_loss": projected,
+            "headroom_usdt": budget - projected,
+        }
 
 
 class _Log:
@@ -124,7 +134,7 @@ class _MarketClient:
 
 
 class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
-    async def _exercise(self, *, ticker, book):
+    async def _exercise(self, *, ticker, book, fresh_risk_allowed=True):
         from bot import engine as engine_module
 
         original_module_minimum = engine_module.minimum_base_quantity
@@ -135,7 +145,7 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.paper_trade = False
                 self.pilot = _Pilot()
-                self.risk = _Risk(6.0)
+                self.risk = _Risk(6.0, fresh_risk_allowed=fresh_risk_allowed)
                 self.instruments = {"DOTUSDT": {"multiplier": 1.0}}
                 self.positions = {}
                 self.client = _MarketClient(ticker, book)
@@ -204,6 +214,15 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["orderId"], "should-only-exist-on-pass")
         self.assertEqual(instance.client.place_calls, 1)
+
+    async def test_fresh_v3_risk_budget_breach_blocks_before_place_order(self):
+        instance, result = await self._exercise(
+            ticker={"bid": 99.98, "ask": 100.02, "lastPrice": 100.0},
+            book={"b": [[99.98, 100]], "a": [[100.02, 100]]},
+            fresh_risk_allowed=False,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(instance.client.place_calls, 0)
 
 
 class PilotRiskCapEngineOrderRegressionTests(unittest.IsolatedAsyncioTestCase):

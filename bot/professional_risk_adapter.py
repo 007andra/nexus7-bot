@@ -63,7 +63,7 @@ class ProfessionalRiskAdapter:
     ``RiskManagerV3`` remains side-effect-free and uses a full ``CapitalState``.
     """
 
-    __slots__ = ("_legacy", "_v3", "_plans")
+    __slots__ = ("_legacy", "_v3", "_plans", "_last_sizing")
 
     def __init__(self, legacy: Any) -> None:
         # Keep ordinary self assignments so the repository's static startup
@@ -71,6 +71,7 @@ class ProfessionalRiskAdapter:
         self._legacy = legacy
         self._v3 = RiskManagerV3()
         self._plans = {}
+        self._last_sizing = {}
 
     def __getattr__(self, name: str):
         return getattr(self._legacy, name)
@@ -126,6 +127,7 @@ class ProfessionalRiskAdapter:
             ),
         ).validate()
         self._plans[key] = plan
+        self._last_sizing.pop(key, None)
         return plan
 
     def update_capital(self, capital: CapitalState):
@@ -190,6 +192,58 @@ class ProfessionalRiskAdapter:
                 symbol, type(exc).__name__,
             )
 
+    def validate_fresh_executable_risk(
+        self, symbol: str, executable_entry: float, qty: float
+    ) -> tuple[bool, dict]:
+        """Recheck the last V3 risk budget at a fresh executable price.
+
+        The monetary budget is the exact budget produced by the most recent
+        RiskManagerV3 sizing call, so leverage never scales the allowed loss.
+        Price drift may increase stop distance and fee/slippage dollars; if the
+        already-quantized final quantity would now exceed that budget, the
+        caller must fail closed before dispatch.
+        """
+        key = str(symbol)
+        state = self._last_sizing.get(key)
+        plan = self._plans.get(key)
+        if not isinstance(state, dict) or plan is None:
+            raise RuntimeError("fresh executable risk has no sizing authority")
+
+        entry = float(executable_entry)
+        quantity = float(qty)
+        budget = float(state.get("risk_budget", float("nan")))
+        stop = float(plan.stop)
+        fee_rate = float(state.get("fee_rate_per_side", float("nan")))
+        slippage = float(state.get("slippage_pct", float("nan")))
+        values = (entry, quantity, budget, stop, fee_rate, slippage)
+        if any(not math.isfinite(v) for v in values):
+            raise ValueError("fresh executable risk contains non-finite value")
+        if entry <= 0 or quantity <= 0 or budget <= 0 or stop <= 0:
+            raise ValueError("fresh executable risk contains non-positive value")
+        if fee_rate < 0 or slippage < 0:
+            raise ValueError("fresh executable risk contains negative costs")
+
+        loss_per_unit = (
+            abs(entry - stop)
+            + entry * fee_rate * 2.0
+            + entry * slippage
+        )
+        projected = quantity * loss_per_unit
+        tolerance = max(1e-12, budget * 1e-6)
+        allowed = projected <= budget + tolerance
+        return allowed, {
+            "risk_budget": budget,
+            "projected_loss": projected,
+            "headroom_usdt": budget - projected,
+            "qty": quantity,
+            "executable_entry": entry,
+            "stop": stop,
+            "fee_rate_per_side": fee_rate,
+            "slippage_pct": slippage,
+            "effective_risk_pct": float(state.get("effective_risk_pct", float("nan"))),
+            "cost_snapshot_id": str(state.get("cost_snapshot_id", "none")),
+        }
+
     def size(self, symbol: str, entry: float, instruments: dict,
              size_mult: float = 1.0, open_positions: dict | None = None) -> float:
         """Return stop-risk-sized base quantity or fail closed with zero.
@@ -239,6 +293,16 @@ class ProfessionalRiskAdapter:
                 fee_rate_per_side=fee_rate,
                 expected_slippage_pct=expected_slippage,
             )
+            self._last_sizing[key] = {
+                "risk_budget": float(sizing.risk_budget),
+                "sized_qty": float(sizing.qty),
+                "sized_entry": float(entry),
+                "stop": float(plan.stop),
+                "fee_rate_per_side": float(fee_rate),
+                "slippage_pct": float(expected_slippage),
+                "effective_risk_pct": float(effective_risk_pct),
+                "cost_snapshot_id": str(plan.cost_snapshot_id),
+            }
             log.info(
                 "[RISK_V3_CORE] symbol=%s qty=%.12g risk_budget=%.6f "
                 "projected_stop_loss=%.6f stop_distance_pct=%.6f "

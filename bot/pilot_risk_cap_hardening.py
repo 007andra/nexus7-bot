@@ -266,6 +266,52 @@ def install(TradingEngine, log) -> None:
             specific_reason=specific_reason,
         )
 
+        risk_recheck = getattr(
+            getattr(self, "risk", None),
+            "validate_fresh_executable_risk",
+            None,
+        )
+        if not callable(risk_recheck):
+            log.critical(
+                "[FINAL_RISK_BUDGET_INVARIANT] symbol=%s setup_id=%s "
+                "stage=FRESH_PREDISPATCH_RECHECK result=BLOCK "
+                "reason=risk_authority_unavailable execution_effect=BLOCK_NEW_ENTRY",
+                symbol, setup_id,
+            )
+            return False
+        try:
+            risk_allowed, risk_metrics = risk_recheck(
+                symbol, float(executable_price), qty_f
+            )
+        except Exception as exc:
+            log.critical(
+                "[FINAL_RISK_BUDGET_INVARIANT] symbol=%s setup_id=%s "
+                "stage=FRESH_PREDISPATCH_RECHECK result=BLOCK "
+                "reason=check_%s execution_effect=BLOCK_NEW_ENTRY",
+                symbol, setup_id, type(exc).__name__,
+            )
+            return False
+
+        risk_budget = float(risk_metrics.get("risk_budget", float("nan")))
+        projected_loss = float(risk_metrics.get("projected_loss", float("nan")))
+        headroom = float(risk_metrics.get("headroom_usdt", float("nan")))
+        if not risk_allowed:
+            log.critical(
+                "[FINAL_RISK_BUDGET_INVARIANT] symbol=%s setup_id=%s "
+                "stage=FRESH_PREDISPATCH_RECHECK result=BLOCK "
+                "projected_loss=%.12g risk_budget=%.12g headroom_usdt=%.12g "
+                "risk_authority=RiskManagerV3 execution_effect=BLOCK_NEW_ENTRY",
+                symbol, setup_id, projected_loss, risk_budget, headroom,
+            )
+            return False
+        log.info(
+            "[FINAL_RISK_BUDGET_INVARIANT] symbol=%s setup_id=%s "
+            "stage=FRESH_PREDISPATCH_RECHECK result=PASS "
+            "projected_loss=%.12g risk_budget=%.12g headroom_usdt=%.12g "
+            "risk_authority=RiskManagerV3 execution_effect=NONE",
+            symbol, setup_id, projected_loss, risk_budget, headroom,
+        )
+
         log.info(
             "[LIVE_PREDISPATCH_MARKET] symbol=%s result=PASS "
             "spread_bps=%.4f drift_bps=%.4f signed_drift_bps=%+.4f drift_class=%s "

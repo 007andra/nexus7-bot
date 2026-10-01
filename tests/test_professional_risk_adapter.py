@@ -91,6 +91,33 @@ class ProfessionalRiskAdapterTests(unittest.TestCase):
         adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=95.0, risk_pct=0.01)
         self.assertEqual(adapter.size("TESTUSDT", 101.0, INSTRUMENTS), 0.0)
 
+    def test_fresh_executable_risk_preserves_original_monetary_budget(self):
+        adapter = self._adapter()
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=98.0, risk_pct=0.01)
+        qty = adapter.size("TESTUSDT", 100.0, INSTRUMENTS)
+        self.assertGreater(qty, 0.0)
+
+        allowed, metrics = adapter.validate_fresh_executable_risk(
+            "TESTUSDT", 100.0, qty
+        )
+        self.assertTrue(allowed)
+        self.assertLessEqual(
+            metrics["projected_loss"],
+            metrics["risk_budget"] * 1.000001,
+        )
+
+    def test_adverse_executable_drift_cannot_exceed_v3_risk_budget(self):
+        adapter = self._adapter()
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=98.0, risk_pct=0.01)
+        qty = adapter.size("TESTUSDT", 100.0, INSTRUMENTS)
+        self.assertGreater(qty, 0.0)
+
+        allowed, metrics = adapter.validate_fresh_executable_risk(
+            "TESTUSDT", 101.0, qty
+        )
+        self.assertFalse(allowed)
+        self.assertGreater(metrics["projected_loss"], metrics["risk_budget"])
+
 
 class RuntimeProfessionalRiskPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def test_paper_approval_prepares_virtual_capital_without_exchange_read(self):
