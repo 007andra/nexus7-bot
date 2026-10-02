@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from bot import nexus_ai
-from bot.backtest import _closed_window_by_ts, _timestamp_index
+from bot.backtest import (
+    _binance_research_taker_fee,
+    _closed_window_by_ts,
+    _timestamp_index,
+)
 from bot.binance_research_data import (
     FundingObservation,
     daily_metrics_url,
@@ -35,7 +39,7 @@ from bot.binance_historical_context import (
     parse_metrics_archive,
 )
 from bot.config import cfg
-from bot.execution_cost import fallback_taker_fee, static_slippage_rate
+from bot.execution_cost import static_slippage_rate
 from bot.nexus_oos_edge_gate import (
     CandidateOutcome,
     build_edge_report,
@@ -525,7 +529,7 @@ async def replay_symbol(
             artifacts,
         )
 
-    fee_rate = fallback_taker_fee()
+    fee_rate = _binance_research_taker_fee()
     slippage = static_slippage_rate(symbol)
     ts15 = _timestamp_index(k15)
     ts1h = _timestamp_index(k1h)
@@ -650,12 +654,18 @@ async def replay_symbol(
                 "historical_long_short_ratio": bool(metric_rows),
                 "metrics_label_shift_normalized": True,
                 "historical_orderbook": False,
-                "orderbook_affects_current_score": False,
+                "orderbook_affects_current_score": True,
                 "checksums_verified": True,
-                "parity_complete": (
-                    derivative_context_missing == 0
-                    and derivative_context_complete > 0
-                    and bool(funding)
+                "parity_complete": False,
+                "parity_blockers": [
+                    "HISTORICAL_EXACT_ORDERBOOK_UNAVAILABLE"
+                ] + (
+                    ["DERIVATIVES_CONTEXT_INCOMPLETE"]
+                    if derivative_context_missing > 0
+                    or derivative_context_complete == 0
+                    else []
+                ) + (
+                    ["FUNDING_HISTORY_EMPTY"] if not funding else []
                 ),
             },
         },
@@ -696,6 +706,11 @@ async def run(
     final_blockers = list(blockers)
     if not context_complete:
         final_blockers.append("HISTORICAL_CONTEXT_PARITY_INCOMPLETE")
+    if any(
+        not bool(rep.get("historical_context", {}).get("historical_orderbook"))
+        for rep in reports if not rep.get("error")
+    ):
+        final_blockers.append("HISTORICAL_EXACT_ORDERBOOK_UNAVAILABLE")
 
     manifest = ResearchManifest(
         version="BINANCE_USDM_OOS_V1",
