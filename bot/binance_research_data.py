@@ -298,11 +298,26 @@ async def download_archive_verified(
         path.with_suffix(path.suffix + ".CHECKSUM") if path is not None else None
     )
 
-    if path is not None and path.exists() and checksum_path and checksum_path.exists():
+    if path is not None and path.exists():
         payload = await asyncio.to_thread(path.read_bytes)
-        checksum_text = await asyncio.to_thread(
-            checksum_path.read_text, encoding="utf-8"
+        # Never trust a cached checksum as provenance. Fetch the official
+        # Binance sidecar again and validate cached bytes against it.
+        checksum_bytes = await _http_get_bytes(url + ".CHECKSUM", timeout_s)
+        checksum_text = checksum_bytes.decode("utf-8")
+        digest = verify_archive_checksum(
+            payload,
+            checksum_text,
+            expected_filename=Path(url).name,
         )
+        if checksum_path is not None:
+            checksum_path.parent.mkdir(parents=True, exist_ok=True)
+            checksum_tmp = checksum_path.with_suffix(
+                checksum_path.suffix + ".tmp"
+            )
+            await asyncio.to_thread(
+                checksum_tmp.write_text, checksum_text, encoding="utf-8"
+            )
+            await asyncio.to_thread(checksum_tmp.replace, checksum_path)
     else:
         payload, checksum_bytes = await asyncio.gather(
             _http_get_bytes(url, timeout_s),
