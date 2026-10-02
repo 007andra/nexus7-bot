@@ -185,3 +185,37 @@ for _name in [n for n in dir(_Harness) if n.startswith("test_")]:
     if _name not in BinancePostfillGeometryTests.__dict__:
         setattr(BinancePostfillGeometryTests, _name, None)
 del _Harness
+
+
+class OrderIdentityTests(BinancePostfillGeometryTests):
+    """NOVO-F013A-1f: distinct financial intents never share a ManagedOrder."""
+
+    def oids(self):
+        return [p.get("newClientOrderId") for _, e, p in self.requests if e == "/fapi/v1/order"]
+
+    async def test_new_trade_same_minute_gets_new_identity(self):
+        await self._open(100.0)
+        self.engine.positions.pop("ETHUSDT")          # trade A closed within the minute
+        self.rows.clear()
+        self.stops.clear()
+        self.engine._durable_state_errors, self.engine._durable_state_ok = set(), True
+        await self._open(100.0)                       # trade B: same symbol/side/qty/minute
+        oids = self.oids()
+        self.assertEqual(len(oids), 2)
+        self.assertNotEqual(oids[0], oids[1])
+        self.assertIsNot(self.engine.orders.get(oids[0]), self.engine.orders.get(oids[1]))
+
+    async def test_unresolved_previous_intent_keeps_duplicate_guard(self):
+        await self._open(100.0)
+        first = self.oids()[0]
+        self.engine.orders.get(first).state = __import__("bot.order_state", fromlist=["x"]).OrderState.SUBMITTED
+        self.engine.positions.pop("ETHUSDT")
+        self.rows.clear()
+        self.engine._durable_state_errors, self.engine._durable_state_ok = set(), True
+        await self._open(100.0)
+        self.assertEqual(self.oids()[-1], first, "same unresolved intent reuses its idempotency key")
+
+
+for _name in [n for n in dir(BinancePostfillGeometryTests) if n.startswith("test_")]:
+    if _name not in OrderIdentityTests.__dict__:
+        setattr(OrderIdentityTests, _name, None)

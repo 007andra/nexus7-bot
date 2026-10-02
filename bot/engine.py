@@ -42,7 +42,7 @@ from bot.daily_tracker import DailyTracker
 from bot import optimizer as opt
 # ── Fase 3: hardening ─────────────────────────────────────────────
 from bot.integrity import IntegrityGuard, Severity
-from bot.order_state import OrderRegistry, OrderState, InvalidTransition
+from bot.order_state import OrderRegistry, OrderState, InvalidTransition, TERMINAIS
 from bot.pilot import PilotGuard
 from bot.quantity import minimum_base_quantity, validate_base_quantity
 from bot.paper_loss_budget import cap_quantity as cap_paper_quantity
@@ -3185,6 +3185,25 @@ class TradingEngine:
             _client_oid = self.client.build_client_oid(
                 sig.symbol, side, qty, _idem
             )
+            # NOVO-F013A-1f — a key that repeats for the SAME unresolved intent
+            # (duplicate submission guard) must never hand a NEW financial
+            # intent the ManagedOrder of a finished trade (same symbol/side/qty
+            # inside the same minute after the previous trade closed). A
+            # terminal previous order with no live position => new generation.
+            _base_idem, _generation = _idem, 0
+            _prev = self.orders.get(_client_oid) if hasattr(self.orders, "get") else None
+            while (_prev is not None and _prev.state in TERMINAIS
+                   and sig.symbol not in self.positions and _generation < 16):
+                _generation += 1
+                _idem = f"{_base_idem}|g{_generation}"
+                _client_oid = self.client.build_client_oid(sig.symbol, side, qty, _idem)
+                _prev = self.orders.get(_client_oid)
+            if _generation:
+                log.warning(
+                    "[ORDER_IDENTITY] symbol=%s previous_intent=TERMINAL generation=%s "
+                    "clientOid=%s reason=new_financial_intent_same_minute",
+                    sig.symbol, _generation, _client_oid,
+                )
 
             for attempt in range(1, MAX_RETRIES + 1):
                 _managed = None
