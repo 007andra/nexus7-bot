@@ -26,6 +26,12 @@ class ResearchObservation:
     regime: str
     volatility: float
     net_return: float
+    gross_return: float | None = None
+    fee_drag: float = 0.0
+    slippage_drag: float = 0.0
+    funding_pnl: float = 0.0
+    turnover: float = 0.0
+    exposure_fraction: float = 0.0
 
     def validate(self) -> "ResearchObservation":
         if not isfinite(float(self.timestamp)):
@@ -38,6 +44,24 @@ class ResearchObservation:
             raise ValueError("invalid observation volatility")
         if not isfinite(float(self.net_return)) or float(self.net_return) <= -1:
             raise ValueError("invalid observation return")
+        for name in ("fee_drag", "slippage_drag", "turnover", "exposure_fraction"):
+            value = float(getattr(self, name))
+            if not isfinite(value) or value < 0:
+                raise ValueError(f"invalid {name}")
+        if self.exposure_fraction > 1.0:
+            raise ValueError("exposure_fraction must be <= 1")
+        if not isfinite(float(self.funding_pnl)):
+            raise ValueError("invalid funding_pnl")
+        if self.gross_return is not None:
+            gross = float(self.gross_return)
+            if not isfinite(gross) or gross <= -1:
+                raise ValueError("invalid gross_return")
+            expected_net = (
+                gross - float(self.fee_drag) - float(self.slippage_drag)
+                + float(self.funding_pnl)
+            )
+            if abs(expected_net - float(self.net_return)) > 1e-9:
+                raise ValueError("gross/net cost attribution does not reconcile")
         return self
 
 
@@ -72,12 +96,40 @@ def volatility_tercile_labels(rows: Iterable[ResearchObservation]) -> tuple[str,
     return tuple(labels)
 
 
-def _metric_pack(returns: list[float], *, bootstrap_samples: int, seed: int) -> dict:
+def _metric_pack(
+    rows: list[ResearchObservation],
+    *,
+    bootstrap_samples: int,
+    seed: int,
+) -> dict:
+    returns = [float(row.net_return) for row in rows]
     base = performance_metrics(returns)
     ci = bootstrap_mean_ci(
         returns, n_bootstrap=bootstrap_samples, seed=seed
     ) if returns else {"mean": 0.0, "low": 0.0, "high": 0.0, "n": 0}
-    return {**base, "expectancy_ci95": ci}
+    gross_rows = [row for row in rows if row.gross_return is not None]
+    cost_parity_complete = len(gross_rows) == len(rows)
+    gross_expectancy = (
+        float(np.mean([float(row.gross_return) for row in gross_rows]))
+        if gross_rows else None
+    )
+    return {
+        **base,
+        "expectancy_ci95": ci,
+        "gross_expectancy": gross_expectancy,
+        "avg_fee_drag": float(np.mean([row.fee_drag for row in rows])) if rows else 0.0,
+        "avg_slippage_drag": (
+            float(np.mean([row.slippage_drag for row in rows])) if rows else 0.0
+        ),
+        "avg_funding_pnl": (
+            float(np.mean([row.funding_pnl for row in rows])) if rows else 0.0
+        ),
+        "avg_turnover": float(np.mean([row.turnover for row in rows])) if rows else 0.0,
+        "avg_exposure_fraction": (
+            float(np.mean([row.exposure_fraction for row in rows])) if rows else 0.0
+        ),
+        "cost_parity_complete": cost_parity_complete,
+    }
 
 
 def segmented_report(
@@ -88,7 +140,7 @@ def segmented_report(
 ) -> dict:
     values = _ordered(rows)
     labels = volatility_tercile_labels(values)
-    dimensions: dict[str, dict[str, list[float]]] = {
+    dimensions: dict[str, dict[str, list[ResearchObservation]]] = {
         "symbol": {},
         "side": {},
         "regime": {},
@@ -102,7 +154,7 @@ def segmented_report(
             ("volatility_tercile", vol_label),
         )
         for dim, key in pairs:
-            dimensions[dim].setdefault(key, []).append(float(row.net_return))
+            dimensions[dim].setdefault(key, []).append(row)
 
     segments: dict[str, dict] = {}
     for dim, groups in dimensions.items():
@@ -110,11 +162,10 @@ def segmented_report(
             key: _metric_pack(vals, bootstrap_samples=bootstrap_samples, seed=seed)
             for key, vals in sorted(groups.items())
         }
-    aggregate_returns = [float(row.net_return) for row in values]
     return {
         "n": len(values),
         "aggregate": _metric_pack(
-            aggregate_returns, bootstrap_samples=bootstrap_samples, seed=seed
+            list(values), bootstrap_samples=bootstrap_samples, seed=seed
         ),
         "segments": segments,
     }
@@ -127,10 +178,14 @@ def walk_forward_oos_report(
     test_size: int,
     purge: int = 0,
     embargo: int = 0,
+    minimum_oos_folds: int = 4,
+    require_cost_parity: bool = True,
     bootstrap_samples: int = 2000,
     monte_carlo_paths: int = 2000,
     seed: int = 42,
 ) -> dict:
+    if minimum_oos_folds <= 0:
+        raise ValueError("minimum_oos_folds must be positive")
     values = _ordered(rows)
     windows = purged_walk_forward(
         len(values),
@@ -163,20 +218,36 @@ def walk_forward_oos_report(
         paths=monte_carlo_paths,
         seed=seed,
     )
+    aggregate = segmented_report(
+        all_oos,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    ) if all_oos else {"n": 0, "aggregate": {}, "segments": {}}
+
+    blockers: list[str] = []
+    if len(windows) < minimum_oos_folds:
+        blockers.append("INSUFFICIENT_OOS_FOLDS")
+    if not all_oos:
+        blockers.append("EMPTY_OOS")
+    if require_cost_parity and all_oos:
+        if not bool(aggregate["aggregate"].get("cost_parity_complete")):
+            blockers.append("INCOMPLETE_COST_PARITY")
+
     return {
         "fold_count": len(windows),
         "oos_n": len(all_oos),
         "folds": fold_reports,
-        "aggregate_oos": segmented_report(
-            all_oos,
-            bootstrap_samples=bootstrap_samples,
-            seed=seed,
-        ) if all_oos else {"n": 0, "aggregate": {}, "segments": {}},
+        "aggregate_oos": aggregate,
         "monte_carlo": monte_carlo.__dict__,
+        "evidence_complete": not blockers,
+        "evidence_blockers": tuple(blockers),
         "protocol": {
+            "minimum_oos_folds": int(minimum_oos_folds),
             "purged": purge > 0,
-            "embargo": embargo,
+            "purge": int(purge),
+            "embargo": int(embargo),
             "chronological": True,
             "shuffled": False,
+            "cost_parity_required": bool(require_cost_parity),
         },
     }
