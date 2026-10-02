@@ -126,6 +126,10 @@ def _methodology_green(bundle: Mapping[str, object]) -> bool:
     return bool(
         methodology.get("venue") == "BINANCE_USDM"
         and methodology.get("source") == "data.binance.vision"
+        and methodology.get("evidence_claim") == "NEXUS_SELECTION_EDGE"
+        and methodology.get("execution_pnl_claim") is False
+        and methodology.get("instrument_rule_parity")
+        == "NOT_MODELED_BY_ALPHA_REPLAY"
         and methodology.get("oi_delta_semantics") == "PREVIOUS_NEXUS_CANDIDATE"
         and methodology.get("same_bar_ambiguity") == "STOP_FIRST"
         and methodology.get("authenticated_api") is False
