@@ -27,6 +27,14 @@ class MicrostructureShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(snap.depth_notional_100bps, 0)
         self.assertEqual(snap.execution_effect, "NONE")
         self.assertFalse(snap.promotion_authority)
+        self.assertEqual(len(snap.feature_fingerprint()), 64)
+        self.assertEqual(
+            snap.feature_fingerprint(),
+            build_snapshot(
+                "BTCUSDT", self.depth, self.trades,
+                observed_at_ms=self.now,
+            ).feature_fingerprint(),
+        )
 
     def test_stale_book_fails_closed(self):
         depth = dict(self.depth)
