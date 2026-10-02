@@ -55,6 +55,9 @@ def slippage_from_ticker(ticker: dict | None, symbol: str) -> tuple[float, str, 
 
 async def build_cost_context(engine, sig) -> NexusCostContext:
     """Build read-only NEXUS cost inputs from the shared candidate snapshot."""
+    from bot.candidate_trace import ensure_candidate_id
+
+    ensure_candidate_id(sig)
     snap, _reused = await execution_cost.snapshot_for(engine, sig)
     return NexusCostContext(
         symbol=snap.symbol,
@@ -173,6 +176,15 @@ def install(TradingEngine, nexus_ai, log) -> None:
             # therefore carry the exact frozen context as private telemetry.
             # NexusDecision.to_dict()/asdict does not serialize dynamic attrs.
             _attach_cost_context(decision, ctx, log)
+            try:
+                from bot.candidate_trace import attach_decision
+                attach_decision(decision, sig)
+            except Exception as exc:
+                log.debug(
+                    "[CANDIDATE_TRACE] attach_decision_failed symbol=%s error=%s "
+                    "decision_effect=NONE execution_effect=NONE",
+                    ctx.symbol, type(exc).__name__,
+                )
             return decision
         finally:
             _COST_CONTEXT.reset(token)
