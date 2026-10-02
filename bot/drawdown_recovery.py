@@ -203,6 +203,8 @@ def _disarmed_reauthorization_binding(
     """
     if os.environ.get(REAUTH_ENV, "").strip().lower() != "true":
         return False, "durable_previous_episode_disarmed", None
+    if str(state.get("status") or "") != "DISARMED":
+        return False, "durable_reauthorization_source_status_invalid", None
 
     from_episode = os.environ.get(REAUTH_FROM_ENV, "").strip()
     to_episode = os.environ.get(REAUTH_TO_ENV, "").strip()
@@ -267,9 +269,10 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
     """Create/validate the durable recovery receipt.
 
     Restart semantics are deterministic: the same configured episode must match
-    the durable receipt exactly and remain ARMED. A different episode may replace
-    a prior receipt only after expiry, by atomic CAS, with no drawdown worsening
-    and no relaxation of recovery ceiling/risk. Persistence ambiguity fails closed.
+    the durable receipt exactly and remain ARMED. Normal rollover requires an
+    expired ARMED receipt, no drawdown worsening and no policy relaxation. A
+    DISARMED loss receipt can transition only through an exact, explicit
+    reauthorization binding and atomic CAS. Persistence ambiguity fails closed.
     """
     allowed, reason, policy = threshold_decision(drawdown)
     if not (allowed and reason == "recovery_threshold_exception"):
