@@ -21,6 +21,12 @@ EPISODE_ENV = "LIVE_RECOVERY_EPISODE_ID"
 EXPIRES_ENV = "LIVE_RECOVERY_EXPIRES_AT"
 MAX_DD_ENV = "RECOVERY_MAX_DRAWDOWN"
 RISK_ENV = "RECOVERY_MAX_RISK_PCT"
+REAUTH_ENV = "LIVE_RECOVERY_REAUTHORIZE_DISARMED"
+REAUTH_FROM_ENV = "LIVE_RECOVERY_REAUTHORIZE_FROM_EPISODE_ID"
+REAUTH_TO_ENV = "LIVE_RECOVERY_REAUTHORIZE_TO_EPISODE_ID"
+REAUTH_REASON_ENV = "LIVE_RECOVERY_REAUTHORIZE_FROM_REASON"
+REAUTH_MAX_DD_ENV = "LIVE_RECOVERY_REAUTHORIZE_MAX_DRAWDOWN"
+REAUTH_RISK_ENV = "LIVE_RECOVERY_REAUTHORIZE_MAX_RISK_PCT"
 STATE_KEY = "risk:drawdown_recovery:v1"
 
 
@@ -136,7 +142,8 @@ def recovery_size_multiplier(drawdown: float, *, now: datetime | None = None) ->
 
 def _state_payload(*, policy: RecoveryPolicy, status: str, armed_drawdown: float,
                    worst_drawdown: float, reason: str, realized_net_pnl: float | None = None,
-                   armed_at: str | None = None) -> str:
+                   armed_at: str | None = None,
+                   reauthorization: dict | None = None) -> str:
     payload = {
         "version": 1,
         "episode_id": policy.episode_id,
@@ -151,6 +158,8 @@ def _state_payload(*, policy: RecoveryPolicy, status: str, armed_drawdown: float
         "realized_net_pnl": realized_net_pnl,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if reauthorization is not None:
+        payload["reauthorization"] = reauthorization
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
@@ -178,6 +187,68 @@ def _policy_from_state(state: dict) -> RecoveryPolicy:
         risk_pct,
         "configured",
     )
+
+
+
+def _disarmed_reauthorization_binding(
+    policy: RecoveryPolicy, state: dict
+) -> tuple[bool, str, dict | None]:
+    """Validate an explicit one-shot operator reauthorization binding.
+
+    This path is intentionally narrower than ordinary rollover. It exists only
+    for a previously confirmed recovery-trade net loss and binds the operator's
+    authorization to the exact source episode, target episode, prior reason,
+    target recovery ceiling and target risk. Stale or partial authorization
+    fails closed.
+    """
+    if os.environ.get(REAUTH_ENV, "").strip().lower() != "true":
+        return False, "durable_previous_episode_disarmed", None
+
+    from_episode = os.environ.get(REAUTH_FROM_ENV, "").strip()
+    to_episode = os.environ.get(REAUTH_TO_ENV, "").strip()
+    from_reason = os.environ.get(REAUTH_REASON_ENV, "").strip()
+    max_dd = _positive_finite(os.environ.get(REAUTH_MAX_DD_ENV))
+    risk_pct = _positive_finite(os.environ.get(REAUTH_RISK_ENV))
+    if not from_episode or not to_episode or not from_reason or max_dd is None or risk_pct is None:
+        return False, "durable_reauthorization_incomplete", None
+
+    state_episode = str(state.get("episode_id") or "")
+    state_reason = str(state.get("reason") or "")
+    if from_episode != state_episode:
+        return False, "durable_reauthorization_source_mismatch", None
+    if to_episode != policy.episode_id:
+        return False, "durable_reauthorization_target_mismatch", None
+    if from_reason != state_reason:
+        return False, "durable_reauthorization_reason_mismatch", None
+    if state_reason != "recovery_trade_net_loss":
+        return False, "durable_reauthorization_reason_not_eligible", None
+
+    try:
+        realized_net_pnl = float(state.get("realized_net_pnl"))
+    except (TypeError, ValueError):
+        return False, "durable_reauthorization_loss_unconfirmed", None
+    if not math.isfinite(realized_net_pnl) or realized_net_pnl >= 0:
+        return False, "durable_reauthorization_loss_unconfirmed", None
+
+    if (
+        policy.max_drawdown is None
+        or policy.risk_pct is None
+        or not math.isclose(max_dd, float(policy.max_drawdown), rel_tol=0.0, abs_tol=1e-12)
+        or not math.isclose(risk_pct, float(policy.risk_pct), rel_tol=0.0, abs_tol=1e-12)
+    ):
+        return False, "durable_reauthorization_policy_mismatch", None
+
+    audit = {
+        "from_episode_id": state_episode,
+        "to_episode_id": policy.episode_id,
+        "from_status": str(state.get("status") or ""),
+        "from_reason": state_reason,
+        "from_realized_net_pnl": realized_net_pnl,
+        "authorized_max_drawdown": float(policy.max_drawdown),
+        "authorized_risk_pct": float(policy.risk_pct),
+        "consumed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return True, "durable_reauthorization_binding_valid", audit
 
 
 def _decode_state(raw: str | None) -> dict | None:
@@ -222,13 +293,11 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
         return True, "durable_armed"
 
     if str(state.get("episode_id") or "") != policy.episode_id:
-        # Sequential recovery episodes may roll over an old durable receipt only
-        # after that receipt has expired. Rollover is intentionally narrower than
-        # first-arm semantics: the previous episode must still be ARMED, current
-        # drawdown must not have worsened from its arm point, and the new episode
-        # cannot relax either the recovery ceiling or recovery risk.
-        if str(state.get("status") or "") != "ARMED":
-            return False, "durable_previous_episode_disarmed"
+        # Sequential recovery episodes normally roll over only from an expired,
+        # still-ARMED receipt without drawdown worsening or policy relaxation.
+        # A DISARMED receipt remains terminal unless an explicit one-shot
+        # operator reauthorization is bound to the exact old/new episodes,
+        # confirmed loss reason, and exact target ceiling/risk.
         try:
             old_policy = _policy_from_state(state)
             old_armed_drawdown = float(state.get("armed_drawdown"))
@@ -239,7 +308,38 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
             or old_armed_drawdown < 0
         ):
             return False, "durable_drawdown_malformed"
+
         current = datetime.now(timezone.utc)
+        status = str(state.get("status") or "")
+        if status != "ARMED":
+            reauth_ok, reauth_reason, audit = _disarmed_reauthorization_binding(
+                policy, state
+            )
+            if not reauth_ok:
+                return False, reauth_reason
+            if old_policy.expires_at is None or current < old_policy.expires_at:
+                return False, "durable_reauthorization_previous_episode_active"
+
+            payload = _state_payload(
+                policy=policy,
+                status="ARMED",
+                armed_drawdown=float(drawdown),
+                worst_drawdown=float(drawdown),
+                reason="operator_reauthorized_after_recovery_trade_net_loss",
+                reauthorization=audit,
+            )
+            try:
+                ok = await save_key_values_atomic_cas(
+                    ((STATE_KEY, payload),),
+                    expected={STATE_KEY: raw},
+                    strict=strict,
+                )
+            except CompareAndSwapConflict:
+                return False, "durable_reauthorization_conflict"
+            if not ok:
+                return False, "durable_reauthorization_unconfirmed"
+            return True, "durable_reauthorized_after_disarmed_episode"
+
         if old_policy.expires_at is None or current < old_policy.expires_at:
             return False, "durable_episode_mismatch"
         if float(drawdown) > old_armed_drawdown + 1e-12:
@@ -318,6 +418,8 @@ async def record_drawdown_observation(drawdown: float, *, strict: bool = True) -
         policy=policy, status=status, armed_drawdown=armed,
         worst_drawdown=worst, reason=reason,
         armed_at=str(state.get("armed_at") or ""),
+        reauthorization=state.get("reauthorization")
+        if isinstance(state.get("reauthorization"), dict) else None,
     )
     try:
         await save_key_values_atomic_cas(
@@ -362,6 +464,8 @@ async def record_recovery_close(
             worst_drawdown=float(state.get("worst_drawdown")),
             reason="close_lineage_unbound",
             armed_at=str(state.get("armed_at") or ""),
+            reauthorization=state.get("reauthorization")
+            if isinstance(state.get("reauthorization"), dict) else None,
         )
         try:
             await save_key_values_atomic_cas(
@@ -382,6 +486,8 @@ async def record_recovery_close(
             worst_drawdown=float(state.get("worst_drawdown")),
             reason="close_pnl_unconfirmed",
             armed_at=str(state.get("armed_at") or ""),
+            reauthorization=state.get("reauthorization")
+            if isinstance(state.get("reauthorization"), dict) else None,
         )
         try:
             await save_key_values_atomic_cas(
@@ -399,6 +505,8 @@ async def record_recovery_close(
         worst_drawdown=float(state.get("worst_drawdown")),
         reason="recovery_trade_net_loss", realized_net_pnl=pnl,
         armed_at=str(state.get("armed_at") or ""),
+        reauthorization=state.get("reauthorization")
+        if isinstance(state.get("reauthorization"), dict) else None,
     )
     try:
         await save_key_values_atomic_cas(
