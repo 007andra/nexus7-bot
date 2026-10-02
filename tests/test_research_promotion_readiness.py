@@ -43,6 +43,7 @@ def _bundle():
             "closed_candles_only": True,
             "historical_clock_frozen": True,
             "metrics_label_shift_normalized": True,
+            "oi_delta_semantics": "PREVIOUS_NEXUS_CANDIDATE",
             "same_bar_ambiguity": "STOP_FIRST",
             "fees_included": True,
             "slippage_included": True,
@@ -138,6 +139,18 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
         )
         self.assertFalse(result.ready_for_operator_review)
         self.assertIn("SENSITIVITY_PRESENT", result.blockers)
+
+    def test_oi_delta_semantic_drift_fails_closed(self):
+        bundle = _bundle()
+        bundle["methodology"]["oi_delta_semantics"] = "PREVIOUS_5M_METRICS_ROW"
+        result = evaluate_readiness(
+            bundle,
+            ci_green=True,
+            shadow_drift=_drift(),
+            sensitivity=_sensitivity(),
+        )
+        self.assertFalse(result.ready_for_operator_review)
+        self.assertIn("METHODOLOGY_GREEN", result.blockers)
 
     def test_truthy_strings_never_count_as_methodology_proof(self):
         bundle = _bundle()
