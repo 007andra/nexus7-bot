@@ -74,7 +74,8 @@ class LateFillHarness(unittest.IsolatedAsyncioTestCase):
                               _forensic_lineage={"opening_order_id": oid, "client_oid": "bgx7-entry"})
         engine = SimpleNamespace(client=KuCoinPositionUnitAdapter(raw), positions={"SOLUSDT": pos},
                                  instruments={"SOLUSDT": dict(SOL)}, _external_position_symbols=set(),
-                                 risk=None)
+                                 risk=None, _trade_ids={})
+        raw._engine = engine            # production wiring (TradingEngine.__init__)
         status = await raw.get_order_status(oid)
         state = await pg.reconcile_after_open(engine, pos, fill_status=status, order_id=oid,
                                               planned_entry=entry, planned_sl=sl, planned_tp=tp)

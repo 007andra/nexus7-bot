@@ -1253,7 +1253,7 @@ class TradingEngine:
         the geometry after fill authority, read-back and the F-003 recheck.
         No ATR/liquidation estimate is ever sent or used as geometry."""
         from bot import native_protection
-        from bot.conditional_stop_lifecycle import owned_for_lineage, position_lineage
+        from bot.conditional_stop_lifecycle import STRONG_PREFIX, owned_for_strong_lineage
         if ctx.get("direction") != direction:
             log.critical(
                 f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: lado da exchange ({direction}) ≠ "
@@ -1271,9 +1271,11 @@ class TradingEngine:
         side = "sell" if direction == "LONG" else "buy"
 
         async def _owned(order, kind):
-            lineage = position_lineage(self.client, sym, row)
-            return await owned_for_lineage(self.client, sym, side, kind, lineage,
-                                           str(order.get("clientOid") or ""))
+            # NOVO-F013A-1c: strong lineage of THIS opening order only.
+            return await owned_for_strong_lineage(
+                self.client, sym, side, kind, STRONG_PREFIX + str(ctx.get("order_id", "")),
+                str(order.get("clientOid") or ""),
+                order_id=str(order.get("id") or order.get("orderId") or ""))
         prot = await native_protection.discover(
             self.client, sym, direction, order_id=ctx.get("order_id", ""),
             client_oid=ctx.get("client_oid", ""), planned_sl=ctx.get("planned_sl"),
@@ -1303,7 +1305,7 @@ class TradingEngine:
                     self.client, sym, direction, order_id=ctx.get("order_id", ""),
                     client_oid=ctx.get("client_oid", ""), planned_sl=ctx.get("planned_sl"),
                     planned_tp=ctx.get("planned_tp"), tick=tick, row=row,
-                    lineage_owned=_owned, accept_levels=(native_sl,))
+                    lineage_owned=_owned)
         local_sl = prot.sl or native_sl
         local_tp = prot.tp or native_tp
         if not (local_sl and local_tp):

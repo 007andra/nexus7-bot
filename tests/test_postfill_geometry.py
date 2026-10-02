@@ -41,7 +41,16 @@ class FakeClient:
             return False
         self.created.append(sl)
         if not self.ignore_create:
-            self.stops.append(_stop(self.direction, sl, oid=f"bgx-stop-{len(self.created)}"))
+            # Same durable ownership mapping as native_stop_repair: the new BGX
+            # stop is recorded in the slot of the CURRENT position lineage.
+            from bot import conditional_stop_lifecycle as lifecycle
+            row = (await self.get_positions())[0]
+            close = "sell" if self.direction == "LONG" else "buy"
+            lineage = lifecycle.position_lineage(self, symbol, row)
+            cand = await lifecycle.prepare_candidate(self, symbol, row["side"].lower(), close, "SL",
+                                                     lineage, str(sl))
+            self.stops.append(_stop(self.direction, sl, oid=cand["client_oid"]))
+            await lifecycle.mark_verified(self, cand["slot_key"], cand["client_oid"])
         return not self.ignore_create
 
     def active_sl(self):
@@ -71,9 +80,11 @@ def _position(direction="LONG", entry=100.0, sl=98.0, tp=104.0, qty=0.4, budget=
 
 
 def _engine(client, positions=None, external=()):
-    return SimpleNamespace(client=client, positions=positions or {},
-                           instruments={"SOLUSDT": {"multiplier": MULT, "tickSize": TICK}},
-                           _external_position_symbols=set(external), risk=None)
+    engine = SimpleNamespace(client=client, positions=positions or {},
+                             instruments={"SOLUSDT": {"multiplier": MULT, "tickSize": TICK}},
+                             _external_position_symbols=set(external), risk=None, _trade_ids={})
+    client._engine = engine          # production wiring (TradingEngine.__init__)
+    return engine
 
 
 async def _run(direction, planned, fill, *, qty=0.4, status=None, fills=None, extra_stops=(),

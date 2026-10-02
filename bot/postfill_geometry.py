@@ -325,12 +325,16 @@ async def _validate(engine, position, stage):
     # NOVO-F013A-1: the ACTIVE stop/TP are only those of THIS opening lineage
     # (native st-orders legs or BGX stops owned for the lineage). Foreign,
     # stale or fallback-estimated levels never become the trade geometry.
-    known = (version["stop"],) if version else ()
-    protection = await _lineage_protection(client, symbol, direction, ctx, status, tick, row, known)
+    protection = await _lineage_protection(client, symbol, direction, ctx, status, tick, row)
     if not protection.readable:
         return _invalidate(position, "exchange_protection_unread")
     if protection.sl is None:
         return _invalidate(position, "no_active_stop_of_this_lineage")
+    if protection.other_lineage_tighter is not None:
+        log.critical("[PROTECTION_LINEAGE_REJECTED] symbol=%s current_opening_order_id=%s "
+                     "other_lineage_bgx_stop=%s lineage_stop=%s action=preserved_not_authority "
+                     "geometry=UNCONFIRMED", symbol, ctx.get("order_id", "")[:16],
+                     protection.other_lineage_tighter, protection.sl)
     if protection.foreign_tighter is not None:
         return _invalidate(position, "foreign_tighter_stop_present",
                            foreign_stop=protection.foreign_tighter, lineage_stop=protection.sl)
@@ -364,8 +368,7 @@ async def _validate(engine, position, stage):
                 repaired = "INVALID_TRIGGER_SIDE"
         if decision.reason in (BETTER, FIRST_PROTECTION) and valid_side:
             ok = await client.set_position_stops(symbol, sl=candidate)
-            after = await _lineage_protection(client, symbol, direction, ctx, status, tick, None,
-                                              known + (candidate,))
+            after = await _lineage_protection(client, symbol, direction, ctx, status, tick, None)
             if not after.readable or after.sl is None:
                 return _invalidate(position, "stop_readback_after_repair_failed")
             repaired = "CONFIRMED" if ok and _same_level(after.sl, candidate, tick) else "FAILED"
@@ -401,27 +404,25 @@ async def _validate(engine, position, stage):
     return state
 
 
-async def _lineage_protection(client, symbol, direction, ctx, status, tick, row, accept_levels):
+async def _lineage_protection(client, symbol, direction, ctx, status, tick, row):
     from bot import conditional_stop_lifecycle as lifecycle
     from bot import native_protection
-    lineage_row = row
+    if row is None:
+        rows = await client.get_positions()
+        row = next((r for r in rows or [] if r.get("symbol") == symbol
+                    and (_pos(r.get("size")) or 0) > 0), None)
+    side = "sell" if direction == "LONG" else "buy"
+    # Strong lineage of THIS trade: its opening order (NOVO-02 identity).
+    lineage = lifecycle.STRONG_PREFIX + str(ctx.get("order_id")) if ctx.get("order_id") else ""
 
     async def owned(order, kind):
-        if lineage_row is None:
-            return False
-        side = "sell" if direction == "LONG" else "buy"
-        lineage = lifecycle.position_lineage(client, symbol, lineage_row)
-        return await lifecycle.owned_for_lineage(client, symbol, side, kind, lineage,
-                                                 str(order.get("clientOid") or ""))
-    if lineage_row is None:
-        rows = await client.get_positions()
-        lineage_row = next((r for r in rows or [] if r.get("symbol") == symbol
-                            and (_pos(r.get("size")) or 0) > 0), None)
+        return await lifecycle.owned_for_strong_lineage(
+            client, symbol, side, kind, lineage, str(order.get("clientOid") or ""),
+            order_id=str(order.get("id") or order.get("orderId") or ""))
     return await native_protection.discover(
         client, symbol, direction, order_id=ctx.get("order_id", ""),
         client_oid=ctx.get("client_oid", ""), status=status, planned_sl=ctx.get("planned_sl"),
-        planned_tp=ctx.get("planned_tp"), tick=tick, row=lineage_row, lineage_owned=owned,
-        accept_levels=tuple(level for level in accept_levels if level is not None))
+        planned_tp=ctx.get("planned_tp"), tick=tick, row=row, lineage_owned=owned)
 
 
 async def _record_late_fill(position, entry_qty):

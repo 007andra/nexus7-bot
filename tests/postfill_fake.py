@@ -171,7 +171,12 @@ class PostfillExchange:
 
     # -- F-013A scenario helpers ----------------------------------------------
     def entry_order(self):
-        return next(o for o in self.orders.values() if str(o["id"]).startswith("entry"))
+        """The most recent opening order (a later trade on the same symbol wins)."""
+        return [o for o in self.orders.values() if str(o["id"]).startswith("entry")][-1]
+
+    def flatten(self):
+        """Position closed on the exchange; conditional orders are left as they are."""
+        self.position = None
 
     def late_fill(self, contracts, price, *, complete=True, trade_id=None):
         """More fills of the SAME opening order (exchange truth everywhere)."""

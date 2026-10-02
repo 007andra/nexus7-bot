@@ -154,8 +154,58 @@ async def _persist_registry(client, state: dict, reason: str) -> bool:
     return True
 
 
+STRONG_PREFIX = "open-"
+
+
+def _position_direction(position) -> str:
+    side = str((position or {}).get("side") or "").lower()
+    return {"buy": "LONG", "long": "LONG", "sell": "SHORT", "short": "SHORT"}.get(side, "")
+
+
+def strong_opening_order_id(engine, symbol: str, position: dict = None) -> str:
+    """NOVO-F013A-1c: the opening order id of the CURRENT trade (NOVO-02
+    trade_lifecycle_v1 identity), or "" when it is not known.
+
+    Sources, all bound to the live local trade of ``symbol``: an in-flight
+    timeout adoption of THIS opening order, the Position's forensic lineage
+    (restored on restart by restart_opening_order_lineage) or its post-fill
+    context. A direction mismatch with the exchange row is never strong."""
+    if engine is None:
+        return ""
+    want = _position_direction(position) if position else ""
+    adoption = (getattr(engine, "_timeout_adoptions", None) or {}).get(symbol)
+    if isinstance(adoption, dict) and adoption.get("order_id"):
+        if not want or adoption.get("direction") == want:
+            return str(adoption["order_id"])
+    local = (getattr(engine, "positions", None) or {}).get(symbol)
+    if local is None or (want and getattr(local, "direction", "") != want):
+        return ""
+    lineage = getattr(local, "_forensic_lineage", None)
+    forensic = ""
+    if isinstance(lineage, dict):
+        forensic = str(lineage.get("opening_order_id") or lineage.get("order_id") or "").strip()
+    ctx = getattr(local, "_postfill", None)
+    direct = str(ctx.get("order_id") or "").strip() if isinstance(ctx, dict) else ""
+    if direct and forensic and direct != forensic:
+        # Two identities for one trade: never guess which one owns protection.
+        log.critical("[PROTECTION_LINEAGE_REJECTED] symbol=%s reason=opening_lineage_conflict "
+                     "postfill_opening_order_id=%s forensic_opening_order_id=%s strong_lineage=NONE",
+                     symbol, direct[:16], forensic[:16])
+        return ""
+    return direct or forensic
+
+
+def is_strong_lineage(lineage: str) -> bool:
+    """INV-WEAK-LINEAGE-NOT-AUTHORITY-001: only an opening-order lineage is
+    ownership proof; ``trade-<id>`` / ``live-SYMBOL-side`` are legacy/weak."""
+    return str(lineage or "").startswith(STRONG_PREFIX) and len(str(lineage)) > len(STRONG_PREFIX)
+
+
 def position_lineage(client, symbol: str, position: dict) -> str:
     engine = _engine(client)
+    opening = strong_opening_order_id(engine, symbol, position)
+    if opening:
+        return STRONG_PREFIX + opening
     if engine is not None:
         trade_id = (getattr(engine, "_trade_ids", {}) or {}).get(symbol)
         parsed = 0
@@ -165,6 +215,7 @@ def position_lineage(client, symbol: str, position: dict) -> str:
             parsed = int(trade_id)
         if parsed > 0:
             return f"trade-{parsed}"
+    # WEAK: observability / grouping only — never ownership proof.
     side = str(position.get("side") or "").lower()
     return f"live-{_canon_symbol(symbol)}-{side or 'unknown'}"
 
@@ -215,6 +266,47 @@ async def owned_for_lineage(
     return str(client_oid) in {
         str(value) for value in rec.get("owned_client_oids", [])
     }
+
+
+async def owned_for_strong_lineage(
+    client, symbol: str, order_side: str, kind: str, lineage: str, client_oid: str,
+    *, order_id: str = "",
+) -> bool:
+    """Ownership AUTHORITY for geometry: the clientOid is recorded in the slot of
+    the CURRENT opening lineage (INV-PROTECTION-LINEAGE-001). Weak/legacy
+    lineages and unmapped BGX stops are never authority."""
+    if not is_strong_lineage(lineage):
+        log.warning("[LEGACY_PROTECTION_UNMAPPED] symbol=%s protective_order_id=%s "
+                    "protective_client_oid=%s stored_opening_order_id=UNKNOWN "
+                    "current_opening_order_id=UNKNOWN reason=weak_current_lineage lineage=%s",
+                    symbol, order_id or "?", client_oid, lineage)
+        return False
+    current = str(lineage)[len(STRONG_PREFIX):]
+    owned = await owned_for_lineage(client, symbol, order_side, kind, lineage, client_oid)
+    if owned:
+        log.info("[PROTECTION_LINEAGE_ACCEPTED] symbol=%s protective_order_id=%s "
+                 "protective_client_oid=%s stored_opening_order_id=%s current_opening_order_id=%s "
+                 "reason=strong_lineage_mapping", symbol, order_id or "?", client_oid, current, current)
+        return True
+    stored = await stored_opening_order_id(client, client_oid)
+    tag = "PROTECTION_LINEAGE_REJECTED" if stored else "LEGACY_PROTECTION_UNMAPPED"
+    log.warning("[%s] symbol=%s protective_order_id=%s protective_client_oid=%s "
+                "stored_opening_order_id=%s current_opening_order_id=%s reason=%s",
+                tag, symbol, order_id or "?", client_oid, stored or "UNKNOWN", current,
+                "lineage_mismatch" if stored else "no_strong_mapping")
+    return False
+
+
+async def stored_opening_order_id(client, client_oid: str) -> str:
+    """Strong opening lineage durably recorded for a BGX clientOid, or ""."""
+    state = await _load_registry(client)
+    for rec in state.get("slots", {}).values():
+        if isinstance(rec, dict) and str(client_oid) in {
+                str(v) for v in rec.get("owned_client_oids", [])}:
+            lineage = str(rec.get("lineage") or "")
+            if is_strong_lineage(lineage):
+                return lineage[len(STRONG_PREFIX):]
+    return ""
 
 
 async def prepare_candidate(
@@ -343,6 +435,9 @@ async def prepare_candidate(
             "order_side": str(order_side).lower(),
             "kind": str(kind).upper(),
             "lineage": str(lineage),
+            # NOVO-F013A-1c: durable strong binding (survives restart).
+            "opening_order_id": (str(lineage)[len(STRONG_PREFIX):]
+                                 if is_strong_lineage(lineage) else ""),
             "desired_trigger": desired,
             "client_oid": oid,
             "generation": generation,

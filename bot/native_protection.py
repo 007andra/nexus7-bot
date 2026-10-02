@@ -23,8 +23,11 @@ conjunctive — never "any stop on the symbol":
                    AND, when both timestamps exist, the leg was not created
                        before the opening order (stale legs of an older trade).
 
-  BGX stop    <=>  BGX clientOid owned for this position lineage in the
-                   F-001A registry (``owned_for_lineage``) — repaired stops.
+  BGX stop    <=>  BGX clientOid recorded in the F-001A registry slot of
+                   the CURRENT opening lineage (``open-<opening_order_id>``,
+                   ``owned_for_strong_lineage``). Weak lineages
+                   (``live-SYMBOL-side``, ``trade-<id>``), the prefix, the side
+                   or an equal trigger never prove ownership (NOVO-F013A-1c).
 
 Everything else (foreign/manual stops, stale legs of another trade, position
 ``stopLoss`` without provenance, ATR or liquidation estimates) is never a
@@ -80,7 +83,10 @@ class NativeProtection:
     sl_source: str = "none"              # native_leg | bgx_lineage_stop | none
     readable: bool = False
     ignored: list = field(default_factory=list)
-    foreign_tighter: float | None = None  # a NON-lineage stop would trigger first
+    foreign_tighter: float | None = None  # any non-lineage stop would trigger first
+    other_lineage_tighter: float | None = None  # ... and it is a BGX stop of another/legacy lineage
+    foreign: list = field(default_factory=list)
+    other_bgx: list = field(default_factory=list)
 
     @property
     def sl_confirmed(self):
@@ -106,13 +112,11 @@ def _closing_target(order, row, direction, price):
 
 
 async def discover(client, symbol, direction, *, order_id="", client_oid="", status=None,
-                   planned_sl=None, planned_tp=None, tick=None, row=None, lineage_owned=None,
-                   accept_levels=()):
+                   planned_sl=None, planned_tp=None, tick=None, row=None, lineage_owned=None):
     """Read-only: which ACTIVE exchange protection belongs to this opening lineage.
 
     ``status``: fresh detail of the opening order (read here when omitted).
-    ``accept_levels``: stop levels this lineage itself placed and read back
-    (F-013 repair candidates, the current geometry version).
+    ``lineage_owned(order, kind)``: STRONG-lineage ownership of a BGX stop.
     """
     from bot.conditional_stop_lifecycle import is_bgx_owned
     from bot.conditional_stop_protection import _instrument_info, _protective_order, read_stop_orders
@@ -166,10 +170,12 @@ async def discover(client, symbol, direction, *, order_id="", client_oid="", sta
         else:
             continue
         source = None
-        if is_bgx_owned(order):
+        bgx = is_bgx_owned(order)
+        if bgx:
+            # INV-PROTECTION-LINEAGE-001: a BGX stop is this trade's only through
+            # the durable STRONG mapping (opening order id). Symbol, side, prefix
+            # or an equal trigger price never prove ownership.
             if lineage_owned is not None and await lineage_owned(order, kind):
-                source = "bgx_lineage_stop"
-            elif kind == "SL" and any(_same(price, level, tick) for level in accept_levels):
                 source = "bgx_lineage_stop"
         else:
             native = result.native_sl if kind == "SL" else result.native_tp
@@ -178,22 +184,28 @@ async def discover(client, symbol, direction, *, order_id="", client_oid="", sta
                 and created + CREATED_SKEW_MS < created_floor
             if _same(price, native, tick) and not stale:
                 source = "native_leg"
-            elif kind == "SL" and not stale and any(_same(price, level, tick) for level in accept_levels):
-                source = "native_leg"
         if source is None:
             result.ignored.append((kind, price, str(order.get("clientOid") or order.get("id") or "")[:24]))
+            (result.other_bgx if bgx else result.foreign).append((kind, price))
             continue
         (stops if kind == "SL" else tps).append((price, source))
     if stops:
+        # INV-MONOTONIC-WITHIN-LINEAGE-001: Q-01C "most protective" is applied
+        # ONLY among stops whose ownership by the current lineage is proven.
         best = max(stops) if direction == "LONG" else min(stops)
         result.sl, result.sl_source = best
-        foreign = [price for kind, price, _ in result.ignored if kind == "SL"]
-        tighter = [p for p in foreign if (p > result.sl if direction == "LONG" else p < result.sl)
-                   and not _same(p, result.sl, tick)]
-        if tighter:
-            # The trade would exit at a stop that is not its own: geometry is
-            # ambiguous (never adopted, never ignored) -> caller fails closed.
-            result.foreign_tighter = max(tighter) if direction == "LONG" else min(tighter)
+
+        def tighter(levels):
+            found = [p for k, p in levels if k == "SL"
+                     and (p > result.sl if direction == "LONG" else p < result.sl)
+                     and not _same(p, result.sl, tick)]
+            return (max(found) if direction == "LONG" else min(found)) if found else None
+        # A tighter stop NOT owned by this lineage (manual/external, unattributed
+        # native leg, or a BGX stop of another/legacy lineage) would exit the
+        # trade first: it is never adopted as geometry and never silently
+        # ignored -> caller fails closed (UNCONFIRMED). It is not cancelled here.
+        result.other_lineage_tighter = tighter(result.other_bgx)
+        result.foreign_tighter = tighter(result.foreign + result.other_bgx)
     if tps:
         result.tp = (min(tps) if direction == "LONG" else max(tps))[0]
     if result.ignored:
