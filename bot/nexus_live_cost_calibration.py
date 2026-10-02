@@ -20,10 +20,9 @@ import functools
 from dataclasses import dataclass
 
 from bot import execution_cost
-from bot.kucoin_execution_model import (
-    DEFAULT_SLIPPAGE,
-    DEFAULT_TAKER_FEE,
-)
+
+DEFAULT_SLIPPAGE = execution_cost.DEFAULT_SLIPPAGE
+DEFAULT_TAKER_FEE = execution_cost.LEGACY_CONSERVATIVE_TAKER_FEE
 
 
 @dataclass(frozen=True)
