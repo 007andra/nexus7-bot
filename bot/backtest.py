@@ -318,6 +318,7 @@ def _execution_context_defaults(symbol: str, execution_context: dict | None) -> 
     ctx.setdefault("fee_source", "configured_fallback")
     ctx.setdefault("slippage_rate", slippage_rate_for_symbol(symbol))
     ctx.setdefault("funding_events", [])
+    ctx.setdefault("execution_model", "KUCOIN_MARKET_PROXY_V1")
     return ctx
 
 
@@ -353,6 +354,9 @@ def _run_strategy(
     fee_rate = float(ctx["taker_fee_rate"])
     slip = float(ctx["slippage_rate"])
     funding_events = list(ctx.get("funding_events") or [])
+    execution_model = str(
+        ctx.get("execution_model") or "KUCOIN_MARKET_PROXY_V1"
+    )
 
     ts15 = _timestamp_index(klines_15)
     ts1h = _timestamp_index(klines_1h)
@@ -734,6 +738,7 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
         "fee_source": fee_source,
         "slippage_rate": slippage_rate,
         "funding_events": funding_events,
+        "execution_model": execution_model,
     }
 
     trades = _run_strategy(k15, k1h, k4h, symbol=symbol, execution_context=execution_context)
