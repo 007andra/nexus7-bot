@@ -9,6 +9,7 @@ from bot.research_promotion_readiness import (
 def _bundle():
     return {
         "manifest_hash": "a" * 64,
+        "dataset_fingerprint": "b" * 64,
         "manifest": {"artifacts": [{"dataset": "klines"}]},
         "primary": {
             "status": "AI_EDGE_PROVEN",
@@ -99,6 +100,18 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
         self.assertTrue(flags["oos_green"])
         self.assertTrue(flags["shadow_green"])
         self.assertFalse(flags["operator_approved"])
+
+    def test_missing_dataset_fingerprint_fails_closed(self):
+        bundle = _bundle()
+        bundle.pop("dataset_fingerprint")
+        result = evaluate_readiness(
+            bundle,
+            ci_green=True,
+            shadow_drift=_drift(),
+            sensitivity=_sensitivity(),
+        )
+        self.assertFalse(result.ready_for_operator_review)
+        self.assertIn("MANIFEST_VALID", result.blockers)
 
     def test_ci_false_fails_closed(self):
         result = evaluate_readiness(
