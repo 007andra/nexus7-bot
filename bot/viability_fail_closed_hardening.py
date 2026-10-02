@@ -51,6 +51,12 @@ async def _filter_viable_symbols_fail_closed(self) -> bool:
             self.viable_symbols = []
             return False
 
+        # Observability only. This is the effective runtime path because this
+        # hardening replaces TradingEngine._filter_viable_symbols at bootstrap.
+        # The matrix never modifies viable_symbols or execution authority.
+        from bot import min_order_feasibility_matrix
+        min_order_feasibility_matrix.log_once(self, price_map, log)
+
         viable = []
         rejected = []
         for sym in cfg.SYMBOLS:
