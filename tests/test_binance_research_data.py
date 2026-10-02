@@ -4,6 +4,8 @@ import zipfile
 
 from bot.binance_research_data import (
     archive_sha256,
+    daily_book_depth_url,
+    daily_metrics_url,
     monthly_funding_url,
     monthly_kline_url,
     parse_checksum_text,
@@ -29,6 +31,14 @@ class BinanceResearchDataTests(unittest.TestCase):
     def test_funding_url_is_usdm_monthly_archive(self):
         url = monthly_funding_url("ETHUSDT", 2026, 2)
         self.assertTrue(url.endswith("ETHUSDT-fundingRate-2026-02.zip"))
+
+    def test_daily_context_urls_are_usdm_archives(self):
+        metrics = daily_metrics_url("btcusdt", "2026-08-31")
+        depth = daily_book_depth_url("BTCUSDT", "2026-08-31")
+        self.assertTrue(metrics.endswith("BTCUSDT-metrics-2026-08-31.zip"))
+        self.assertIn("/futures/um/daily/metrics/BTCUSDT/", metrics)
+        self.assertTrue(depth.endswith("BTCUSDT-bookDepth-2026-08-31.zip"))
+        self.assertIn("/futures/um/daily/bookDepth/BTCUSDT/", depth)
 
     def test_parse_kline_archive(self):
         payload = _zip_csv(
