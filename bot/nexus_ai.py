@@ -573,12 +573,8 @@ def decide(symbol: str, k15: list, k1h: list, k4h: list,
             dq.score, warnings)
 
     # ── PASSO 5: ensemble (seção 17) ─────────────────────────────
-    models = run_ensemble(
-        closes, highs, lows, volumes,
-        funding=funding, oi_delta=oi_delta, ls_ratio=ls_ratio,
-        opens=[float(k.get("o", k.get("c"))) for k in k15],
-        timestamps=[k.get("ts", k.get("time", k.get("timestamp"))) for k in k15],
-    )
+    models = run_ensemble(closes, highs, lows, volumes,
+                          funding=funding, oi_delta=oi_delta, ls_ratio=ls_ratio)
     fusion = _fuse(models, regime)
     reasoning.append(
         f"Ensemble: {fusion['direction'].value} conf={fusion['confidence']:.1f} "
@@ -763,11 +759,7 @@ def monitor_position(symbol: str, direction: str, entry: float, sl: float,
         progress = ((current - entry) if is_long else (entry - current)) / risk
 
         regime, _ = detect_regime(closes, highs, lows, volumes)
-        models    = run_ensemble(
-            closes, highs, lows, volumes, funding=funding,
-            opens=[float(k.get("o", k.get("c"))) for k in k15],
-            timestamps=[k.get("ts", k.get("time", k.get("timestamp"))) for k in k15],
-        )
+        models    = run_ensemble(closes, highs, lows, volumes, funding=funding)
         fusion    = _fuse(models, regime)
 
         opposite = (Decision.SHORT if is_long else Decision.LONG)
