@@ -197,6 +197,8 @@ Template fields abbreviated where obvious. "Repro" = test in `tests/test_forensi
 - **Repro:** `F001EmergencyCloseAllTests` (actual-behaviour test passes; correct-behaviour test is `expectedFailure` with `AttributeError`).
 - **Fix (minimal):** implement `close_all_positions` on the engine using the existing confirmed reduce-only flow (per symbol: exchange size → base qty → `place_order(reduce_only=True)` → `wait_for_fill` → re-read positions), and replace `engine.stop()` with `engine.pause_entries()` so management continues. Fix risk: medium (new mutation path) — needs tests with fake exchange.
 
+- **Fixed (2026-10-02):** `/api/close-all` now calls `TradingEngine.close_all_positions` (`bot/emergency_flatten.py`): pause entries → exchange positions → reduce-only closes via the normal fenced `place_order` chain (units via `emergency_close_quantity`) → exchange re-read → status FLAT / ALREADY_FLAT / PARTIAL_FAILURE / FAILED (HTTP 200 only when flat). The engine is not stopped; remaining exposure stays managed. Tests: `tests/test_emergency_flatten*.py`.
+
 #### F-002 — LIVE protected entries bypass the canonical READY_FOR_NEW_ENTRIES authority
 - **Category:** risk gate bypass · **Files:** `bot/kucoin_native_tpsl.py:135-285`, `bot/kucoin.py:1080-1102`, `bot/runtime_readiness.py:58`
 - **Expected:** every OPEN_NEW_RISK dispatch evaluates `assert_ready_for_new_entries(engine)` (instruments, durable DB, financial sanity, **initial reconciliation**, ownership, exchange, market data, capability, **protection readiness**).

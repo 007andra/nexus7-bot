@@ -304,10 +304,16 @@ async def resume(request: Request):
 
 @app.post("/api/close-all", dependencies=[Depends(_require_auth), Depends(_rate_limit)])
 async def close_all(request: Request):
+    # F-001: never stop the engine first. close_all_positions pauses entries,
+    # flattens with reduce-only orders and verifies against the exchange while
+    # the run loop keeps managing whatever remains open.
+    from fastapi.responses import JSONResponse
     engine=app.state.engine
-    engine.stop()
-    result=await engine.close_all_positions()
-    return {"message":f"Emergency close: {result['closed']} posições fechadas",**result}
+    result=await engine.close_all_positions(reason="api_close_all")
+    ok=result["status"] in ("FLAT","ALREADY_FLAT")
+    body={"message":f"Emergency close: {result['status']} "
+          f"({result['positions_closed']}/{result['positions_found']} fechadas)",**result}
+    return JSONResponse(status_code=200 if ok else 503, content=body)
 
 
 # ── PnL / Stats ───────────────────────────────────────────────────

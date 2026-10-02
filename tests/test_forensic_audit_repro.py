@@ -26,20 +26,16 @@ class _Log:
 
 
 # ---------------------------------------------------------------------------
-# F-001 (P0) — /api/close-all stops the engine and then calls a method that
-# does not exist anywhere in the repository.
+# F-001 (P0, FIXED) — /api/close-all used to stop the engine and then call a
+# method that did not exist. Full coverage: tests/test_emergency_flatten*.py.
 # ---------------------------------------------------------------------------
 class F001EmergencyCloseAllTests(unittest.IsolatedAsyncioTestCase):
-    def test_close_all_positions_is_not_defined_on_runtime_engine(self):
+    def test_close_all_positions_is_defined_on_runtime_engine(self):
         from bot.nexus_runtime_engine import TradingEngine
-        import main  # noqa: F401  (main.close_all calls engine.close_all_positions)
-        self.assertFalse(
-            hasattr(TradingEngine, "close_all_positions"),
-            "reproduction precondition: method is missing",
-        )
+        self.assertTrue(callable(getattr(TradingEngine, "close_all_positions", None)))
 
-    @unittest.expectedFailure
-    async def test_close_all_endpoint_closes_positions_and_keeps_management(self):
+    async def test_close_all_endpoint_keeps_management_and_reports_status(self):
+        import json
         import main
         from bot.kucoin import KuCoinClient
         from bot.nexus_runtime_engine import TradingEngine
@@ -50,32 +46,13 @@ class F001EmergencyCloseAllTests(unittest.IsolatedAsyncioTestCase):
         previous = getattr(main.app.state, "engine", None)
         main.app.state.engine = engine
         try:
-            # Correct behaviour: returns a result and position management keeps
-            # running. Actual: engine.stop() sets _running=False, then
-            # AttributeError('close_all_positions').
-            result = await main.close_all(SimpleNamespace())
-            self.assertIn("closed", result)
+            response = await main.close_all(SimpleNamespace())
+            body = json.loads(response.body)
+            self.assertIn(body["status"], ("FLAT", "ALREADY_FLAT", "PARTIAL_FAILURE", "FAILED"))
+            # PAPER suite: no exchange flatten is possible, so never "success".
+            self.assertEqual(response.status_code, 503)
             self.assertTrue(engine._running, "position management must continue")
-        finally:
-            main.app.state.engine = previous
-
-    async def test_close_all_endpoint_actual_behaviour(self):
-        import main
-        from bot.kucoin import KuCoinClient
-        from bot.nexus_runtime_engine import TradingEngine
-
-        engine = TradingEngine(KuCoinClient())
-        engine._running = True
-        engine.active = True
-        previous = getattr(main.app.state, "engine", None)
-        main.app.state.engine = engine
-        try:
-            with self.assertRaises(AttributeError):
-                await main.close_all(SimpleNamespace())
-            # Side effect already applied before the crash: run loop is told
-            # to exit, so trailing / naked-position guard / sync stop.
-            self.assertFalse(engine._running)
-            self.assertFalse(engine.active)
+            self.assertTrue(engine.entries_paused, "new entries frozen")
         finally:
             main.app.state.engine = previous
 

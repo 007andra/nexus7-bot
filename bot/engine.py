@@ -687,6 +687,11 @@ class TradingEngine:
         self.client.entries_paused = False
         log.info('[ENTRY_PAUSE] paused=false risk_gates=UNCHANGED')
 
+    async def close_all_positions(self, reason: str = "operator_close_all") -> dict:
+        """Operator emergency flatten; keeps management running (F-001)."""
+        from bot.emergency_flatten import close_all_positions
+        return await close_all_positions(self, reason=reason)
+
     def stop(self):
         self.pause_entries()
         self.active   = False
