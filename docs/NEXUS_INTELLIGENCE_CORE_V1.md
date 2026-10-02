@@ -43,6 +43,13 @@ No upstream source code is vendored here.
 - Post-2026-06-25 metrics label normalization to information-availability time
   so start-labeled rows cannot leak the following five-minute interval.
 - Daily bookDepth parsing and SHADOW-only imbalance diagnostics.
+- Candidate-day bookDepth sampling avoids downloading irrelevant depth archives.
+- SHADOW microstructure combines 1/2/5% depth imbalance, taker flow and
+  candidate-cadence open-interest impulse.
+- Cross-symbol opportunity ranking compares only candidates sharing the same
+  decision timestamp and uses pre-trade inputs only.
+- Ranking evidence reports top-1 expectancy, remaining-candidate expectancy,
+  uplift and rank/outcome correlation after outcomes are known.
 - Known-problem bookDepth periods can be quarantined rather than silently
   entering evidence.
 - Conservative Binance execution proxy with taker fees, adverse slippage,
@@ -87,7 +94,8 @@ bypass them.
 The current production NEXUS score still treats MICROSTRUCTURE as unavailable
 and renormalizes its weight. Historical bookDepth is therefore collected only
 as SHADOW research and is not required for exact parity of the currently active
-score. It must not gain production weight without OOS + SHADOW evidence and
+score. Missing bookDepth is an observational gap; checksum/schema corruption
+still fails closed. Known-problem depth periods are quarantined. It must not gain production weight without OOS + SHADOW evidence and
 explicit operator approval.
 
 ## Evidence still required before any strategy promotion
@@ -102,7 +110,9 @@ any calibration/threshold/model can affect LIVE decisions:
 4. Review primary uplift, bootstrap intervals, robustness by symbol/time,
    cost sensitivity and calibration metrics.
 5. Accumulate SHADOW evidence and drift telemetry.
-6. Require explicit operator approval through the champion/challenger gate.
+6. Require repeated cross-sectional ranking evidence showing whether top-ranked
+   candidates add OOS expectancy without outcome leakage.
+7. Require explicit operator approval through the champion/challenger gate.
 
 A passing unit/CI suite proves engineering invariants, not trading profitability.
 
