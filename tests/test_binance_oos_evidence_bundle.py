@@ -45,6 +45,51 @@ def _reports():
     ]
 
 
+
+def _ranking_reports():
+    base = {
+        "timestamp": 1_700_000_000_000,
+        "direction": "LONG",
+        "nexus_rr_net": 2.0,
+        "round_trip_cost": 0.001,
+        "nexus_confidence": 70.0,
+        "nexus_regime_compat": 80.0,
+        "shadow_microstructure": {
+            "available": True,
+            "directional_alignment": 0.5,
+            "taker_pressure": 0.4,
+        },
+    }
+    return [
+        {
+            "symbol": "BTCUSDT",
+            "candidate_diagnostics": [{
+                **base,
+                "candidate_id": "btc-a",
+                "nexus_expected_value_pct": 1.4,
+                "nexus_setup_quality": 85.0,
+                "depth_notional_1pct": 10_000_000.0,
+                "r_multiple": 1.5,
+            }],
+        },
+        {
+            "symbol": "ETHUSDT",
+            "candidate_diagnostics": [{
+                **base,
+                "candidate_id": "eth-b",
+                "nexus_expected_value_pct": 0.4,
+                "nexus_setup_quality": 70.0,
+                "depth_notional_1pct": 2_000_000.0,
+                "shadow_microstructure": {
+                    "available": True,
+                    "directional_alignment": -0.3,
+                    "taker_pressure": -0.2,
+                },
+                "r_multiple": -0.5,
+            }],
+        },
+    ]
+
 class BinanceOOSEvidenceBundleTests(unittest.TestCase):
     def test_primary_and_robustness_share_exact_population(self):
         reports = _reports()
@@ -85,6 +130,42 @@ class BinanceOOSEvidenceBundleTests(unittest.TestCase):
         self.assertTrue(sensitivity["execution_cost"]["points"])
         self.assertEqual(sensitivity["execution_effect"], "NONE")
         self.assertFalse(sensitivity["promotion_authority"])
+
+    def test_opportunity_ranking_is_cross_symbol_and_shadow_only(self):
+        report = build_opportunity_ranking_report(_ranking_reports())
+        self.assertEqual(report["status"], "EVIDENCE_AVAILABLE")
+        self.assertEqual(report["cross_sections"], 1)
+        self.assertEqual(report["ranked_candidates"], 2)
+        self.assertGreater(report["top1_uplift_r"], 0)
+        self.assertFalse(report["outcome_used_in_rank"])
+        self.assertEqual(report["execution_effect"], "NONE")
+        self.assertEqual(report["score_effect"], "NONE")
+        self.assertFalse(report["promotion_authority"])
+        self.assertEqual(
+            report["details"][0]["top_candidate_id"],
+            "btc-a",
+        )
+
+    def test_realized_result_flip_does_not_change_top_pretrade_candidate(self):
+        reports = _ranking_reports()
+        first = build_opportunity_ranking_report(reports)
+        reports[0]["candidate_diagnostics"][0]["r_multiple"] = -4.0
+        reports[1]["candidate_diagnostics"][0]["r_multiple"] = 4.0
+        second = build_opportunity_ranking_report(reports)
+        self.assertEqual(
+            first["details"][0]["top_candidate_id"],
+            second["details"][0]["top_candidate_id"],
+        )
+        self.assertNotEqual(
+            first["top1_uplift_r"],
+            second["top1_uplift_r"],
+        )
+
+    def test_duplicate_candidate_id_fails_closed(self):
+        reports = _ranking_reports()
+        reports[1]["candidate_diagnostics"][0]["candidate_id"] = "btc-a"
+        with self.assertRaises(RuntimeError):
+            build_opportunity_ranking_report(reports)
 
     def test_incomplete_context_cannot_claim_edge_proven(self):
         reports = _reports()
