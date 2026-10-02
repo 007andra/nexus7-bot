@@ -14,6 +14,7 @@ import csv
 import io
 import math
 import zipfile
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -175,34 +176,48 @@ def merge_metrics(
     return tuple(result)
 
 
+@dataclass(frozen=True)
+class MetricIndex:
+    rows: tuple[MetricObservation, ...]
+    available_at: tuple[int, ...]
+
+    @classmethod
+    def build(cls, rows: Sequence[MetricObservation]) -> "MetricIndex":
+        ordered = tuple(rows)
+        times = tuple(int(row.available_at_ms) for row in ordered)
+        if any(b <= a for a, b in zip(times, times[1:])):
+            raise ValueError("metric index requires strictly increasing availability")
+        return cls(ordered, times)
+
+    def position(self, decision_ts_ms: int) -> int:
+        return bisect_right(self.available_at, int(decision_ts_ms)) - 1
+
+    def latest(self, decision_ts_ms: int) -> MetricObservation | None:
+        index = self.position(decision_ts_ms)
+        return self.rows[index] if index >= 0 else None
+
+    def oi_delta(self, decision_ts_ms: int) -> float | None:
+        index = self.position(decision_ts_ms)
+        if index < 1:
+            return None
+        previous, current = self.rows[index - 1], self.rows[index]
+        if previous.open_interest <= 0:
+            return None
+        return current.open_interest / previous.open_interest - 1.0
+
+
 def latest_metric(
     rows: Sequence[MetricObservation],
     decision_ts_ms: int,
 ) -> MetricObservation | None:
-    """Return only information actually observable by decision time."""
-    decision = int(decision_ts_ms)
-    best = None
-    for row in rows:
-        if row.available_at_ms <= decision:
-            best = row
-        else:
-            break
-    return best
+    return MetricIndex.build(rows).latest(decision_ts_ms)
 
 
 def oi_delta(
     rows: Sequence[MetricObservation],
     decision_ts_ms: int,
 ) -> float | None:
-    """Five-minute OI delta from the latest two causally available snapshots."""
-    decision = int(decision_ts_ms)
-    available = [row for row in rows if row.available_at_ms <= decision]
-    if len(available) < 2:
-        return None
-    previous, current = available[-2], available[-1]
-    if previous.open_interest <= 0:
-        return None
-    return current.open_interest / previous.open_interest - 1.0
+    return MetricIndex.build(rows).oi_delta(decision_ts_ms)
 
 
 async def load_daily_metrics(
