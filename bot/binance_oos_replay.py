@@ -171,18 +171,52 @@ async def load_verified_metrics(
     dates: Sequence[str],
     *,
     cache_dir: str | Path | None = None,
+    concurrency: int = 8,
 ) -> tuple[list[MetricsObservation], tuple[ResearchArtifact, ...]]:
-    """Load checksum-verified daily 5m positioning/flow metrics."""
+    """Load checksum-verified daily 5m metrics with bounded concurrency.
+
+    Network completion order never affects the result: merge order follows the
+    caller's date sequence, and duplicate effective timestamps fail closed when
+    their payload differs.
+    """
+    limit = int(concurrency)
+    if limit < 1 or limit > 32:
+        raise ValueError("metrics concurrency must be in [1,32]")
+    semaphore = asyncio.Semaphore(limit)
+
+    async def load_one(source_date: str):
+        async with semaphore:
+            url = daily_metrics_url(symbol, source_date)
+            archive = await download_archive_verified(
+                url, cache_path=_archive_cache_path(cache_dir, url)
+            )
+            rows = parse_metrics_archive(
+                archive.payload, source_date=source_date
+            )
+            artifact = ResearchArtifact(
+                source=url,
+                dataset="metrics",
+                symbol=str(symbol).upper(),
+                interval="5m",
+                sha256=archive.sha256,
+                rows=len(rows),
+                first_ts=rows[0].effective_ts_ms if rows else None,
+                last_ts=rows[-1].effective_ts_ms if rows else None,
+            )
+            return source_date, rows, artifact
+
+    loaded = await asyncio.gather(
+        *(load_one(source_date) for source_date in dates)
+    )
+    by_date = {
+        source_date: (rows, artifact)
+        for source_date, rows, artifact in loaded
+    }
+
     by_ts: dict[int, MetricsObservation] = {}
-    artifacts = []
+    artifacts: list[ResearchArtifact] = []
     for source_date in dates:
-        url = daily_metrics_url(symbol, source_date)
-        archive = await download_archive_verified(
-            url, cache_path=_archive_cache_path(cache_dir, url)
-        )
-        rows = parse_metrics_archive(
-            archive.payload, source_date=source_date
-        )
+        rows, artifact = by_date[source_date]
         for row in rows:
             key = int(row.effective_ts_ms)
             if key in by_ts and by_ts[key] != row:
@@ -190,16 +224,8 @@ async def load_verified_metrics(
                     "conflicting Binance metrics effective timestamp"
                 )
             by_ts[key] = row
-        artifacts.append(ResearchArtifact(
-            source=url,
-            dataset="metrics",
-            symbol=str(symbol).upper(),
-            interval="5m",
-            sha256=archive.sha256,
-            rows=len(rows),
-            first_ts=rows[0].effective_ts_ms if rows else None,
-            last_ts=rows[-1].effective_ts_ms if rows else None,
-        ))
+        artifacts.append(artifact)
+
     return [by_ts[key] for key in sorted(by_ts)], tuple(artifacts)
 
 
