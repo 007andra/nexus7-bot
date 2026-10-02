@@ -455,6 +455,7 @@ async def run(
     robustness = build_robustness_report(reports)
     calibration = build_calibration_report(reports)
     sensitivity = build_sensitivity_report(reports)
+    opportunity_ranking = build_opportunity_ranking_report(reports)
     assert_population_parity(primary, robustness)
 
     manifest = ResearchManifest(
@@ -469,6 +470,7 @@ async def run(
         "robustness": robustness,
         "calibration": calibration,
         "sensitivity": sensitivity,
+        "opportunity_ranking": opportunity_ranking,
         "manifest": manifest.canonical_dict(),
         "manifest_hash": manifest.fingerprint,
         "methodology": {
