@@ -166,6 +166,31 @@ def install(KuCoinClient, kucoin_module, log) -> None:
             log.warning("place_order TPSL: KUCOIN_API_KEY não configurado")
             return {}
 
+        # INV-LIVE-READINESS-001: canonical new-entry readiness before any
+        # external side effect (margin-mode switch included). The transport
+        # boundary re-checks; this replaces the gate of the bypassed original.
+        from bot.runtime_readiness import EntryReadinessRefused, assert_entry_dispatch_ready
+        try:
+            gate_oid = self.build_client_oid(symbol, side, qty, idem_key)
+        except Exception:
+            gate_oid = ""
+        try:
+            assert_entry_dispatch_ready(
+                self, stage="native_tpsl", symbol=symbol, side=side, client_oid=gate_oid,
+            )
+        except EntryReadinessRefused:
+            try:
+                from bot.pilot_submission_counter import _fail_predispatch
+                await _fail_predispatch(
+                    self, symbol, side, qty, idem_key, "PRE_DISPATCH_READINESS_DENIED"
+                )
+            except Exception as exc:
+                log.critical(
+                    "[KUCOIN_NATIVE_TPSL] predispatch_abort_record_failed symbol=%s error=%s",
+                    symbol, type(exc).__name__,
+                )
+            raise
+
         # Fix for production 330005: the body alone is insufficient when a
         # symbol is still selected as ISOLATED in the account configuration.
         if not await _ensure_cross_margin(self, kucoin_module, symbol, log):

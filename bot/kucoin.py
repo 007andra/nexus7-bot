@@ -584,6 +584,15 @@ class KuCoinClient:
                 and body.get('reduceOnly') is not True
                 and body.get('closeOrder') is not True):
             raise ValueError('New entry blocked by operator pause')
+        if (endpoint in ('/api/v1/orders', '/api/v1/st-orders')
+                and body.get('reduceOnly') is not True
+                and body.get('closeOrder') is not True):
+            # INV-LIVE-READINESS-001: final transport boundary for new risk.
+            from bot.runtime_readiness import assert_entry_dispatch_ready
+            assert_entry_dispatch_ready(
+                self, stage='transport', symbol=str(body.get('symbol', '')),
+                side=str(body.get('side', '')), client_oid=str(body.get('clientOid', '')),
+            )
         return self._session.post(url, **kwargs)
 
     @asynccontextmanager
@@ -732,7 +741,8 @@ class KuCoinClient:
                     log.warning(f"KuCoin POST {endpoint}: {code} {msg}")
             except Exception as e:
                 from bot.execution_ownership import StaleExecutionFence, ExecutionOwnershipUnavailable
-                if isinstance(e, (StaleExecutionFence, ExecutionOwnershipUnavailable)):
+                from bot.runtime_readiness import EntryReadinessRefused
+                if isinstance(e, (StaleExecutionFence, ExecutionOwnershipUnavailable, EntryReadinessRefused)):
                     raise
                 # Network/timeout ambiguity is reconciled by clientOid.
                 ambiguous = True

@@ -13,8 +13,21 @@ class _Log:
     critical = staticmethod(lambda *a, **k: None)
 
 
+def _ready_engine():
+    from datetime import datetime, timedelta, timezone
+    return SimpleNamespace(
+        instruments={"BTCUSDT": {}}, _durable_state_ok=True, _financial_state_sane=True,
+        _initial_reconciliation_complete=True, _execution_ownership_valid=True,
+        _execution_ownership_expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+        connected=True, viable_symbols=["BTCUSDT"], _market_data_ready=True,
+        _protection_system_ready=True,
+    )
+
+
 class _FakeClient:
     def __init__(self):
+        # LIVE entries require canonical READY_FOR_NEW_ENTRIES (F-002).
+        self._engine = _ready_engine()
         self._post = AsyncMock(return_value={"orderId": "kc-1"})
         self._get = AsyncMock(return_value={"symbol": "XBTUSDTM", "marginMode": "CROSS"})
         self.get_order_by_client_oid = AsyncMock(return_value={})

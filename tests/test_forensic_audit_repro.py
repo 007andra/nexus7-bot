@@ -81,7 +81,7 @@ class F001EmergencyCloseAllTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# F-002 (P0) — LIVE protected entries (native TP/SL) bypass the canonical
+# F-002 (P0, FIXED) — LIVE protected entries (native TP/SL) bypassed the canonical
 # READY_FOR_NEW_ENTRIES authority (initial reconciliation, protection
 # readiness, durable state...). It is only evaluated in the core
 # KuCoinClient.place_order, which the native TP/SL wrapper never calls.
@@ -145,19 +145,16 @@ class F002NativeTpslReadinessBypassTests(unittest.IsolatedAsyncioTestCase):
                 await client.place_order("BTCUSDT", "Buy", 0.002, sl=99000, tp=104000)
         client._post.assert_not_awaited()
 
-    async def test_native_tpsl_path_dispatches_when_not_ready_actual(self):
-        client = self._client(self._live_module())
-        await client.place_order("BTCUSDT", "Buy", 0.002, sl=99000, tp=104000,
-                                 idem_key="audit-f002", single_submission=True)
-        endpoints = [c.args[0] for c in client._post.await_args_list]
-        self.assertIn("/api/v1/st-orders", endpoints)
-
-    @unittest.expectedFailure
+    # FIXED: formerly test_native_tpsl_path_dispatches_when_not_ready_actual
+    # (asserted the bypass) + an expectedFailure. Composed-runtime coverage:
+    # tests/test_live_entry_readiness_gate.py.
     async def test_native_tpsl_path_must_refuse_when_not_ready(self):
         client = self._client(self._live_module())
         with self.assertRaisesRegex(RuntimeError, "READY_FOR_NEW_ENTRIES=false"):
             await client.place_order("BTCUSDT", "Buy", 0.002, sl=99000, tp=104000,
                                      idem_key="audit-f002", single_submission=True)
+        client._post.assert_not_awaited()
+        client._get.assert_not_awaited()   # not even the margin-mode read/switch
 
 
 # ---------------------------------------------------------------------------
