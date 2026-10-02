@@ -81,3 +81,38 @@ No external repository connection.
 Attribution/design reference: shiyu-coder/Kronos (MIT), copyright 2025 ShiYu.
 The NEXUS implementation is independently written for the existing NEXUS
 research/data contracts.
+
+
+## Binance USD-M OOS evidence
+
+The research candidate now includes a Binance-specific, public, read-only replay path:
+
+- bot/market_language_oos.py
+- bot/market_language_binance_replay.py
+
+The replay pages public /fapi/v1/klines history, discards any still-open candle,
+and evaluates the model with strict prefix-only chronology. By default, a
+4-candle horizon on 15m data is evaluated every 4 candles, so realized labels do
+not overlap.
+
+Evidence metrics include:
+- Brier score for P(up)
+- Brier skill against the empirical climatology baseline
+- directional accuracy when the model does not abstain
+- signal coverage
+- gross directional return
+- net directional return after the NEXUS conservative round-trip fee/slippage assumption
+- net win rate
+- moving-block bootstrap 95% CI for mean net return
+
+The evidence gate fails closed unless sample size, coverage, probability skill,
+positive net return and a strictly positive bootstrap lower bound all pass.
+
+Example offline invocation:
+
+    python -m bot.market_language_binance_replay \
+      --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
+      --limit-15m 6000 --warmup 240 --horizon 4
+
+A successful research result still does not activate MODEL H. Production
+promotion remains a separate reviewed change.
