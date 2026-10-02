@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from bot.market_language import (
+import bot.market_language as market_language_module\nfrom bot.market_language import (
     forecast_batch,
     forecast_market_language,
     model_market_language,
@@ -111,6 +111,21 @@ class MarketLanguageTests(unittest.TestCase):
         self.assertNotIn("qty", model.details)
         self.assertNotIn("leverage", model.details)
         self.assertNotIn("place_order", model.details)
+
+    def test_module_has_no_exchange_or_external_model_dependency(self):
+        tree = ast.parse(inspect.getsource(market_language_module))
+        imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imports.add(node.module or "")
+        forbidden = {"torch", "transformers", "requests", "bot.exchange", "bot.binance"}
+        self.assertFalse(imports & forbidden)
+        source = inspect.getsource(market_language_module)
+        self.assertNotIn("place_order(", source)
+        self.assertNotIn("TradingEngine", source)
+        self.assertNotIn("ExchangeClient", source)
 
     def test_ensemble_contains_model_h_once(self):
         rows = _series()
