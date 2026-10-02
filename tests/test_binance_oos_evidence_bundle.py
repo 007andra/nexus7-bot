@@ -57,8 +57,11 @@ def _ranking_reports():
         "nexus_regime_compat": 80.0,
         "shadow_microstructure": {
             "available": True,
-            "directional_alignment": 0.5,
-            "taker_pressure": 0.4,
+            "directional_alignment": 0.8,
+            "taker_pressure": 0.7,
+            "execution_effect": "NONE",
+            "score_effect": "NONE",
+            "promotion_authority": False,
         },
     }
     return [
@@ -78,13 +81,16 @@ def _ranking_reports():
             "candidate_diagnostics": [{
                 **base,
                 "candidate_id": "eth-b",
-                "nexus_expected_value_pct": 0.4,
-                "nexus_setup_quality": 70.0,
+                "nexus_expected_value_pct": 1.5,
+                "nexus_setup_quality": 90.0,
                 "depth_notional_1pct": 2_000_000.0,
                 "shadow_microstructure": {
                     "available": True,
-                    "directional_alignment": -0.3,
-                    "taker_pressure": -0.2,
+                    "directional_alignment": -0.8,
+                    "taker_pressure": -0.7,
+                    "execution_effect": "NONE",
+                    "score_effect": "NONE",
+                    "promotion_authority": False,
                 },
                 "r_multiple": -0.5,
             }],
@@ -138,6 +144,15 @@ class BinanceOOSEvidenceBundleTests(unittest.TestCase):
         self.assertEqual(report["cross_sections"], 1)
         self.assertEqual(report["ranked_candidates"], 2)
         self.assertGreater(report["top1_uplift_r"], 0)
+        self.assertGreater(report["incremental_top_pick_uplift_r"], 0)
+        self.assertEqual(
+            report["details"][0]["base_top_candidate_id"],
+            "eth-b",
+        )
+        self.assertEqual(
+            report["details"][0]["enriched_top_candidate_id"],
+            "btc-a",
+        )
         self.assertFalse(report["outcome_used_in_rank"])
         self.assertEqual(report["execution_effect"], "NONE")
         self.assertEqual(report["score_effect"], "NONE")
