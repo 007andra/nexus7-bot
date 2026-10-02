@@ -1,0 +1,49 @@
+name: MODEL H V4 Invariant Transfer Evidence
+
+on:
+  pull_request:
+    branches: [migration/binance-usdm]
+    paths:
+      - "bot/model_h_v4.py"
+      - "tests/test_model_h_v4.py"
+      - ".github/workflows/model_h_v4_evidence.yml"
+      - "docs/model_h_v4.md"
+  workflow_dispatch:
+
+jobs:
+  evidence:
+    name: Invariant cross-sectional fresh-symbol holdout
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: V4 causality and isolation tests
+        run: |
+          python -m unittest tests.test_model_h_v4 -v
+      - name: Run fresh-symbol invariant transfer test
+        run: |
+          python -m bot.model_h_v4 \
+            --limit-15m 1700 --tune-step 24 --holdout-step 12 \
+            --output artifacts/model_h_v4_evidence.json
+      - name: Show V4 evidence
+        if: always()
+        run: |
+          test -f artifacts/model_h_v4_evidence.json && cat artifacts/model_h_v4_evidence.json || true
+      - name: Upload V4 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-h-v4-evidence
+          path: artifacts/model_h_v4_evidence.json
+          if-no-files-found: error
