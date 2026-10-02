@@ -16,7 +16,13 @@ def _rows(n=80):
             side="LONG" if i % 3 else "SHORT",
             regime="TREND" if i % 4 else "RANGE",
             volatility=float(i % 10) / 100.0,
-            net_return=0.01 if i % 3 else -0.005,
+            net_return=0.009 if i % 3 else -0.006,
+            gross_return=0.01 if i % 3 else -0.005,
+            fee_drag=0.0005,
+            slippage_drag=0.0005,
+            funding_pnl=0.0,
+            turnover=1.0,
+            exposure_fraction=0.5,
         ))
     return out
 
@@ -40,6 +46,9 @@ class ResearchProtocolTests(unittest.TestCase):
         self.assertTrue(report["protocol"]["purged"])
         self.assertFalse(report["protocol"]["shuffled"])
         self.assertGreater(report["oos_n"], 0)
+        self.assertGreaterEqual(report["fold_count"], 4)
+        self.assertTrue(report["evidence_complete"])
+        self.assertEqual(report["evidence_blockers"], ())
 
 
 if __name__ == "__main__":
