@@ -289,6 +289,13 @@ async def resume(request: Request):
     if getattr(app.state, 'blocked', True) or not getattr(app.state, 'ready', False):
         raise HTTPException(status_code=503, detail='Startup safety checks are not ready')
     engine=app.state.engine
+    # F-001A: a stale close/reduce-only stop on a flat symbol would act on the
+    # next position. Keep entries paused until a close-all verifies none remain.
+    stale=sorted(getattr(engine,"_stale_protection_pending",set()) or set())
+    if stale:
+        raise HTTPException(status_code=409, detail={
+            "reason":"stale_protection_cleanup_pending","symbols":stale,
+            "action":"re-run /api/close-all until remaining_stale_protections is empty"})
     task=getattr(app.state,"engine_task",None)
     if task and not task.done():
         if not getattr(engine, '_running', False):

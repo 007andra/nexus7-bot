@@ -19,6 +19,8 @@ INV-EMERGENCY-001: a failed flatten never leaves open positions unmanaged.
 INV-EMERGENCY-002: flatten(flatten(state)) == flatten(state) for exposure —
 reduce-only orders, deterministic clientOid per minute, a per-engine lock and
 exchange re-reads before every order.
+F-001A: after verified flatness, close/reduce-only stop orders left on flat
+symbols are cancelled and re-verified (step 4b); leftovers keep resume blocked.
 """
 from __future__ import annotations
 
@@ -41,6 +43,11 @@ def _summary(status, reason, results, remaining):
         "results": results,
         "entries_paused": True,
         "position_management": "RUNNING",
+        "stale_protections_found": 0,
+        "stale_protections_cancelled": 0,
+        "stale_protections_failed": 0,
+        "remaining_stale_protections": [],
+        "stale_protection_scan_skipped": [],
     }
 
 
@@ -110,7 +117,9 @@ async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
 
     if not rows:
         log.critical("[EMERGENCY_FLATTEN_VERIFY] status=ALREADY_FLAT remaining=0")
-        return _summary("ALREADY_FLAT", "no_open_positions", [], [])
+        summary = _summary("ALREADY_FLAT", "no_open_positions", [], [])
+        await _retire_stale_protections(engine, summary, set())
+        return summary
 
     counts = {}
     for row in rows:
@@ -222,8 +231,94 @@ async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
         else:
             status = "FAILED"
     log.critical("[EMERGENCY_FLATTEN_VERIFY] status=%s remaining=%s", status, left or 0)
-    if status not in _TERMINAL_OK:
+    summary = _summary(status, "verified" if remaining is not None else "verify_unavailable",
+                       results, left)
+    if remaining is not None:
+        await _retire_stale_protections(engine, summary, set(remaining))
+    if summary["status"] not in _TERMINAL_OK:
         log.critical("[EMERGENCY_FLATTEN_INCOMPLETE] status=%s remaining=%s "
-                     "entries_paused=true position_management=RUNNING", status, left)
-    return _summary(status, "verified" if remaining is not None else "verify_unavailable",
-                    results, left)
+                     "remaining_stale_protections=%s entries_paused=true "
+                     "position_management=RUNNING", summary["status"], left,
+                     summary.get("remaining_stale_protections"))
+    return summary
+
+
+def _closer(order) -> bool:
+    return isinstance(order, dict) and (
+        order.get("closeOrder") is True or order.get("reduceOnly") is True
+    )
+
+
+async def _retire_stale_protections(engine, summary, open_symbols):
+    """Cancel close/reduce-only stops left on symbols VERIFIED flat (F-001A).
+
+    INV-FLAT-STATE-001 / INV-PROTECTION-OWNERSHIP-001: a closeOrder stop on a
+    flat symbol protects nothing and would act on the next position of that
+    symbol. Runs only after exchange flatness is verified, never while the
+    symbol has a position or a non-terminal intent; open positions keep their
+    protection. Cancels go through the owner-validated lifecycle path.
+    """
+    from bot.conditional_stop_lifecycle import _active, _cancel_order
+    from bot.conditional_stop_protection import read_stop_orders
+
+    symbols = set(getattr(engine, "instruments", None) or {})
+    symbols.update(r["symbol"] for r in summary["results"])
+    registry = getattr(engine, "orders", None)
+    pending = {getattr(o, "symbol", "") for o in (registry.pending_orders() if registry else [])}
+    found = cancelled = failed = 0
+    stale_left, skipped = [], []
+    for sym in sorted(symbols):
+        if sym in open_symbols:
+            continue            # still open: its protection must stay
+        if sym in pending:
+            skipped.append(sym)
+            continue
+        before = await read_stop_orders(engine.client, sym)
+        if before is None:
+            stale_left.append(f"{sym}:UNREADABLE")
+            continue
+        stale = [o for o in before if _active(o) and _closer(o)]
+        found += len(stale)
+        for order in stale:
+            oid = str(order.get("id") or order.get("orderId") or "")
+            ok = await _cancel_order(engine.client, oid)
+            log.critical(
+                "[EMERGENCY_PROTECTION_CANCEL] symbol=%s orderId=%s clientOid=%s side=%s "
+                "stop=%s stopPrice=%s closeOrder=%s result=%s",
+                sym, oid or "NONE", order.get("clientOid") or "NONE", order.get("side"),
+                order.get("stop"), order.get("stopPrice"), order.get("closeOrder") is True,
+                "REQUESTED" if ok else "UNCONFIRMED",
+            )
+        if not stale:
+            continue
+        after = await read_stop_orders(engine.client, sym)
+        if after is None:
+            stale_left.append(f"{sym}:UNREADABLE")
+            failed += len(stale)
+            continue
+        left = {str(o.get("id") or o.get("orderId") or "") for o in after if _active(o) and _closer(o)}
+        for order in stale:
+            oid = str(order.get("id") or order.get("orderId") or "")
+            if oid in left:
+                failed += 1
+                stale_left.append(f"{sym}:{oid}")
+            else:
+                cancelled += 1
+        log.critical("[EMERGENCY_PROTECTION_VERIFY] symbol=%s stale_before=%s stale_after=%s",
+                     sym, len(stale), len(left))
+    summary.update({
+        "stale_protections_found": found,
+        "stale_protections_cancelled": cancelled,
+        "stale_protections_failed": failed,
+        "remaining_stale_protections": stale_left,
+        "stale_protection_scan_skipped": skipped,
+    })
+    pending_cleanup = {s.split(":", 1)[0] for s in stale_left} | set(skipped)
+    engine._stale_protection_pending = pending_cleanup
+    log.critical("[EMERGENCY_PROTECTION_SCAN] found=%s cancelled=%s failed=%s remaining=%s "
+                 "skipped=%s", found, cancelled, failed, stale_left, skipped)
+    if pending_cleanup:
+        log.critical("[EMERGENCY_PROTECTION_STALE] symbols=%s entries_paused=true "
+                     "resume_blocked=true", sorted(pending_cleanup))
+        if summary["status"] in _TERMINAL_OK:
+            summary["status"] = "FLAT_BUT_PROTECTION_CLEANUP_FAILED"
