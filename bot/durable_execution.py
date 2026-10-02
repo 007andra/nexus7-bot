@@ -191,6 +191,18 @@ def _restore_position(record: dict):
 
 
 async def persist_orders(engine, reason: str, *, strict: bool = False) -> bool:
+    # F-010B INV-DURABLE-RESTORE-001: while the durable snapshot could not be
+    # restored, the in-memory registry is empty/partial and has no authority to
+    # replace it. Refuse (caller sees False); keep orders_restore active.
+    if ORDERS_RESTORE in (getattr(engine, "_durable_state_errors", None) or ()):
+        log.critical(
+            "[DURABLE_ORDER_PERSIST_BLOCKED] reason=restore_unconfirmed source=%s "
+            "restore_state=%s active_reasons=%s registry_orders=%s snapshot_version=1 "
+            "durable_write=NONE",
+            str(reason)[:80], getattr(engine, "_durable_order_restore_state", "UNKNOWN"),
+            ",".join(active_reasons(engine)), len(getattr(engine.orders, "_orders", ()) or ()),
+        )
+        return False
     try:
         async with engine._durable_order_lock:
             engine.orders.gc(max_age=7 * 86400)
@@ -302,8 +314,14 @@ async def restore_engine_state(engine) -> bool:
     else:
         _clear(engine, "database")
 
+    # F-010B restore state model. READ FAILURE != EMPTY STATE:
+    #   VALID / VALID_EMPTY (no snapshot stored) -> registry authoritative;
+    #   RESTORE_FAILED (storage read error) / MALFORMED (parse/schema/record)
+    #   -> orders_restore stays active and the snapshot must not be overwritten.
+    engine._durable_order_restore_state = "RESTORE_FAILED"
     try:
         raw_orders = await db.load_key_value(_ORDER_KEY, strict=True)
+        engine._durable_order_restore_state = "MALFORMED"
         if raw_orders:
             state = json.loads(raw_orders)
             if not isinstance(state, dict) or state.get("version") != 1:
@@ -313,10 +331,15 @@ async def restore_engine_state(engine) -> bool:
                 "[DURABLE_ORDER] restored orders=%s pending=%s",
                 len(engine.orders), len(engine.orders.pending_orders()),
             )
+        engine._durable_order_restore_state = "VALID" if raw_orders else "VALID_EMPTY"
         _clear(engine, ORDERS_RESTORE, source="restore_engine_state")
     except Exception as exc:
         _block(engine, ORDERS_RESTORE, source="restore_engine_state")
-        log.critical("[DURABLE_ORDER] restore failed; new entries blocked: %s", exc)
+        log.critical(
+            "[DURABLE_ORDER] restore failed state=%s; new entries blocked; durable "
+            "snapshot preserved (writes refused): %s",
+            engine._durable_order_restore_state, exc,
+        )
 
     if not getattr(engine, "paper_trade", False):
         return can_open(engine)
