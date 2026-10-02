@@ -1,7 +1,7 @@
 """
 NEXUS-7 — Ensemble de modelos independentes (seção 17)
 
-Sete modelos analisam o mesmo mercado por óticas diferentes:
+Oito modelos analisam o mesmo mercado por óticas diferentes:
 
     MODEL A — Trend            (EMAs, ADX, VWAP)
     MODEL B — Momentum         (RSI, MACD, ROC)
@@ -10,6 +10,7 @@ Sete modelos analisam o mesmo mercado por óticas diferentes:
     MODEL E — Market Structure  (HH/HL, BOS, CHoCH)
     MODEL F — Derivatives       (funding, OI, long/short)
     MODEL G — Risk/Regime       (volatilidade, choppiness)
+    MODEL H — Market Language    (tokens hierárquicos + forecast probabilístico)
 
 Cada um retorna ModelOutput independente. Nenhum enxerga o resultado
 do outro — isso é essencial: modelos correlacionados dariam falsa
@@ -26,6 +27,7 @@ from bot.indicators import (
     ema, rsi, macd, atr, adx, bollinger, choppiness, vwap, smc_analysis
 )
 from bot.logger import log
+from bot.market_language_model import model_market_language
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -485,7 +487,7 @@ def model_risk_regime(closes: List[float], highs: List[float],
 
 def run_ensemble(closes, highs, lows, volumes,
                  funding=None, oi_delta=None, ls_ratio=None) -> List[ModelOutput]:
-    """Executa os 7 modelos. Cada um é independente e isolado por try/except."""
+    """Executa os 8 modelos independentes do NEXUS ensemble."""
     return [
         model_trend(closes, highs, lows, volumes),
         model_momentum(closes),
@@ -494,4 +496,5 @@ def run_ensemble(closes, highs, lows, volumes,
         model_structure(closes, highs, lows),
         model_derivatives(funding, oi_delta, ls_ratio),
         model_risk_regime(closes, highs, lows),
+        model_market_language(closes, highs, lows, volumes),
     ]
