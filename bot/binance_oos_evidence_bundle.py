@@ -446,6 +446,7 @@ async def run(
             "closed_candles_only": True,
             "historical_clock_frozen": True,
             "metrics_label_shift_normalized": True,
+            "oi_delta_semantics": "PREVIOUS_NEXUS_CANDIDATE",
             "same_bar_ambiguity": "STOP_FIRST",
             "fees_included": True,
             "slippage_included": True,
