@@ -3,10 +3,13 @@ import unittest
 import zipfile
 
 from bot.binance_research_data import (
+    archive_sha256,
     monthly_funding_url,
     monthly_kline_url,
+    parse_checksum_text,
     parse_funding_archive,
     parse_kline_archive,
+    verify_archive_checksum,
 )
 
 
@@ -46,6 +49,26 @@ class BinanceResearchDataTests(unittest.TestCase):
         )
         rows = parse_funding_archive(payload)
         self.assertEqual(rows[1].funding_rate, -0.0002)
+
+    def test_checksum_sidecar_is_filename_bound(self):
+        payload = b"archive-bytes"
+        digest = archive_sha256(payload)
+        text = f"{digest}  BTCUSDT-15m-2026-01.zip\n"
+        self.assertEqual(
+            parse_checksum_text(
+                text, expected_filename="BTCUSDT-15m-2026-01.zip"
+            ),
+            digest,
+        )
+        self.assertEqual(
+            verify_archive_checksum(
+                payload, text,
+                expected_filename="BTCUSDT-15m-2026-01.zip",
+            ),
+            digest,
+        )
+        with self.assertRaises(ValueError):
+            parse_checksum_text(text, expected_filename="ETHUSDT.zip")
 
     def test_invalid_symbol_is_rejected(self):
         with self.assertRaises(ValueError):
