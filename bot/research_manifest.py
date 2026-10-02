@@ -71,6 +71,22 @@ class ResearchManifest:
             "instrument_snapshot_hashes": sorted(self.instrument_snapshot_hashes),
         }
 
+    def reproducibility_dict(self) -> dict:
+        """Content-addressed research identity excluding wall-clock metadata."""
+        canonical = self.canonical_dict()
+        canonical.pop("created_at_ms", None)
+        return canonical
+
+    @property
+    def dataset_fingerprint(self) -> str:
+        raw = json.dumps(
+            self.reproducibility_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
     @property
     def fingerprint(self) -> str:
         raw = json.dumps(
