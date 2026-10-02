@@ -23,6 +23,7 @@ def _row(candidate_id, ts, *, micro, depth, r, ev=1.0, setup=80.0):
             "available": True,
             "directional_alignment": micro,
             "taker_pressure": micro,
+            "taker_pressure_source": "AGG_TRADES",
             "execution_effect": "NONE",
             "score_effect": "NONE",
             "promotion_authority": False,
@@ -126,6 +127,25 @@ class MicrostructureOOSEvidenceTests(unittest.TestCase):
         self.assertFalse(gate["promotion_authority"])
         self.assertEqual(gate["score_effect"], "NONE")
         self.assertEqual(gate["execution_effect"], "NONE")
+
+    def test_metrics_proxy_cannot_pass_real_agg_trades_gate(self):
+        reports = _reports(80)
+        for report in reports:
+            for row in report["candidate_diagnostics"]:
+                row["shadow_microstructure"][
+                    "taker_pressure_source"
+                ] = "METRICS_RATIO"
+        evidence = evaluate_microstructure_ranking(
+            reports, bootstrap_samples=300, seed=11,
+            temporal_folds=4,
+        )
+        self.assertEqual(evidence["agg_trades_coverage"], 0.0)
+        gate = microstructure_review_gate(evidence)
+        self.assertFalse(gate["ready_for_operator_review"])
+        self.assertIn(
+            "INSUFFICIENT_AGG_TRADES_COVERAGE",
+            gate["blockers"],
+        )
 
     def test_unavailable_microstructure_is_excluded_not_imputed(self):
         reports = _reports()
