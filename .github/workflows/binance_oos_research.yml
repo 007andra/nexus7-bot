@@ -130,6 +130,7 @@ jobs:
           primary = payload.get("primary") or {}
           robustness = payload.get("robustness") or {}
           calibration = payload.get("calibration") or {}
+          sensitivity = payload.get("sensitivity") or {}
           print(json.dumps({
               "primary_status": primary.get("status"),
               "primary_blockers": primary.get("blockers"),
@@ -144,6 +145,12 @@ jobs:
               ),
               "calibration_fold_count": calibration.get("fold_count"),
               "calibration_complete": calibration.get("evidence_complete"),
+              "parameter_sensitivity_status": (
+                  sensitivity.get("parameter") or {}
+              ).get("status"),
+              "execution_cost_sensitivity_points": len(
+                  (sensitivity.get("execution_cost") or {}).get("points") or []
+              ),
               "manifest_hash": manifest_hash,
           }, indent=2, sort_keys=True))
           PY
