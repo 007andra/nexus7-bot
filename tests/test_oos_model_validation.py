@@ -38,10 +38,11 @@ class OOSModelValidationTests(unittest.TestCase):
     def test_label_aware_split_excludes_train_labels_crossing_test_start(self):
         rows = []
         for i in range(40):
-            # Row 9 is decided before the first test but its outcome becomes
-            # known inside that test window, so it must not enter training.
+            # Row 8 is decided before the first possible test but its outcome
+            # is not known there, so the splitter must advance and exclude it
+            # until a clean train window exists.
             label_end = float(i)
-            if i == 9:
+            if i == 8:
                 label_end = 12.0
             rows.append(ValidationRow(
                 float(i),
@@ -59,7 +60,7 @@ class OOSModelValidationTests(unittest.TestCase):
         self.assertTrue(folds)
         first = folds[0]
         self.assertEqual(first.test[0].timestamp, 10.0)
-        self.assertNotIn(9.0, [row.timestamp for row in first.train])
+        self.assertNotIn(8.0, [row.timestamp for row in first.train])
         self.assertTrue(all(
             (row.label_end_timestamp or row.timestamp)
             < first.test[0].timestamp
