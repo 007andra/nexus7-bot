@@ -11,6 +11,11 @@ Prova contra o runtime real: `python -m tests.run_offline tests.test_f003_sizing
 > Multiplicadores vêm das fixtures/comentários do próprio repositório; não houve consulta à web.
 > Valores de ambiente são os **defaults do código**. Os valores reais no Railway não estão no repositório (ver decisões).
 
+> **Status (implementação F-003):** política aplicada — risco por trade = `MAX_RISK_PCT` (1% da equity),
+> risco aberto agregado = `MAX_OPEN_RISK_PCT` (2%), `MAX_MARGIN_PCT` apenas como teto, sem compressão de stop,
+> barreira pré-dispatch no transporte (`bot/risk_budget.py`). As seções abaixo descrevem o comportamento
+> **anterior** (pré-F003), mantido como referência em `current_policy` do script. **Deploy LIVE bloqueado até F-013.**
+
 ---
 
 ## 1. ACTIVE SIZING CALL GRAPH (composição real, resolvida dinamicamente)

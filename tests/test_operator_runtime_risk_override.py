@@ -71,8 +71,9 @@ class OperatorRuntimeRiskOverrideTests(unittest.TestCase):
         self.assertTrue(engine.active)
         self.assertTrue(engine._dd_alerted)
 
-    def test_operator_margin_fraction_remains_50_percent(self):
-        self.assertAlmostEqual(policy.MARGIN_FRACTION, 0.50)
+    def test_operator_policy_owns_no_margin_target(self):
+        # F-003: the 50%-of-available margin target no longer exists.
+        self.assertFalse(hasattr(policy, "MARGIN_FRACTION"))
 
 
 if __name__ == "__main__":

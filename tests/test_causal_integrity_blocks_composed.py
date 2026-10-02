@@ -28,6 +28,7 @@ from types import SimpleNamespace  # noqa: E402
 from unittest.mock import AsyncMock, Mock, patch  # noqa: E402
 
 import sitecustomize  # noqa: E402,F401
+from tests.risk_authorization_fixture import risk_authorized  # noqa: E402
 from bot import durable_execution as durable  # noqa: E402
 from bot import durable_live_reconciliation as reconciler  # noqa: E402
 from bot import kucoin  # noqa: E402
@@ -122,8 +123,9 @@ class ComposedCausalBlockTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(durable.active_reasons(engine), ())
 
         self._intent(client, "f010-ready")
-        out = await client.place_order("BTCUSDT", "Buy", 0.002, sl=99000, tp=104000,
-                                       idem_key="f010-ready", single_submission=True)
+        with risk_authorized("BTCUSDT", "buy", 2, 100000.0, 99000.0, 0.001):   # F-003 authorization
+            out = await client.place_order("BTCUSDT", "Buy", 0.002, sl=99000, tp=104000,
+                                           idem_key="f010-ready", single_submission=True)
         self.assertEqual(out.get("orderId"), "kc-fake-1")
         self.assertEqual(len(client._session.posts("/api/v1/st-orders")), 1)
 

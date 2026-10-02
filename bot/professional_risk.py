@@ -52,6 +52,7 @@ class StopRiskSizingResult:
     stop_distance_pct: float
     required_margin: float
     binding_constraint: str
+    rejection_reason: str = ""
 
 
 def _floor_step(value: float, step: float) -> float:
@@ -123,7 +124,24 @@ def stop_risk_size(
     binding = "RISK_BUDGET" if qty_by_risk <= qty_by_margin else "AVAILABLE_COLLATERAL"
     qty = _floor_step(raw_qty, qty_step)
 
+    # INV-RISK-ROUNDING-001 / INV-RISK-MARGIN-001: re-check the quantized size
+    # exactly and step DOWN (never round to nearest/up) while it exceeds either
+    # the risk budget or the collateral ceiling.
+    d_step = Decimal(str(qty_step))
+    d_loss_unit = Decimal(str(effective_loss_per_unit))
+    d_budget = Decimal(str(risk_budget))
+    d_margin_cap = Decimal(str(collateral_cap))
+    d_entry, d_lev = Decimal(str(entry)), Decimal(str(leverage))
+    d_qty = Decimal(str(qty))
+    while d_qty > 0 and (d_qty * d_loss_unit > d_budget
+                         or d_qty * d_entry / d_lev > d_margin_cap):
+        d_qty -= d_step
+    qty = float(max(d_qty, Decimal(0)))
+
     if qty < min_qty:
+        one_lot_loss = min_qty * effective_loss_per_unit
+        reason = ("MIN_CONTRACT_EXCEEDS_RISK_BUDGET" if one_lot_loss > risk_budget
+                  else "MIN_CONTRACT_EXCEEDS_MARGIN_CAP")
         return StopRiskSizingResult(
             qty=0.0,
             notional=0.0,
@@ -132,16 +150,12 @@ def stop_risk_size(
             stop_distance_pct=stop_distance_pct,
             required_margin=0.0,
             binding_constraint="MINIMUM_ORDER",
+            rejection_reason=reason,
         )
 
     notional = qty * entry
     required_margin = notional / leverage
-    projected_stop_loss = qty * effective_loss_per_unit
-
-    if projected_stop_loss > risk_budget * 1.000001:
-        raise AssertionError("rounded quantity exceeds risk budget")
-    if required_margin > collateral_cap * 1.000001:
-        raise AssertionError("rounded quantity exceeds collateral cap")
+    projected_stop_loss = float(d_qty * d_loss_unit)
 
     return StopRiskSizingResult(
         qty=qty,

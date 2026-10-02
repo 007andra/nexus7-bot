@@ -186,7 +186,7 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
         "[RUNTIME_CONTRACT] status=PASS protected_callables=%d required_markers=%d "
         "execution_chain=idempotency>distributed_fence>dispatch>fill>tpsl>reconcile "
         "late_wrapper_drift=false leverage_unchanged=true "
-        "sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap "
+        "sizing_authority=RISK_BUDGET_V3 margin_role=CEILING "
         "drawdown_policy_unchanged=true entry_authorization_unchanged=true",
         len(items), len(markers),
     )

@@ -1,10 +1,11 @@
-"""F-003 diagnostic — characterizes CURRENT LIVE-pilot sizing (no behavior change).
+"""F-003 regression — the composed LIVE-pilot sizing is the stop-loss risk budget.
 
-Drives the FINAL composed ``bot.engine.minimum_base_quantity`` (outermost
-wrapper: final_sizing_invariants) with the real ProfessionalRiskAdapter /
-RiskManagerV3 gate and final_loss_budget, and asserts that the offline mirror
-in research/risk_policy/f003_sizing_audit.py reproduces it exactly. Also checks
-the PROPOSED risk-based arithmetic properties. Offline; no exchange access.
+Drives the FINAL composed ``bot.engine.minimum_base_quantity`` (final_sizing_
+invariants) with the real ProfessionalRiskAdapter / RiskManagerV3 and asserts it
+reproduces ``production_policy`` from research/risk_policy/f003_sizing_audit.py.
+The pre-F003 characterization (``current_policy``: 50% margin x leverage, up to
+25% of equity per trade) is kept as the inverted reference: every case it
+accepted above the budget must now be impossible. Offline; no exchange access.
 """
 import importlib.util
 import os
@@ -71,44 +72,59 @@ def final_contracts(symbol, equity, available, stop_frac):
     return round(qty / info["multiplier"])
 
 
-class CurrentPolicyCharacterizationTests(unittest.TestCase):
+class RiskBudgetRegressionTests(unittest.TestCase):
     def test_config_defaults_match_mirror(self):
-        self.assertEqual((cfg.LEVERAGE, cfg.MAX_RISK_PCT, cfg.MAX_MARGIN_PCT, cfg.MAX_POSITIONS),
-                         (audit.LEVERAGE, audit.MAX_RISK_PCT, audit.MAX_MARGIN_PCT, audit.MAX_POSITIONS))
+        self.assertEqual((cfg.LEVERAGE, cfg.MAX_RISK_PCT, cfg.MAX_MARGIN_PCT, cfg.MAX_POSITIONS,
+                          cfg.MAX_OPEN_RISK_PCT),
+                         (audit.LEVERAGE, audit.MAX_RISK_PCT, audit.MAX_MARGIN_PCT,
+                          audit.MAX_POSITIONS, 0.02))
         self.assertEqual(engine_module.minimum_base_quantity.__module__, "bot.final_sizing_invariants")
 
-    def test_final_callable_matches_mirror(self):
+    def test_final_callable_matches_production_mirror(self):
         checked = 0
         for symbol in audit.SYMBOLS:
             price = audit.SYMBOLS[symbol][3]
-            for equity in (10, 25, 50, 100, 500):
-                for stop in (0.0025, 0.005, 0.01, 0.02, 0.03, 0.045, 0.05):
-                    mirror = audit.current_policy(symbol, price, stop, equity, equity)
-                    if mirror["blocker"] in ("core_affordability",):
-                        continue
-                    expected = mirror["contracts"] if mirror["result"] == "ACCEPT" else 0
+            for equity in (5, 10, 25, 50, 100, 500, 1000):
+                for stop in (0.0025, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.05):
+                    mirror = audit.production_policy(symbol, price, stop, equity, equity)
                     if mirror["blocker"].startswith("liquidation"):
-                        continue   # enforced earlier in _nexus_validate, not by this callable
+                        continue   # enforced earlier (cross geometry), not by this callable
+                    expected = mirror["contracts"] if mirror["result"] == "ACCEPT" else 0
                     got = final_contracts(symbol, equity, equity, stop)
                     self.assertEqual(got, expected, (symbol, equity, stop, mirror))
+                    if got:
+                        loss = got * audit.SYMBOLS[symbol][0] * price * (
+                            stop + audit.exec_cost_fraction(symbol))
+                        self.assertLessEqual(loss, equity * 0.01 * (1 + 1e-9))
                     checked += 1
-        self.assertGreater(checked, 150)
+        self.assertGreater(checked, 300)
 
-    def test_current_size_ignores_stop_distance_and_max_risk_pct(self):
-        # 100 USDT, SOL: same 33 contracts at 0.25% and 3% stops -> loss scales with stop.
-        self.assertEqual(final_contracts("SOLUSDT", 100, 100, 0.0025), 33)
-        self.assertEqual(final_contracts("SOLUSDT", 100, 100, 0.03), 33)
-        loss = audit.current_policy("SOLUSDT", 150.0, 0.03, 100, 100)["loss"]
-        self.assertGreater(loss, 15.0, "≈16% of equity at a 3% stop vs MAX_RISK_PCT=1%")
+    def test_inverted_pre_f003_cases_are_now_impossible(self):
+        # Old: SOL 33 contracts at a 4% stop (~20.9% of equity). Now: within 1 USDT.
+        old = audit.current_policy("SOLUSDT", 150.0, 0.04, 100, 100)
+        self.assertEqual((old["result"], old["contracts"]), ("ACCEPT", 33))
+        new = final_contracts("SOLUSDT", 100, 100, 0.04)
+        self.assertLess(new, 33)
+        self.assertLessEqual(new * 0.1 * 150.0 * (0.04 + 0.0022), 1.0)
+        # Old: AVAX at the loss-budget edge lost ~25% of equity. Now: <= 1%.
+        edge = 0.5 / audit.LEVERAGE - audit.exec_cost_fraction("AVAXUSDT") - 1e-6
+        self.assertAlmostEqual(audit.current_policy("AVAXUSDT", 30.0, edge, 100, 100)["loss"],
+                               24.99, delta=0.1)
+        contracts = final_contracts("AVAXUSDT", 100, 100, edge)
+        self.assertLessEqual(contracts * 0.1 * 30.0 * (edge + 0.0032), 1.0)
 
-    def test_worst_admissible_loss_is_quarter_of_available(self):
-        # Fine-grained contract (AVAX): stop at the loss-budget edge.
-        cost = audit.exec_cost_fraction("AVAXUSDT")
-        edge = 0.5 / audit.LEVERAGE - cost - 1e-6
-        res = audit.current_policy("AVAXUSDT", 30.0, edge, 100, 100)
-        self.assertEqual(res["result"], "ACCEPT")
-        self.assertAlmostEqual(res["loss"], 24.99, delta=0.1)
-        self.assertEqual(final_contracts("AVAXUSDT", 100, 100, edge), res["contracts"])
+    def test_size_follows_stop_not_available_margin(self):
+        tight = final_contracts("SOLUSDT", 1000, 1000, 0.005)
+        wide = final_contracts("SOLUSDT", 1000, 1000, 0.02)
+        self.assertGreater(tight, wide, "wider stop -> fewer contracts")
+        # Available collateral is only a ceiling: more of it never adds size.
+        self.assertEqual(final_contracts("SOLUSDT", 1000, 1000, 0.02),
+                         final_contracts("SOLUSDT", 1000, 5000, 0.02))
+
+    def test_btc_one_contract_above_budget_is_no_trade(self):
+        self.assertEqual(final_contracts("BTCUSDT", 50, 50, 0.01), 0)
+        self.assertEqual(audit.production_policy("BTCUSDT", 60000.0, 0.01, 50, 50)["blocker"],
+                         "one_contract_exceeds_budget")
 
 
 class ProposedRiskBasedPropertiesTests(unittest.TestCase):

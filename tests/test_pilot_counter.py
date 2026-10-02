@@ -156,7 +156,10 @@ class PilotCounterTests(PilotFixture):
         ready = ValidExecutionTestContext(self.client, self.engine.instruments).engine
         ready._execution_ownership_valid = True
         try:
-            with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()):
+            # Isolates lost-response handling with a synthetic body; the F-003
+            # transport barrier is covered by tests/test_risk_budget_sizing.py.
+            with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()), \
+                    patch("bot.risk_budget.assert_transport_dispatch"):
                 result = await self.client._post(
                     '/api/v1/orders', {'clientOid': 'offline'}, single_attempt=True
                 )

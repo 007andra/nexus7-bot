@@ -62,7 +62,8 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
         conn=ValidExecutionTestContext(dummy).conn
         with patch.object(eo.db,"_conn",conn), patch.object(eo.db,"_is_pg",True), \
              patch.object(eo.db,"configured_postgres_unavailable",return_value=False), \
-             patch.dict("os.environ",{"EXECUTION_CAPABILITY":"LIVE"},clear=False):
+             patch.dict("os.environ",{"EXECUTION_CAPABILITY":"LIVE"},clear=False), \
+             patch("bot.risk_budget.assert_transport_dispatch"):  # isolates the ownership fence; F-003 barrier has its own tests
             old=await eo.acquire_execution_ownership("OLD")
             state=json.loads(conn.value); state["expires_at"]="2000-01-01T00:00:00+00:00"; conn.value=json.dumps(state)
             new=await eo.acquire_execution_ownership("NEW")
@@ -189,7 +190,8 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self,*a): return False
         c._session=SimpleNamespace(post=lambda *a,**k:CM())
         c.get_order_by_client_oid=AsyncMock(return_value={"orderId":"existing","clientOid":"bgx7-B"})
-        with patch.object(kucoin,"PAPER_TRADE",False),patch("bot.execution_ownership.validate_execution_ownership",AsyncMock()):
+        with patch.object(kucoin,"PAPER_TRADE",False),patch("bot.execution_ownership.validate_execution_ownership",AsyncMock()), \
+                patch("bot.risk_budget.assert_transport_dispatch"):  # isolates ack recovery; F-003 barrier has its own tests
             out=await c._post("/api/v1/orders",{"clientOid":"bgx7-B","reduceOnly":False},single_attempt=True)
         self.assertEqual(out["orderId"],"existing"); self.assertEqual(len(created),1)
 

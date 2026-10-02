@@ -1,14 +1,15 @@
 """F-003 quantitative sizing audit — offline, deterministic, no exchange access.
 
-Reconstructs the CURRENT LIVE-pilot sizing arithmetic exactly as composed in
-production (see docs/F003_RISK_POLICY_AUDIT_2026-10-02.md for the call graph)
-and evaluates candidate risk-based policies. Nothing here is imported by the
+``current_policy`` mirrors the PRE-F003 LIVE-pilot sizing (50% of available as
+margin x leverage) audited in docs/F003_RISK_POLICY_AUDIT_2026-10-02.md;
+``production_policy`` mirrors the implemented F-003 risk-budget sizing
+(equity x MAX_RISK_PCT, MAX_MARGIN_PCT ceiling, no stop compression). Nothing here is imported by the
 bot; it never places orders.
 
     python research/risk_policy/f003_sizing_audit.py [--section NAME] [--paths N]
 
-Every function mirrors a named production function; tests/test_f003_sizing_
-characterization.py asserts the mirror against the real composed callable.
+tests/test_f003_sizing_characterization.py asserts ``production_policy``
+against the real composed sizing callable.
 """
 from __future__ import annotations
 
@@ -166,6 +167,15 @@ def risk_based_policy(symbol, price, stop_frac, equity, available, risk_pct,
     out.update(contracts=contracts, qty=qty, notional=qty * price,
                margin=qty * price / leverage, loss=loss, loss_pct_equity=loss / equity,
                result="ACCEPT", blocker="-")
+    return out
+
+
+def production_policy(symbol, price, stop_frac, equity, available, leverage=LEVERAGE,
+                      risk_pct=MAX_RISK_PCT):
+    """Implemented F-003 policy: risk budget sizing, MAX_MARGIN_PCT ceiling."""
+    out = risk_based_policy(symbol, price, stop_frac, equity, available, risk_pct,
+                            leverage, margin_cap_frac=MAX_MARGIN_PCT)
+    out["policy"] = "F003"
     return out
 
 

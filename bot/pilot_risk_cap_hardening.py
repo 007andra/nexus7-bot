@@ -1,18 +1,18 @@
-"""Risk-authoritative sizing and final execution-quality guard for LIVE pilot.
+"""LIVE-pilot sizing context and final execution-quality guard.
 
-The operator target remains 50% of authenticated available USDT as POSITION
-NOTIONAL, as implemented by ``pilot_live_runtime``. This guard makes that target
-a cap/target rather than an override of stop-risk sizing:
+Sizing authority is ``final_sizing_invariants`` (F-003 stop-loss risk budget,
+RiskManagerV3). This module:
 
-    final_qty = min(stop_risk_qty, pilot_target_qty)
+* carries the candidate context (engine/symbol/signal/final qty) and the F-003
+  risk authorization for the duration of one ``_open`` call;
+* stamps the opened position with the risk budget it reserved
+  (INV-OPEN-RISK-001);
+* re-runs the LIVE spread/depth/signal-drift guard and the F-003 loss-budget
+  invariant at the fresh executable price immediately before dispatch.
 
-The exact final quantity is then carried to the engine's existing
-``_refresh_entry_balance`` call. The engine invokes that refresh both before
-sizing and again immediately before order-registry, durable-intent,
-pilot-reservation and exchange dispatch. The LIVE spread/depth/signal-drift
-guard therefore runs only after the final quantity has actually been computed;
-the earlier balance refresh is balance-only. Any invalid final quantity or bad
-execution-quality data still fails closed before ``place_order`` can be reached.
+The legacy ``minimum_base_quantity`` hook below is shadowed by the final
+authority in the LIVE pilot; it returns ``min(previous, risk_qty)`` and can
+therefore never exceed the risk-budget quantity.
 
 This module does not authorize LIVE mode, change leverage, modify Railway
 variables, weaken PilotGuard, or submit orders by itself. Reduce-only exits and
@@ -41,7 +41,7 @@ def _select_final_quantity(*, target_qty: float, risk_qty: float) -> float:
 
 
 def install(TradingEngine, log) -> None:
-    """Install after ``pilot_live_runtime`` so its 50% target remains intact."""
+    """Install the LIVE-pilot sizing context and final pre-dispatch guards."""
     if getattr(TradingEngine, "_pilot_risk_cap_hardening_installed", False):
         return
 
@@ -62,9 +62,20 @@ def install(TradingEngine, log) -> None:
         token_symbol = _PILOT_SYMBOL.set(getattr(sig, "symbol", None))
         token_signal = _PILOT_SIGNAL.set(sig)
         token_qty = _PILOT_FINAL_QTY.set(None)
+        from bot import risk_budget
+        token_auth = risk_budget.authorize(None)
         try:
-            return await original_open(self, sig, *args, **kwargs)
+            result = await original_open(self, sig, *args, **kwargs)
+            auth = risk_budget.current_authorization()
+            position = (getattr(self, "positions", {}) or {}).get(getattr(sig, "symbol", None))
+            if auth is not None and position is not None and \
+                    getattr(position, "_risk_reserved_usdt", None) is None:
+                # INV-OPEN-RISK-001: reserve the INITIAL budget for the trade's life.
+                position._risk_reserved_usdt = float(auth.risk_budget)
+                position._risk_initial_projected_usdt = float(auth.projected_loss)
+            return result
         finally:
+            risk_budget.reset_authorization(token_auth)
             _PILOT_FINAL_QTY.reset(token_qty)
             _PILOT_SIGNAL.reset(token_signal)
             _PILOT_SYMBOL.reset(token_symbol)
@@ -76,9 +87,8 @@ def install(TradingEngine, log) -> None:
         if engine is None or not symbol:
             return original_minimum(info, price)
 
-        # ``original_minimum`` is the pilot-aware hook installed immediately
-        # before this guard. In the controlled pilot it yields the quantity for
-        # the operator's 50%-of-available position-notional target.
+        # Shadowed in the LIVE pilot by final_sizing_invariants; min() keeps it
+        # at or below the risk-budget quantity whenever it is reached.
         target_qty = float(original_minimum(info, price))
 
         try:
@@ -116,7 +126,7 @@ def install(TradingEngine, log) -> None:
 
         log.warning(
             "[PILOT_RISK_CAP] symbol=%s target_qty=%.12g risk_qty=%.12g "
-            "final_qty=%.12g authority=RiskManagerV3 target_policy=50pct_available_notional",
+            "final_qty=%.12g authority=RiskManagerV3 role=shadowed_min_cap",
             symbol,
             target_qty,
             risk_qty,
@@ -182,8 +192,8 @@ def install(TradingEngine, log) -> None:
         drift_class = str(getattr(result, "drift_classification", "UNKNOWN") or "UNKNOWN")
         # A beyond-threshold favorable drift is not a free pass. Revalidate the
         # fixed protective geometry at the fresh executable price and ensure
-        # the already-quantized quantity still fits the operator's 50%-of-
-        # available initial-margin ceiling. Any missing/inconsistent context
+        # the already-quantized quantity still fits the MAX_MARGIN_PCT
+        # collateral ceiling. Any missing/inconsistent context
         # remains fail-closed.
         if drift_class == "FAVORABLE_IMPROVEMENT" and abs(signed_drift) > float(
             __import__("bot.pre_dispatch_guard", fromlist=["limits_from_env"]).limits_from_env().max_signal_drift_bps
@@ -199,7 +209,8 @@ def install(TradingEngine, log) -> None:
                      or (direction == "SHORT" and tp < executable < sl))
             )
             margin = (qty_f * executable / leverage) if leverage > 0 else float("inf")
-            margin_ceiling = available * 0.50
+            margin_ceiling = available * float(
+                getattr(__import__("bot.config", fromlist=["cfg"]).cfg, "MAX_MARGIN_PCT", 0.0) or 0.0)
             collateral_ok = (
                 available > 0 and math.isfinite(margin)
                 and margin > 0 and margin <= margin_ceiling + 1e-9
@@ -236,35 +247,28 @@ def install(TradingEngine, log) -> None:
             )
             return False
 
-        executable_price = metrics.get("executable_price")
-        cost_fraction = float("nan")
-        setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
+        # INV-PREDISPATCH-RISK-001 at the fresh executable price: contracts and
+        # native stop are fixed; a worse price can only BLOCK, never resize.
+        from bot import risk_budget
+        auth = risk_budget.current_authorization()
         try:
-            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
-            from bot.config import cfg
-            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
-            validate(
-                qty_f, executable_price, sig.sl, direction,
-                cfg.LEVERAGE, cost_fraction,
-            )
-        except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
-            emit_telemetry(
-                log, symbol=symbol, setup_id=setup_id,
-                stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
-                entry=executable_price, stop=getattr(sig, "sl", float("nan")),
-                direction=direction, leverage=cfg.LEVERAGE,
-                cost_fraction=cost_fraction, result="BLOCK",
-                specific_reason=reason_from_exception(exc),
+            if auth is None:
+                raise risk_budget.RiskBudgetRefused("NO_RISK_AUTHORIZATION")
+            executable_price = float(metrics.get("executable_price"))
+            risk_budget.assert_projected_loss_within_budget(
+                symbol=symbol, contracts=auth.contracts, multiplier=auth.multiplier,
+                entry=executable_price, stop=float(sig.sl), direction=direction,
+                cost_fraction=auth.cost_fraction, equity=auth.equity,
+                risk_pct=auth.risk_pct, stage="FRESH_PREDISPATCH_RECHECK",
+                leverage=auth.leverage)
+        except (risk_budget.RiskBudgetRefused, TypeError, ValueError) as exc:
+            log.critical(
+                "[RISK_BUDGET_REJECTED] symbol=%s stage=FRESH_PREDISPATCH_RECHECK reason=%s "
+                "execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                symbol, getattr(exc, "reason", type(exc).__name__),
             )
             return False
-        emit_telemetry(
-            log, symbol=symbol, setup_id=setup_id,
-            stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
-            entry=executable_price, stop=sig.sl, direction=direction,
-            leverage=cfg.LEVERAGE, cost_fraction=cost_fraction, result="PASS",
-            specific_reason="within_50pct_entry_margin",
-        )
+        risk_budget.update_entry_price(executable_price)
 
         log.info(
             "[LIVE_PREDISPATCH_MARKET] symbol=%s result=PASS "
@@ -286,8 +290,8 @@ def install(TradingEngine, log) -> None:
     TradingEngine._pilot_risk_cap_hardening_installed = True
 
     log.critical(
-        "[PILOT_RISK_CAP] installed: 50pct available balance remains the position-"
-        "notional target; RiskManagerV3 is the maximum quantity authority; "
+        "[PILOT_RISK_CAP] installed: sizing authority=RISK_BUDGET_V3 (final_sizing_invariants); "
+        "risk authorization carried to transport; "
         "LIVE spread/depth/signal-drift rechecked fail-closed only after final sizing; "
         "directional_drift_telemetry=true authorization_unchanged=true"
     )

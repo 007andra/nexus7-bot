@@ -36,6 +36,8 @@ from unittest.mock import AsyncMock, Mock, patch  # noqa: E402
 
 import sitecustomize  # noqa: E402,F401  (production overlay composition)
 from bot import kucoin  # noqa: E402
+from bot.risk_budget import RiskBudgetRefused  # noqa: E402
+from tests.risk_authorization_fixture import risk_authorized  # noqa: E402
 from bot.order_state import OrderRegistry, OrderState  # noqa: E402
 from bot.runtime_readiness import EntryReadinessRefused  # noqa: E402
 
@@ -147,8 +149,10 @@ class LiveEntryReadinessGateComposedTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_ready_native_tpsl_entry_reaches_dispatch(self):
         client = self._client(_engine())
         self._intent(client, "gate-a")
-        out = await client.place_order("BTCUSDT", "Buy", 0.002, sl=99000, tp=104000,
-                                       idem_key="gate-a", single_submission=True)
+        # F-003: a real _open carries its risk authorization to the transport.
+        with risk_authorized("BTCUSDT", "buy", 2, 100000.0, 99000.0, 0.001):
+            out = await client.place_order("BTCUSDT", "Buy", 0.002, sl=99000, tp=104000,
+                                           idem_key="gate-a", single_submission=True)
         self.assertEqual(out.get("orderId"), "kc-fake-1")
         self.assertEqual(len(client._session.posts("/api/v1/st-orders")), 1)
 
@@ -182,8 +186,12 @@ class LiveEntryReadinessGateComposedTests(unittest.IsolatedAsyncioTestCase):
     # -- TEST E: original (non-TPSL) path, same behaviour ------------------------
     async def test_e_original_path_ready_and_not_ready(self):
         ready = self._client(_engine())
-        await ready.place_order("BTCUSDT", "Buy", 0.002, idem_key="gate-e1")
-        self.assertEqual(len(ready._session.posts("/api/v1/orders")), 1)
+        # F-002 passes; F-003 (INV-PREDISPATCH-RISK-001) refuses a new-risk
+        # order that carries no native stop: its loss at the stop is unbounded.
+        with risk_authorized("BTCUSDT", "buy", 2, 100000.0, 99000.0, 0.001):
+            with self.assertRaisesRegex(RiskBudgetRefused, "NATIVE_STOP_MISSING"):
+                await ready.place_order("BTCUSDT", "Buy", 0.002, idem_key="gate-e1")
+        self.assertEqual(ready._session.posts("/api/v1/orders"), [])
 
         blocked = self._client(_engine(_protection_system_ready=False))
         with self.assertRaisesRegex(RuntimeError, "READY_FOR_NEW_ENTRIES=false"):

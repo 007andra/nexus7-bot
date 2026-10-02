@@ -1,10 +1,8 @@
-"""Operator LIVE sizing and explicit risk-override policy.
+"""Operator LIVE risk-override policy (drawdown gate).
 
-The controlled LIVE pilot keeps the operator-requested execution geometry:
-
-* target initial margin = 50% of freshly authenticated available collateral;
-* leverage is read from the existing configuration (production currently uses 50x);
-* stop-risk sizing remains telemetry under this operator margin policy.
+Sizing is NOT owned here: since F-003 the LIVE pilot sizes from the stop-loss
+risk budget in ``final_sizing_invariants`` (RiskManagerV3); leverage is read
+from configuration and only determines required margin.
 
 A drawdown breach is fail-closed by default. It may be bypassed only when the
 operator explicitly enables LIVE_RISK_OVERRIDE_APPROVED=true. The override
@@ -13,14 +11,12 @@ reconciliation, instrument or other execution-safety gates.
 """
 from __future__ import annotations
 
-import math
 import os
 
 from bot.config import cfg
 from bot import startup_ready_notification
 
 
-MARGIN_FRACTION = 0.50
 RISK_OVERRIDE_ENV = "LIVE_RISK_OVERRIDE_APPROVED"
 
 
@@ -220,109 +216,11 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
         TradingEngine._operator_drawdown_run_binding = True
 
 
-def _install_margin_sizing(log) -> None:
-    """Keep 50% of fresh available collateral as the LIVE pilot margin target."""
-    from bot import engine as engine_module
-    from bot import pilot_live_runtime
-    from bot import pilot_risk_cap_hardening as pilot_cap
-
-    if getattr(engine_module, "_operator_margin_sizing_installed", False):
-        return
-
-    previous_minimum = engine_module.minimum_base_quantity
-
-    def _margin_target_quantity(info, price):
-        engine = pilot_cap._PILOT_ENGINE.get()
-        symbol = pilot_cap._PILOT_SYMBOL.get()
-        if engine is None or not symbol:
-            return previous_minimum(info, price)
-        if getattr(engine, "paper_trade", False) or not bool(
-            getattr(getattr(engine, "pilot", None), "enabled", False)
-        ):
-            return previous_minimum(info, price)
-
-        available = float(getattr(engine, "_pilot_available_balance", 0.0) or 0.0)
-        leverage = float(cfg.LEVERAGE)
-        price_f = float(price)
-        if (
-            not math.isfinite(available) or available <= 0
-            or not math.isfinite(leverage) or leverage <= 0
-            or not math.isfinite(price_f) or price_f <= 0
-        ):
-            log.critical(
-                "[PILOT_MARGIN_SIZING] symbol=%s result=BLOCK reason=invalid_context "
-                "available=%s leverage=%s price=%s",
-                symbol, available, leverage, price_f,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        target_margin = available * MARGIN_FRACTION
-        target_notional = target_margin * leverage
-        try:
-            target_qty = float(
-                pilot_live_runtime._pilot_quantity_for_notional(
-                    info, price_f, target_notional
-                )
-            )
-        except Exception as exc:
-            log.critical(
-                "[PILOT_MARGIN_SIZING] symbol=%s result=BLOCK reason=quantity_%s",
-                symbol, type(exc).__name__,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        risk_qty = 0.0
-        try:
-            risk_qty = float(
-                engine.risk.size(
-                    symbol,
-                    price_f,
-                    engine.instruments,
-                    open_positions=engine.positions,
-                )
-            )
-        except Exception as exc:
-            log.warning(
-                "[PILOT_MARGIN_SIZING] symbol=%s stop_risk_telemetry=%s",
-                symbol, type(exc).__name__,
-            )
-
-        if not math.isfinite(target_qty) or target_qty <= 0:
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        actual_notional = target_qty * price_f
-        actual_margin = actual_notional / leverage
-        pilot_cap._PILOT_FINAL_QTY.set(target_qty)
-        log.warning(
-            "[PILOT_MARGIN_SIZING] symbol=%s result=PASS available=%.6f "
-            "margin_pct=%.2f%% target_margin=%.6f leverage=%.0fx "
-            "target_notional=%.6f qty=%.12g actual_margin=%.6f "
-            "stop_risk_qty_advisory=%.12g authority=operator_margin_policy",
-            symbol,
-            available,
-            MARGIN_FRACTION * 100.0,
-            target_margin,
-            leverage,
-            target_notional,
-            target_qty,
-            actual_margin,
-            risk_qty,
-        )
-        return target_qty
-
-    engine_module.minimum_base_quantity = _margin_target_quantity
-    engine_module._operator_margin_sizing_installed = True
-
-
 def install(TradingEngine, log) -> None:
     """Install after all controlled-pilot sizing/risk wrappers."""
     _install_drawdown_advisory(TradingEngine, log)
-    _install_margin_sizing(log)
     log.critical(
-        "[OPERATOR_RUNTIME_POLICY] installed margin_target=50pct_available "
+        "[OPERATOR_RUNTIME_POLICY] installed sizing_authority=RISK_BUDGET_V3 "
         "leverage=%sx drawdown_default=hard_gate explicit_override_supported=true "
         "override_enabled=%s railway_variables_unchanged=true",
         cfg.LEVERAGE,

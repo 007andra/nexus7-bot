@@ -37,6 +37,11 @@ class Config:
     LEVERAGE:       int   = int(os.environ.get("LEVERAGE", "10"))
     MAX_RISK_PCT:   float = float(os.environ.get("MAX_RISK_PCT", "0.01"))
     MAX_MARGIN_PCT: float = float(os.environ.get("MAX_MARGIN_PCT", "0.10"))
+    # F-003: MAX_RISK_PCT is the real per-trade loss budget at the stop
+    # (equity x pct, modeled costs included). MAX_OPEN_RISK_PCT caps the sum
+    # of risk reserved by open BGX positions plus the new entry. Values above
+    # bot.risk_budget.RISK_PCT_HARD_CEILING are refused at entry time.
+    MAX_OPEN_RISK_PCT: float = float(os.environ.get("MAX_OPEN_RISK_PCT", "0.02"))
     MAX_DRAWDOWN:   float = _pct(os.environ.get("MAX_DRAWDOWN", "0.10"), 0.10)
     DRAWDOWN_MODE:  str   = os.environ.get("DRAWDOWN_MODE", "ADVISORY").strip().upper()
     if DRAWDOWN_MODE not in {"ADVISORY", "HARD_GATE"}:

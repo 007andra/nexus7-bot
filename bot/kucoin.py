@@ -593,6 +593,10 @@ class KuCoinClient:
                 self, stage='transport', symbol=str(body.get('symbol', '')),
                 side=str(body.get('side', '')), client_oid=str(body.get('clientOid', '')),
             )
+            # INV-PREDISPATCH-RISK-001 (F-003): authorized contracts + native stop
+            # + freshest entry must keep the loss at the stop within budget.
+            from bot.risk_budget import assert_transport_dispatch
+            assert_transport_dispatch(self, endpoint, body)
         return self._session.post(url, **kwargs)
 
     @asynccontextmanager
@@ -742,7 +746,9 @@ class KuCoinClient:
             except Exception as e:
                 from bot.execution_ownership import StaleExecutionFence, ExecutionOwnershipUnavailable
                 from bot.runtime_readiness import EntryReadinessRefused
-                if isinstance(e, (StaleExecutionFence, ExecutionOwnershipUnavailable, EntryReadinessRefused)):
+                from bot.risk_budget import RiskBudgetRefused
+                if isinstance(e, (StaleExecutionFence, ExecutionOwnershipUnavailable,
+                                  EntryReadinessRefused, RiskBudgetRefused)):
                     raise
                 # Network/timeout ambiguity is reconciled by clientOid.
                 ambiguous = True

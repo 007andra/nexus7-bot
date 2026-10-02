@@ -58,6 +58,21 @@ class _Log:
         pass
 
 
+def _authorize_like_final_sizing(symbol, side, qty, entry, sl, multiplier=1.0):
+    """Mirror final_sizing_invariants: an accepted size carries its F-003 authorization."""
+    from bot import risk_budget
+    direction = "LONG" if side == "buy" else "SHORT"
+    cost = risk_budget.cost_fraction(symbol)
+    contracts = round(qty / multiplier)
+    loss = float(risk_budget.projected_loss(contracts, multiplier, entry, sl, cost))
+    equity = loss / 0.01 * 1.5
+    risk_budget.authorize(risk_budget.RiskAuthorization(
+        symbol=symbol, side=side, direction=direction, contracts=contracts,
+        multiplier=multiplier, entry=entry, stop=sl, cost_fraction=cost, equity=equity,
+        risk_pct=0.01, risk_budget=equity * 0.01, projected_loss=loss,
+        reserved_before=0.0, leverage=10.0))
+
+
 class PilotRiskCapInstallTests(unittest.TestCase):
     def test_live_pilot_hook_caps_target_with_risk_quantity(self):
         from bot import engine as engine_module
@@ -124,7 +139,7 @@ class _MarketClient:
 
 
 class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
-    async def _exercise(self, *, ticker, book):
+    async def _exercise(self, *, ticker, book, authorize=True):
         from bot import engine as engine_module
 
         original_module_minimum = engine_module.minimum_base_quantity
@@ -147,6 +162,8 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
                 qty = engine_module.minimum_base_quantity(
                     self.instruments[sig.symbol], sig.entry
                 )
+                if authorize:
+                    _authorize_like_final_sizing(sig.symbol, "buy", qty, sig.entry, sig.sl)
                 if not await self._refresh_entry_balance():
                     return None
                 return await self.client.place_order(
@@ -206,6 +223,17 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instance.client.place_calls, 1)
 
 
+    async def test_missing_risk_authorization_blocks_at_final_boundary(self):
+        # INV-PREDISPATCH-RISK-001: a quantity without the F-003 authorization never dispatches.
+        instance, result = await self._exercise(
+            ticker={"bid": 99.98, "ask": 100.02, "lastPrice": 100.0},
+            book={"b": [[99.98, 100]], "a": [[100.02, 100]]},
+            authorize=False,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(instance.client.place_calls, 0)
+
+
 class PilotRiskCapEngineOrderRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def _exercise_engine_order(self, *, ticker, book):
         """Mirror the real engine order: refresh -> size -> final refresh -> dispatch."""
@@ -238,6 +266,7 @@ class PilotRiskCapEngineOrderRegressionTests(unittest.IsolatedAsyncioTestCase):
                 qty = engine_module.minimum_base_quantity(
                     self.instruments[sig.symbol], sig.entry
                 )
+                _authorize_like_final_sizing(sig.symbol, "sell", qty, sig.entry, sig.sl)
 
                 # This is the final pre-dispatch refresh where the market guard
                 # must actually run against the computed quantity.

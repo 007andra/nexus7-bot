@@ -4,10 +4,17 @@ Installed before runtime bootstrap. A LogRecordFactory wrapper is used because
 filters attached to the root logger are not applied to records emitted by child
 loggers that propagate to root handlers, and handlers may be created after
 sitecustomize runs. Execution behavior is untouched.
+
+Since F-003 the only sizing authority is the stop-loss risk budget
+(RISK_BUDGET_V3: equity x MAX_RISK_PCT, MAX_MARGIN_PCT as a ceiling). Legacy
+messages that still describe a percentage-of-available margin or notional
+target are rewritten so logs never claim an authority that no longer exists.
 """
 from __future__ import annotations
 
 import logging
+
+_AUTHORITY = "sizing_authority=RISK_BUDGET_V3 margin_role=CEILING"
 
 
 def normalize_record(record: logging.LogRecord) -> logging.LogRecord:
@@ -15,45 +22,18 @@ def normalize_record(record: logging.LogRecord) -> logging.LogRecord:
 
     if "[PILOT_LEGACY_TARGET]" in msg:
         record.msg = (
-            "[SIZING_SEMANTICS] legacy_target_telemetry=true "
-            "authoritative_policy=50pct_available_margin "
-            "sizing_authority=OPERATOR_50PCT_EQUITY "
-            "risk_manager_role=VALIDATION_GATE execution_effect=NONE"
+            "[SIZING_SEMANTICS] legacy_target_telemetry=true authoritative_policy=risk_budget "
+            f"{_AUTHORITY} execution_effect=NONE"
         )
         record.args = ()
         return record
 
-    if "[PILOT_LIVE_RUNTIME]" in msg and "position-notional" in msg:
-        record.msg = (
-            "[PILOT_LIVE_RUNTIME] installed: cash-flow-aware durable equity drawdown + "
-            "authoritative 50pct-available initial-margin sizing at configured leverage + "
-            "read-only exposure/private-WS preflight; RiskManagerV3=VALIDATION_GATE; "
-            "external positions immutable"
-        )
-        record.args = ()
-        return record
-
-    if "[PILOT_RISK_CAP]" in msg and "RiskManagerV3 is the maximum quantity authority" in msg:
-        record.msg = (
-            "[PILOT_RISK_CAP] installed: legacy numeric risk quantity is validation-only; "
-            "authoritative sizing=OPERATOR_50PCT_EQUITY; LIVE spread/depth/signal-drift "
-            "rechecked fail-closed after final sizing; authorization_unchanged=true"
-        )
-        record.args = ()
-        return record
-
-    if "sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap" in msg:
-        record.msg = msg.replace(
-            "sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap",
-            "sizing_authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE",
-        )
-
-    if "final risk-authoritative sizing invariants" in str(record.msg):
-        record.msg = str(record.msg).replace(
-            "final risk-authoritative sizing invariants",
-            "final operator-50pct-margin sizing invariants with RiskManagerV3 validation gate",
-        )
-
+    for legacy in ("sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap",
+                   "sizing_authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE",
+                   "sizing_authority=OPERATOR_50PCT_EQUITY"):
+        if legacy in msg:
+            msg = msg.replace(legacy, _AUTHORITY)
+            record.msg = msg
     return record
 
 
