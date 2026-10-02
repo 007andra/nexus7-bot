@@ -35,6 +35,44 @@ def max_drawdown(returns) -> float:
     return float(np.max(dd)) if dd.size else 0.0
 
 
+def time_under_water(returns) -> dict:
+    """Return underwater fraction and longest consecutive underwater run."""
+    curve = equity_curve(returns)
+    if curve.size <= 1:
+        return {"fraction": 0.0, "max_periods": 0}
+    peaks = np.maximum.accumulate(curve)
+    underwater = (curve[1:] < peaks[1:] - 1e-15)
+    longest = current = 0
+    for flag in underwater:
+        if bool(flag):
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return {
+        "fraction": float(np.mean(underwater)) if underwater.size else 0.0,
+        "max_periods": int(longest),
+    }
+
+
+def effective_sample_size_lag1(returns) -> float:
+    """Conservative lag-1 autocorrelation ESS diagnostic, clamped to [1,n]."""
+    arr = _returns(returns)
+    n = int(arr.size)
+    if n <= 2:
+        return float(n)
+    left = arr[:-1]
+    right = arr[1:]
+    if float(np.std(left)) <= 0 or float(np.std(right)) <= 0:
+        return float(n)
+    rho = float(np.corrcoef(left, right)[0, 1])
+    if not math.isfinite(rho):
+        return float(n)
+    rho = max(-0.99, min(0.99, rho))
+    ess = n * (1.0 - rho) / (1.0 + rho)
+    return float(max(1.0, min(float(n), ess)))
+
+
 def cvar(returns, alpha: float = 0.05) -> float:
     arr = _returns(returns)
     if not arr.size:
@@ -47,37 +85,81 @@ def cvar(returns, alpha: float = 0.05) -> float:
 
 
 def performance_metrics(returns, periods_per_year: float = 1.0) -> dict:
-    """Per-trade metrics; pass a measured annual frequency to annualize ratios."""
+    """Per-trade metrics; pass measured annual frequency to annualize ratios.
+
+    With the default periods_per_year=1, Sharpe/Sortino/Calmar remain
+    per-observation diagnostics and do not pretend trade returns are candles.
+    """
     arr = _returns(returns)
-    if not arr.size:
-        return {
-            "trades": 0, "expectancy": 0.0, "win_rate": 0.0,
-            "profit_factor": 0.0, "sharpe": 0.0, "sortino": 0.0,
-            "max_drawdown": 0.0, "cvar_5": 0.0,
-        }
     if periods_per_year <= 0:
         raise ValueError("periods_per_year must be positive")
+    if not arr.size:
+        return {
+            "trades": 0,
+            "effective_sample_size_lag1": 0.0,
+            "expectancy": 0.0,
+            "median_return": 0.0,
+            "win_rate": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "payoff_ratio": 0.0,
+            "profit_factor": 0.0,
+            "total_return": 0.0,
+            "geometric_return_per_period": 0.0,
+            "annualized_geometric_return": 0.0,
+            "sharpe": 0.0,
+            "sortino": 0.0,
+            "calmar": 0.0,
+            "max_drawdown": 0.0,
+            "time_under_water_fraction": 0.0,
+            "max_time_under_water_periods": 0,
+            "cvar_5": 0.0,
+        }
+    curve = equity_curve(arr)
     wins = arr[arr > 0]
     losses = arr[arr < 0]
     gross_win = float(np.sum(wins)) if wins.size else 0.0
     gross_loss = abs(float(np.sum(losses))) if losses.size else 0.0
+    avg_win = float(np.mean(wins)) if wins.size else 0.0
+    avg_loss = float(np.mean(losses)) if losses.size else 0.0
     std = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
     downside = arr[arr < 0]
     downside_std = float(np.std(downside, ddof=1)) if downside.size > 1 else 0.0
     annualizer = math.sqrt(float(periods_per_year))
     mean = float(np.mean(arr))
+    total_return = float(curve[-1] - 1.0)
+    geometric = float(curve[-1] ** (1.0 / arr.size) - 1.0)
+    annualized_geometric = float(
+        (1.0 + geometric) ** float(periods_per_year) - 1.0
+    )
+    drawdown = max_drawdown(arr)
+    underwater = time_under_water(arr)
     return {
         "trades": int(arr.size),
+        "effective_sample_size_lag1": effective_sample_size_lag1(arr),
         "expectancy": mean,
+        "median_return": float(np.median(arr)),
         "win_rate": float(np.mean(arr > 0)),
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": (
+            avg_win / abs(avg_loss) if avg_loss < 0 else
+            (math.inf if avg_win > 0 else 0.0)
+        ),
         "profit_factor": (
             gross_win / gross_loss
             if gross_loss > 0
             else (math.inf if gross_win > 0 else 0.0)
         ),
+        "total_return": total_return,
+        "geometric_return_per_period": geometric,
+        "annualized_geometric_return": annualized_geometric,
         "sharpe": mean / std * annualizer if std > 0 else 0.0,
         "sortino": mean / downside_std * annualizer if downside_std > 0 else 0.0,
-        "max_drawdown": max_drawdown(arr),
+        "calmar": annualized_geometric / drawdown if drawdown > 0 else 0.0,
+        "max_drawdown": drawdown,
+        "time_under_water_fraction": underwater["fraction"],
+        "max_time_under_water_periods": underwater["max_periods"],
         "cvar_5": cvar(arr, 0.05),
     }
 
