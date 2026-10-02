@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Mapping, Sequence
 
 from bot.feature_contract import FeatureSchema, FeatureSpec
@@ -46,10 +46,7 @@ class MicrostructureSnapshot:
     promotion_authority: bool = False
 
     def as_dict(self) -> dict:
-        return {
-            key: getattr(self, key)
-            for key in self.__dataclass_fields__
-        }
+        return asdict(self)
 
     def feature_values(self) -> dict[str, float]:
         return MICROSTRUCTURE_FEATURE_SCHEMA.validate({
