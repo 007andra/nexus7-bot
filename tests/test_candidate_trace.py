@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from bot.candidate_trace import (
     attach_decision,
@@ -7,6 +8,7 @@ from bot.candidate_trace import (
     ensure_candidate_id,
 )
 from bot.order_state import ManagedOrder
+from bot.execution_cost import ExecutionCostSnapshot
 
 
 class _Signal:
@@ -57,6 +59,37 @@ class CandidateTraceTests(unittest.TestCase):
         self.assertEqual(bind_managed_order(order, sig), cid)
         self.assertEqual(decision._bgx_candidate_id, cid)
         self.assertEqual(order.candidate_id, cid)
+
+    def test_cost_decision_and_durable_order_share_one_candidate(self):
+        sig = _Signal()
+        cid = ensure_candidate_id(sig)
+        snapshot = ExecutionCostSnapshot(
+            snapshot_id="cost-test",
+            candidate_id=cid,
+            exchange="binance",
+            symbol=sig.symbol,
+            entry_reference=sig.entry,
+            taker_fee=0.0005,
+            maker_fee=0.0002,
+            entry_slippage=0.0001,
+            exit_slippage=0.0001,
+            spread_bps=1.0,
+            fee_source="test",
+            slippage_source="test",
+            observed_at=1.0,
+        )
+        sig._bgx_cost_snapshot = snapshot
+
+        decision = _Decision()
+        decision._bgx_nexus_cost_context = type(
+            "Ctx", (), {"snapshot": snapshot}
+        )()
+        self.assertEqual(attach_decision(decision, sig), cid)
+
+        order = ManagedOrder("bgx7-test", "BTCUSDT", "Buy", 0.01)
+        self.assertEqual(bind_managed_order(order, sig), cid)
+        self.assertEqual(snapshot.candidate_id, decision._bgx_candidate_id)
+        self.assertEqual(decision._bgx_candidate_id, order.candidate_id)
 
     def test_managed_order_candidate_survives_restart_roundtrip(self):
         sig = _Signal()
