@@ -116,6 +116,7 @@ jobs:
               "shared_candidate_population": True,
               "closed_candles_only": True,
               "historical_clock_frozen": True,
+              "oi_delta_semantics": "PREVIOUS_NEXUS_CANDIDATE",
               "exchange_mutations": False,
               "runtime_policy_mutations": False,
               "promotion_authority": False,
