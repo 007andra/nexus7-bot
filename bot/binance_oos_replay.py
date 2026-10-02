@@ -830,6 +830,7 @@ async def replay_symbol(
             previous_metrics,
             decision_ts_ms=ts,
             side=str(item["direction"]),
+            oi_delta_override=item.get("oi_delta"),
         )
         item["shadow_microstructure"] = micro
         if depth_snapshot is not None:
