@@ -249,13 +249,9 @@ def build_sensitivity_report(symbol_reports: list[dict]) -> dict:
 
 
 def build_opportunity_ranking_report(symbol_reports: list[dict]) -> dict:
-    """Paired OOS base-vs-microstructure ranking on identical candidate batches."""
-    return evaluate_microstructure_ranking(
-        symbol_reports,
-        bootstrap_samples=4000,
-        seed=31,
-        temporal_folds=4,
-    )
+    """Canonical SHADOW microstructure ranking evidence, no local duplicate."""
+    return evaluate_microstructure_ranking(symbol_reports)
+
 
 def assert_population_parity(primary: dict, robustness: dict) -> None:
     primary_symbols = {
