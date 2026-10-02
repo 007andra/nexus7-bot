@@ -124,3 +124,20 @@ A passing unit/CI suite proves engineering invariants, not trading profitability
 - No connection to external trading frameworks.
 - No merge or Railway deploy performed by this branch.
 - No branch-protection or Railway governance changes.
+
+
+## Microstructure SHADOW extension
+
+- `bot.microstructure_shadow`: public Binance USD-M depth/aggTrades feature snapshot with freshness, feature schema and fingerprint.
+- `bot.microstructure_oos_evidence`: same-population, same-timestamp base-vs-enriched OOS comparison with bootstrap CI and temporal folds.
+- Microstructure remains `execution_effect=NONE`, `score_effect=NONE`, `promotion_authority=False`.
+
+
+## Microstructure promotion boundary
+
+Microstructure is intentionally not part of the production NEXUS score or order
+authorization path. Historical `bookDepth`, 5m derivatives metrics and public
+live depth/aggTrades are treated as research evidence. The OOS bundle reports
+both the traditional top-ranked-vs-rest result and the incremental top-pick
+uplift versus the same base ranking without microstructure. No positive result
+automatically changes LIVE weights, thresholds, sizing or execution.
