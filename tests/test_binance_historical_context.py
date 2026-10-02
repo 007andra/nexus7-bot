@@ -2,7 +2,10 @@ import io
 import unittest
 import zipfile
 
+from bot.binance_research_data import AggTradeObservation
+
 from bot.binance_historical_context import (
+    AggTradeTimeline,
     BookDepthTimeline,
     MetricsTimeline,
     parse_book_depth_archive,
@@ -140,6 +143,60 @@ class BinanceHistoricalContextTests(unittest.TestCase):
         )
         self.assertFalse(result["available"])
         self.assertFalse(result["depth_available"])
+
+    def test_agg_trade_timeline_is_causal_and_directional(self):
+        rows = [
+            AggTradeObservation(
+                1, 100.0, 3.0, 10, 10,
+                1_700_000_000_000, False,
+            ),
+            AggTradeObservation(
+                2, 100.0, 1.0, 11, 11,
+                1_700_000_001_000, True,
+            ),
+            AggTradeObservation(
+                3, 100.0, 100.0, 12, 12,
+                1_700_000_400_000, False,
+            ),
+        ]
+        timeline = AggTradeTimeline(rows)
+        pressure = timeline.pressure(
+            1_700_000_002_000,
+            window_ms=5 * 60 * 1000,
+        )
+        self.assertTrue(pressure["available"])
+        self.assertGreater(pressure["taker_pressure"], 0)
+        self.assertEqual(pressure["rows"], 2)
+        self.assertFalse(pressure["future_rows_used"])
+        self.assertEqual(pressure["execution_effect"], "NONE")
+
+    def test_agg_trade_pressure_override_replaces_metrics_proxy_only_in_shadow(self):
+        metrics = MetricsObservation(
+            label_ts_ms=1_700_000_000_000,
+            effective_ts_ms=1_700_000_000_000,
+            symbol="BTCUSDT",
+            sum_open_interest=100.0,
+            sum_open_interest_value=10000.0,
+            top_account_ls_ratio=1.0,
+            top_position_ls_ratio=1.0,
+            global_account_ls_ratio=1.0,
+            taker_ls_volume_ratio=0.5,
+            source_date="2026-08-31",
+            convention="END_LABEL",
+        )
+        result = shadow_microstructure_context(
+            None,
+            metrics,
+            None,
+            decision_ts_ms=1_700_000_001_000,
+            side="LONG",
+            agg_trade_pressure_override=0.75,
+        )
+        self.assertEqual(result["taker_pressure_source"], "AGG_TRADES")
+        self.assertAlmostEqual(result["taker_pressure"], 0.75)
+        self.assertEqual(result["score_effect"], "NONE")
+        self.assertEqual(result["execution_effect"], "NONE")
+        self.assertFalse(result["promotion_authority"])
 
     def test_known_september_book_depth_issue_is_quarantined(self):
         payload = _zip_csv(
