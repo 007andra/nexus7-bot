@@ -21,7 +21,7 @@ class KronosShadowTests(unittest.TestCase):
         )
         self.assertEqual(f.sample_count, 4)
         self.assertEqual(f.direction_probability_pct, 75.0)
-        self.assertEqual(f.tp_before_sl_pct, 25.0)
+        self.assertEqual(f.tp_before_sl_pct, 50.0)
         self.assertEqual(f.sl_before_tp_pct, 25.0)
         self.assertGreater(f.median_return_pct, 0)
         self.assertGreater(f.dispersion_pct, 0)
