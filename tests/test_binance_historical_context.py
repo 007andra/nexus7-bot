@@ -7,6 +7,7 @@ from bot.binance_historical_context import (
     MetricsTimeline,
     parse_book_depth_archive,
     parse_metrics_archive,
+    shadow_microstructure_context,
     shadow_microstructure_signal,
 )
 
@@ -79,6 +80,65 @@ class BinanceHistoricalContextTests(unittest.TestCase):
         shadow = shadow_microstructure_signal(rows[0])
         self.assertTrue(shadow["available"])
         self.assertEqual(shadow["execution_effect"], "NONE")
+
+    def test_shadow_context_combines_depth_taker_flow_and_oi(self):
+        payload = _zip_csv(
+            "b.csv",
+            "timestamp,percentage,depth,notional\n"
+            "2026-08-31 12:00:00,-1,10,1500\n"
+            "2026-08-31 12:00:00,1,8,500\n"
+            "2026-08-31 12:00:00,-2,20,2500\n"
+            "2026-08-31 12:00:00,2,15,1000\n"
+            "2026-08-31 12:00:00,-5,50,5000\n"
+            "2026-08-31 12:00:00,5,40,2500\n",
+        )
+        snapshot = parse_book_depth_archive(
+            payload, source_date="2026-08-31"
+        )[0]
+        metrics_payload = _zip_csv(
+            "m.csv",
+            "create_time,symbol,sum_open_interest,sum_open_interest_value,"
+            "count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,"
+            "count_long_short_ratio,sum_taker_long_short_vol_ratio\n"
+            + _metrics_row("2026-08-31 11:55:00", oi="100")
+            + _metrics_row("2026-08-31 12:00:00", oi="102"),
+        )
+        metrics = parse_metrics_archive(
+            metrics_payload, source_date="2026-08-31"
+        )
+        result = shadow_microstructure_context(
+            snapshot,
+            metrics[-1],
+            metrics[-2],
+            decision_ts_ms=snapshot.timestamp_ms,
+            side="LONG",
+        )
+        self.assertTrue(result["available"])
+        self.assertGreater(result["depth_imbalance"], 0)
+        self.assertGreater(result["oi_delta"], 0)
+        self.assertGreater(result["directional_alignment"], 0)
+        self.assertEqual(result["score_effect"], "NONE")
+        self.assertFalse(result["promotion_authority"])
+
+    def test_stale_depth_is_not_used_as_available_microstructure(self):
+        payload = _zip_csv(
+            "b.csv",
+            "timestamp,percentage,depth,notional\n"
+            "2026-08-31 12:00:00,-1,10,1000\n"
+            "2026-08-31 12:00:00,1,8,800\n",
+        )
+        snapshot = parse_book_depth_archive(
+            payload, source_date="2026-08-31"
+        )[0]
+        result = shadow_microstructure_context(
+            snapshot,
+            None,
+            None,
+            decision_ts_ms=snapshot.timestamp_ms + 16 * 60 * 1000,
+            side="LONG",
+        )
+        self.assertFalse(result["available"])
+        self.assertFalse(result["depth_available"])
 
     def test_known_september_book_depth_issue_is_quarantined(self):
         payload = _zip_csv(
