@@ -1,7 +1,7 @@
 """
 NEXUS-7 — Ensemble de modelos independentes (seção 17)
 
-Sete modelos analisam o mesmo mercado por óticas diferentes:
+Oito modelos analisam o mesmo mercado por óticas diferentes:
 
     MODEL A — Trend            (EMAs, ADX, VWAP)
     MODEL B — Momentum         (RSI, MACD, ROC)
@@ -484,8 +484,11 @@ def model_risk_regime(closes: List[float], highs: List[float],
 
 
 def run_ensemble(closes, highs, lows, volumes,
-                 funding=None, oi_delta=None, ls_ratio=None) -> List[ModelOutput]:
-    """Executa os 7 modelos. Cada um é independente e isolado por try/except."""
+                 funding=None, oi_delta=None, ls_ratio=None,
+                 opens=None, timestamps=None) -> List[ModelOutput]:
+    """Executa os 8 modelos independentes; MODEL H abstém quando não há edge."""
+    from bot.market_language import model_market_language
+
     return [
         model_trend(closes, highs, lows, volumes),
         model_momentum(closes),
@@ -494,4 +497,8 @@ def run_ensemble(closes, highs, lows, volumes,
         model_structure(closes, highs, lows),
         model_derivatives(funding, oi_delta, ls_ratio),
         model_risk_regime(closes, highs, lows),
+        model_market_language(
+            closes, highs, lows, volumes,
+            opens=opens, timestamps=timestamps,
+        ),
     ]
