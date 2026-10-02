@@ -10,11 +10,12 @@ from bot.binance_oos_replay import (
     derivatives_context_at,
     fee_return_fraction,
     funding_return_fraction,
+    load_verified_agg_trades,
     load_verified_book_depth,
     load_verified_metrics,
     month_range,
 )
-from bot.binance_research_data import FundingObservation
+from bot.binance_research_data import AggTradeObservation, FundingObservation
 
 
 class BinanceOOSReplayTests(unittest.TestCase):
@@ -181,6 +182,87 @@ class BinanceOOSReplayTests(unittest.TestCase):
                     "BTCUSDT",
                     ("2026-08-31",),
                     concurrency=0,
+                )
+            )
+
+    def test_agg_trades_loader_treats_404_as_observational_gap(self):
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+            raise RuntimeError("Binance research archive HTTP 404")
+
+        with patch(
+            "bot.binance_oos_replay.download_archive_verified",
+            side_effect=fake_download,
+        ):
+            rows, artifacts, missing, gaps = asyncio.run(
+                load_verified_agg_trades(
+                    "BTCUSDT",
+                    ("2026-08-31",),
+                )
+            )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(artifacts, ())
+        self.assertEqual(missing, ("2026-08-31",))
+        self.assertEqual(gaps, {})
+
+    def test_agg_trades_loader_is_deterministic_under_concurrency(self):
+        dates = ("2026-08-30", "2026-08-31")
+
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+            if "08-30" in url:
+                await asyncio.sleep(0.02)
+                payload = b"day30"
+                sha = "a" * 64
+            else:
+                payload = b"day31"
+                sha = "b" * 64
+            return SimpleNamespace(payload=payload, sha256=sha)
+
+        def fake_parse(payload):
+            if payload == b"day30":
+                return (
+                    AggTradeObservation(
+                        10, 100.0, 1.0, 100, 100,
+                        1_700_000_000_000, False,
+                    ),
+                )
+            return (
+                AggTradeObservation(
+                    11, 101.0, 2.0, 101, 101,
+                    1_700_086_400_000, True,
+                ),
+            )
+
+        with patch(
+            "bot.binance_oos_replay.download_archive_verified",
+            side_effect=fake_download,
+        ), patch(
+            "bot.binance_oos_replay.parse_agg_trades_archive",
+            side_effect=fake_parse,
+        ):
+            rows, artifacts, missing, gaps = asyncio.run(
+                load_verified_agg_trades(
+                    "BTCUSDT",
+                    dates,
+                    concurrency=2,
+                )
+            )
+
+        self.assertEqual(
+            [row.aggregate_trade_id for row in rows],
+            [10, 11],
+        )
+        self.assertEqual(len(artifacts), 2)
+        self.assertEqual(missing, ())
+        self.assertEqual(sorted(gaps), list(dates))
+
+    def test_agg_trades_loader_rejects_bad_concurrency(self):
+        with self.assertRaises(ValueError):
+            asyncio.run(
+                load_verified_agg_trades(
+                    "BTCUSDT",
+                    ("2026-08-31",),
+                    concurrency=9,
                 )
             )
 
