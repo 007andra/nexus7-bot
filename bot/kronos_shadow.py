@@ -10,7 +10,7 @@ import asyncio
 import math
 import os
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import aiohttp
 import numpy as np
