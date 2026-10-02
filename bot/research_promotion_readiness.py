@@ -7,9 +7,11 @@ review a challenger.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Sequence
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -133,6 +135,38 @@ def _methodology_green(bundle: Mapping[str, object]) -> bool:
     )
 
 
+def _universe_green(
+    bundle: Mapping[str, object],
+    required_symbols: Sequence[str],
+) -> bool:
+    methodology = bundle.get("methodology")
+    if not isinstance(methodology, Mapping):
+        return False
+    required = {
+        str(symbol).upper().strip()
+        for symbol in required_symbols
+        if str(symbol).strip()
+    }
+    panel_raw = methodology.get("symbol_universe")
+    if not required or not isinstance(panel_raw, (list, tuple)):
+        return False
+    panel = sorted({
+        str(symbol).upper().strip()
+        for symbol in panel_raw
+        if str(symbol).strip()
+    })
+    if not panel:
+        return False
+    raw = json.dumps(panel, separators=(",", ":"), ensure_ascii=True)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return bool(
+        methodology.get("universe_selection") == "PREDECLARED_FIXED_PANEL"
+        and methodology.get("claim_scope") == "SYMBOL_PANEL_ONLY"
+        and methodology.get("symbol_universe_hash") == digest
+        and required.issubset(set(panel))
+    )
+
+
 def _drift_green(drift: Mapping[str, object] | None) -> bool:
     if not isinstance(drift, Mapping):
         return False
@@ -166,6 +200,7 @@ def evaluate_readiness(
     ci_green: bool,
     shadow_drift: Mapping[str, object] | None,
     sensitivity: Mapping[str, object] | None,
+    required_symbols: Sequence[str],
 ) -> ReadinessResult:
     """Aggregate research evidence into one operator-review readiness result.
 
@@ -176,6 +211,7 @@ def evaluate_readiness(
         "ci_green": ci_green is True,
         "manifest_valid": _manifest_valid(bundle),
         "methodology_green": _methodology_green(bundle),
+        "universe_green": _universe_green(bundle, required_symbols),
         "primary_edge_green": _primary_green(bundle),
         "robustness_green": _robustness_green(bundle),
         "calibration_green": _calibration_green(bundle),
@@ -201,6 +237,7 @@ def evidence_gate_flags(result: ReadinessResult) -> dict:
         "oos_green": bool(
             result.checks.get("manifest_valid")
             and result.checks.get("methodology_green")
+            and result.checks.get("universe_green")
             and result.checks.get("primary_edge_green")
             and result.checks.get("robustness_green")
             and result.checks.get("calibration_green")
