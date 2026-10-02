@@ -1,6 +1,9 @@
 import unittest
 
-from bot.microstructure_oos_evidence import evaluate_microstructure_ranking
+from bot.microstructure_oos_evidence import (
+    evaluate_microstructure_ranking,
+    microstructure_review_gate,
+)
 
 
 def _row(candidate_id, ts, *, micro, depth, r, ev=1.0, setup=80.0):
@@ -27,10 +30,10 @@ def _row(candidate_id, ts, *, micro, depth, r, ev=1.0, setup=80.0):
     }
 
 
-def _reports():
+def _reports(count=4):
     btc = []
     eth = []
-    for index in range(4):
+    for index in range(count):
         ts = 1_700_000_000_000 + index * 900_000
         # Base rank prefers ETH slightly, but microstructure/depth favors BTC.
         btc.append(_row(
@@ -98,6 +101,31 @@ class MicrostructureOOSEvidenceTests(unittest.TestCase):
             first["incremental_top_pick_uplift_r"],
             second["incremental_top_pick_uplift_r"],
         )
+
+    def test_review_gate_remains_blocked_on_small_sample(self):
+        report = evaluate_microstructure_ranking(
+            _reports(), bootstrap_samples=100, seed=7
+        )
+        gate = microstructure_review_gate(report)
+        self.assertFalse(gate["ready_for_operator_review"])
+        self.assertIn(
+            "INSUFFICIENT_COMPARABLE_BATCHES",
+            gate["blockers"],
+        )
+        self.assertFalse(gate["promotion_authority"])
+        self.assertEqual(gate["execution_effect"], "NONE")
+
+    def test_review_gate_can_pass_statistical_evidence_without_live_authority(self):
+        report = evaluate_microstructure_ranking(
+            _reports(80), bootstrap_samples=300, seed=11,
+            temporal_folds=4,
+        )
+        gate = microstructure_review_gate(report)
+        self.assertTrue(gate["ready_for_operator_review"])
+        self.assertEqual(gate["blockers"], ())
+        self.assertFalse(gate["promotion_authority"])
+        self.assertEqual(gate["score_effect"], "NONE")
+        self.assertEqual(gate["execution_effect"], "NONE")
 
     def test_unavailable_microstructure_is_excluded_not_imputed(self):
         reports = _reports()
