@@ -23,7 +23,10 @@ from bot.oos_model_validation import (
     ValidationRow,
     label_aware_purged_embargo_walk_forward,
 )
-from bot.microstructure_oos_evidence import evaluate_microstructure_ranking
+from bot.microstructure_oos_evidence import (
+    evaluate_microstructure_ranking,
+    microstructure_review_gate,
+)
 from bot.research_manifest import ResearchManifest
 from bot.research_sensitivity import incremental_cost_surface
 
@@ -309,6 +312,9 @@ async def run(
     calibration = build_calibration_report(reports)
     sensitivity = build_sensitivity_report(reports)
     opportunity_ranking = build_opportunity_ranking_report(reports)
+    microstructure_review = microstructure_review_gate(
+        opportunity_ranking
+    )
     assert_population_parity(primary, robustness)
 
     manifest = ResearchManifest(
@@ -324,6 +330,7 @@ async def run(
         "calibration": calibration,
         "sensitivity": sensitivity,
         "opportunity_ranking": opportunity_ranking,
+        "microstructure_review": microstructure_review,
         "manifest": manifest.canonical_dict(),
         "manifest_hash": manifest.fingerprint,
         "dataset_fingerprint": manifest.dataset_fingerprint,
@@ -418,6 +425,14 @@ def main() -> int:
         ),
         "microstructure_uplift_ci95": bundle["opportunity_ranking"].get(
             "top_pick_uplift_ci95"
+        ),
+        "microstructure_ready_for_operator_review": (
+            bundle["microstructure_review"].get(
+                "ready_for_operator_review"
+            )
+        ),
+        "microstructure_review_blockers": (
+            bundle["microstructure_review"].get("blockers")
         ),
         "stable_positive_point_estimate": summary.get(
             "stable_positive_point_estimate"
