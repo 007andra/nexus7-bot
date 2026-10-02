@@ -17,8 +17,8 @@ from pathlib import Path
 from bot.binance_oos_replay import month_range, replay_symbol
 from bot.nexus_oos_edge_gate import build_edge_report, edge_promotion_decision
 from bot.nexus_oos_robustness import analyze_robustness
-from bot.oos_model_validation import ValidationRow
-from bot.probability_calibration import walk_forward_platt_report
+from bot.nexus_oos_calibration import calibrate_walk_forward
+from bot.oos_model_validation import ValidationRow, purged_walk_forward
 from bot.research_manifest import ResearchManifest
 
 
@@ -116,16 +116,55 @@ def build_calibration_report(symbol_reports: list[dict]) -> dict:
                 r_multiple=r_value,
             ))
     rows.sort(key=lambda row: row.timestamp)
-    # Deliberately fixed evidence requirements. Small samples return blockers
-    # instead of shrinking windows until a flattering result appears.
-    return walk_forward_platt_report(
+
+    # Fixed evidence requirements: never shrink windows to manufacture a pass.
+    folds = purged_walk_forward(
         rows,
         train_size=200,
         test_size=75,
         purge_size=4,
-        minimum_folds=4,
-        bins=10,
+        step_size=75,
     )
+    blockers = []
+    if len(folds) < 4:
+        blockers.append("INSUFFICIENT_CALIBRATION_OOS_FOLDS")
+
+    methods = {}
+    for method in ("platt", "isotonic"):
+        if not folds:
+            methods[method] = {
+                "status": "NOT_RUN",
+                "reason": "NO_OOS_FOLDS",
+                "execution_effect": "NONE",
+            }
+            continue
+        try:
+            methods[method] = {
+                "status": "OK",
+                "evidence": calibrate_walk_forward(
+                    folds, method=method, bins=10
+                ),
+            }
+        except ValueError as exc:
+            methods[method] = {
+                "status": "FAILED",
+                "reason": type(exc).__name__,
+                "execution_effect": "NONE",
+            }
+
+    if not any(item.get("status") == "OK" for item in methods.values()):
+        blockers.append("NO_CALIBRATOR_VALID_OOS")
+
+    return {
+        "fold_count": len(folds),
+        "evidence_complete": not blockers,
+        "evidence_blockers": tuple(blockers),
+        "methods": methods,
+        "fit_scope": "TRAIN_ONLY",
+        "evaluation_scope": "OOS_ONLY",
+        "live_probability_effect": "NONE",
+        "promotion_authority": False,
+    }
 
 
 def assert_population_parity(primary: dict, robustness: dict) -> None:
