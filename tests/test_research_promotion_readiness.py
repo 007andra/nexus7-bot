@@ -29,6 +29,9 @@ def _bundle():
             "fold_count": 4,
             "fit_scope": "TRAIN_ONLY",
             "evaluation_scope": "OOS_ONLY",
+            "purge_basis": "ACTUAL_LABEL_END_TIMESTAMP",
+            "embargo_rows": 4,
+            "missing_label_end": 0,
             "live_probability_effect": "NONE",
             "methods": {
                 "platt": {"status": "OK"},
@@ -139,6 +142,18 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
         )
         self.assertFalse(result.ready_for_operator_review)
         self.assertIn("SENSITIVITY_PRESENT", result.blockers)
+
+    def test_calibration_without_label_end_purge_fails_closed(self):
+        bundle = _bundle()
+        bundle["calibration"]["purge_basis"] = "CANDIDATE_COUNT"
+        result = evaluate_readiness(
+            bundle,
+            ci_green=True,
+            shadow_drift=_drift(),
+            sensitivity=_sensitivity(),
+        )
+        self.assertFalse(result.ready_for_operator_review)
+        self.assertIn("CALIBRATION_GREEN", result.blockers)
 
     def test_oi_delta_semantic_drift_fails_closed(self):
         bundle = _bundle()
