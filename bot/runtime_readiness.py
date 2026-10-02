@@ -65,6 +65,9 @@ def assert_ready_for_new_entries(engine):
     snap=runtime_readiness(engine)
     if not snap.ready_for_new_entries:
         blockers = [name for name, value in snap.__dict__.items() if value is not True]
+        # F-010 observability: name each causal durable reason behind the flag.
+        blockers += [f"durable:{reason}" for reason in
+                     sorted(getattr(engine, "_durable_state_errors", None) or ())]
         raise EntryReadinessRefused("READY_FOR_NEW_ENTRIES=false", blockers)
     return snap
 

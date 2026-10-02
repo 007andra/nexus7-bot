@@ -224,12 +224,16 @@ Template fields abbreviated where obvious. "Repro" = test in `tests/test_forensi
 
 ### P1 / HIGH
 
-#### F-010 — Durable block reason "orders" is shared; any successful persist re-authorizes entries
+#### F-010 — Durable block reason "orders" is shared; any successful persist re-authorizes entries (FIXED)
 - `bot/durable_execution.py:150-171` (`persist_orders` → `_clear(engine,"orders")` on success), blocked by `engine.py:3115-3118` (ambiguous dispatch), `:3323-3327` (fill timeout), `durable_execution.py:386-392` (startup unresolved).
 - A private-WS transition of *any* order (`persist_callback`) or a durable partial-exit persist clears the block while the ambiguous intent is still non-terminal. `reconcile_pending` re-blocks on the next protection-readiness refresh, so the window is the remainder of a loop iteration (the scan phase can take tens of seconds: NEXUS 10 s timeout per candidate).
 - Can duplicate order: NO directly (different symbol) · Corrupt state: NO · Bypass: YES (temporary)
 - **Repro:** `F010DurableBlockConflationTests`.
 - **Fix:** separate reasons (`orders_persist` vs `orders_unresolved`); only `reconcile_pending`/startup reconcile may clear `orders_unresolved`.
+- **Fixed (2026-10-02):** durable blocks are causal (INV-INTEGRITY-BLOCK-001..003). `bot/durable_execution.py` defines one reason per cause, each with a single proving owner: `orders` (= `ORDERS_PERSISTENCE`, legacy spelling, cleared only by `persist_orders` success), `orders_unresolved` (ambiguous dispatch, fill-timeout, startup/continuous unresolved intents, reconcile lookup unavailable; cleared only by order reconciliation proving no non-terminal intent), `orders_restore` (registry restore failure; cleared only by a successful restore), `protection_unconfirmed` (pilot protection postcondition; cleared only when `refresh_protection_readiness` proves readiness from exchange readback). `_clear` removes only its own reason (unknown reasons are no-ops); `blocked == bool(reasons)`. Logs `[INTEGRITY_BLOCK_ADDED|CLEARED|STILL_ACTIVE]`; readiness blockers now list `durable:<reason>`. Tests: `tests/test_causal_integrity_blocks*.py`.
+- **Same-class variant fixed:** a failed registry restore used to be cleared by the startup reconcile (`pending` empty because nothing was restored) and the next persist, re-authorizing entries with an unread registry.
+- **New finding F-010B (P2, not fixed):** after a failed restore, `reconcile_orders`/`persist_orders` still **write** the (empty/partial) in-memory registry over the unread durable snapshot, destroying the evidence a later restart would need. Entries now stay blocked (`orders_restore`), but the overwrite remains. Proposed: refuse `persist_orders` while `orders_restore` is active.
+- **Restart:** reasons are in-memory; on restart `restore_engine_state` + `reconcile_orders` rebuild `orders_unresolved` from durable non-terminal intents before any entry (proved by `test_m_restart_*`). `protection_unconfirmed` is rebuilt from `_unprotected_symbols`/protection readiness (still gated by `protection_system_ready`), not from durable storage.
 
 #### F-011 — Private-WS events mutate internal orders without identity validation; overfill accepted (FIXED)
 - `bot/kucoin.py:1853-1946`. Correlation by orderId, fallback by clientOid, **no check of symbol/side**; `registry.index_order_id(order_id, mo.client_oid)` maps any incoming orderId onto the internal order; `filled_qty` not bounded by `qty`.

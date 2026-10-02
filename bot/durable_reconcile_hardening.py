@@ -61,6 +61,9 @@ def install(durable_module, order_state_module, log) -> None:
         return
 
     original = durable_module.reconcile_orders
+    # F-010: the production module declares the causal unresolved-order reason;
+    # an injected module without causal reasons keeps its own legacy contract.
+    unresolved_reason = getattr(durable_module, "ORDERS_UNRESOLVED", "orders")
     OrderState = order_state_module.OrderState
 
     async def reconcile_orders_hardened(engine) -> bool:
@@ -70,7 +73,7 @@ def install(durable_module, order_state_module, log) -> None:
 
         pending = list(engine.orders.pending_orders())
         if not pending:
-            durable_module._clear(engine, "orders")
+            durable_module._clear(engine, unresolved_reason)
             return await durable_module.persist_orders(
                 engine, "startup_reconcile_hardened_empty", strict=True
             )
@@ -176,14 +179,14 @@ def install(durable_module, order_state_module, log) -> None:
 
         remaining = list(engine.orders.pending_orders())
         if remaining:
-            durable_module._block(engine, "orders")
+            durable_module._block(engine, unresolved_reason)
             log.critical(
                 "[DURABLE_RECONCILE] remaining_unresolved=%s; fail_closed=true; no retry sent",
                 len(remaining),
             )
             return False
 
-        durable_module._clear(engine, "orders")
+        durable_module._clear(engine, unresolved_reason)
         log.warning(
             "[DURABLE_RECONCILE] all restored intents resolved; new entries may "
             "proceed subject to normal gates execution_effect=NONE"

@@ -226,6 +226,9 @@ async def reconcile_pending(engine, *, min_interval_s: float = _MIN_INTERVAL_S) 
         return False
     pending = list(pending_reader() or [])
     if not pending:
+        # No non-terminal intent remains: the unresolved-order cause is proven
+        # resolved. Persistence/restore/protection reasons are not ours.
+        durable._clear(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
         return True
     if not getattr(engine, "connected", False):
         return False
@@ -240,7 +243,7 @@ async def reconcile_pending(engine, *, min_interval_s: float = _MIN_INTERVAL_S) 
 
     lookup = getattr(getattr(engine, "client", None), "get_order_by_client_oid", None)
     if not callable(lookup):
-        durable._block(engine, "orders")
+        durable._block(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
         return False
 
     changed = 0
@@ -281,13 +284,13 @@ async def reconcile_pending(engine, *, min_interval_s: float = _MIN_INTERVAL_S) 
         if not await durable.persist_orders(
             engine, "continuous_exchange_truth_reconcile", strict=True
         ):
-            durable._block(engine, "orders")
+            durable._block(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
             return False
 
     remaining = list(pending_reader() or [])
     if remaining or unresolved:
-        durable._block(engine, "orders")
+        durable._block(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
         return False
 
-    durable._clear(engine, "orders")
+    durable._clear(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
     return True

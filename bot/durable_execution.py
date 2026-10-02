@@ -21,19 +21,62 @@ _PAPER_KEY = "paper_runtime_state_v1"
 PAPER_STATE_KEY = _PAPER_KEY
 
 
-def _block(engine, reason: str):
+# Causal block reasons (F-010, INV-INTEGRITY-BLOCK-001..003). Each reason has
+# exactly one owner able to prove its resolution; clearing one reason never
+# touches another. ``"orders"`` keeps its legacy spelling and now means ONLY
+# "the order registry snapshot is not confirmed durable".
+ORDERS_PERSISTENCE = "orders"                    # cleared by: persist_orders success
+ORDERS_UNRESOLVED = "orders_unresolved"          # cleared by: order reconciliation, no pending intent
+ORDERS_RESTORE = "orders_restore"                # cleared by: successful registry restore
+PROTECTION_UNCONFIRMED = "protection_unconfirmed"  # cleared by: protection readiness readback
+
+
+def active_reasons(engine) -> tuple:
+    return tuple(sorted(getattr(engine, "_durable_state_errors", None) or ()))
+
+
+def _block(engine, reason: str, *, source: str = ""):
     errors = getattr(engine, "_durable_state_errors", None)
     if errors is None:
         errors = set()
         engine._durable_state_errors = errors
-    errors.add(str(reason))
+    reason = str(reason)
+    added = reason not in errors
+    errors.add(reason)
     engine._durable_state_ok = False
+    if added:
+        log.warning(
+            "[INTEGRITY_BLOCK_ADDED] domain=%s reason=%s active_reasons=%s source=%s",
+            reason.split("_", 1)[0], reason, ",".join(sorted(errors)), source or "unspecified",
+        )
 
 
-def _clear(engine, reason: str):
-    errors = getattr(engine, "_durable_state_errors", set())
-    errors.discard(str(reason))
+def _clear(engine, reason: str, *, source: str = ""):
+    """Remove only ``reason``; the caller must have proven that cause resolved.
+
+    Unknown or already-cleared reasons are a no-op and can never unblock
+    entries held by other active reasons.
+    """
+    errors = getattr(engine, "_durable_state_errors", None)
+    if errors is None:
+        errors = set()
+        engine._durable_state_errors = errors
+    reason = str(reason)
+    present = reason in errors
+    errors.discard(reason)
     engine._durable_state_ok = not errors
+    if present:
+        log.warning(
+            "[INTEGRITY_BLOCK_CLEARED] domain=%s reason=%s active_reasons=%s source=%s",
+            reason.split("_", 1)[0], reason, ",".join(sorted(errors)) or "NONE",
+            source or "unspecified",
+        )
+    if errors and present:
+        log.warning(
+            "[INTEGRITY_BLOCK_STILL_ACTIVE] cleared=%s active_reasons=%s source=%s "
+            "new_entries=BLOCKED",
+            reason, ",".join(sorted(errors)), source or "unspecified",
+        )
 
 
 def can_open(engine) -> bool:
@@ -157,10 +200,11 @@ async def persist_orders(engine, reason: str, *, strict: bool = False) -> bool:
                 "orders": engine.orders.snapshot(),
             }, separators=(",", ":"), sort_keys=True)
             await db.save_key_value(_ORDER_KEY, payload, strict=True)
-        _clear(engine, "orders")
+        # Proves persistence health only, never that an order is resolved.
+        _clear(engine, ORDERS_PERSISTENCE, source="persist_orders")
         return True
     except Exception as exc:
-        _block(engine, "orders")
+        _block(engine, ORDERS_PERSISTENCE, source="persist_orders")
         log.critical(
             "[DURABLE_ORDER] persistence failed; new entries blocked: %s: %s",
             type(exc).__name__, exc,
@@ -269,9 +313,9 @@ async def restore_engine_state(engine) -> bool:
                 "[DURABLE_ORDER] restored orders=%s pending=%s",
                 len(engine.orders), len(engine.orders.pending_orders()),
             )
-        _clear(engine, "orders")
+        _clear(engine, ORDERS_RESTORE, source="restore_engine_state")
     except Exception as exc:
-        _block(engine, "orders")
+        _block(engine, ORDERS_RESTORE, source="restore_engine_state")
         log.critical("[DURABLE_ORDER] restore failed; new entries blocked: %s", exc)
 
     if not getattr(engine, "paper_trade", False):
@@ -349,7 +393,7 @@ async def reconcile_orders(engine) -> bool:
     """
     pending = list(engine.orders.pending_orders())
     if not pending:
-        _clear(engine, "orders")
+        _clear(engine, ORDERS_UNRESOLVED, source="startup_reconcile")
         return True
 
     unresolved = []
@@ -384,11 +428,12 @@ async def reconcile_orders(engine) -> bool:
             unresolved.append(order.client_oid)
 
     saved = await persist_orders(engine, "startup_reconcile", strict=True)
-    if unresolved:
-        _block(engine, "orders")
+    if unresolved or engine.orders.pending_orders():
+        _block(engine, ORDERS_UNRESOLVED, source="startup_reconcile")
         log.critical(
             "[DURABLE_ORDER] unresolved intents=%s; new entries blocked; no retry sent",
             len(unresolved),
         )
         return False
+    _clear(engine, ORDERS_UNRESOLVED, source="startup_reconcile")
     return saved

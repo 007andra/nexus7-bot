@@ -114,7 +114,8 @@ def install(TradingEngine, kucoin_mod, log):
                 try:
                     from bot import durable_execution as durable
                     if getattr(self, "_durable_state_enforced", False):
-                        durable._block(self, "orders")
+                        durable._block(self, durable.PROTECTION_UNCONFIRMED,
+                                       source="protection_postcondition")
                 except Exception as block_exc:
                     log.error(
                         "[PROTECTION_POSTCONDITION] %s durable block failed: %s",
@@ -145,7 +146,8 @@ def install(TradingEngine, kucoin_mod, log):
                     try:
                         from bot import durable_execution as durable
                         if getattr(self, "_durable_state_enforced", False):
-                            durable._block(self, "orders")
+                            durable._block(self, durable.PROTECTION_UNCONFIRMED,
+                                           source="protection_postcondition")
                     except Exception as block_exc:
                         log.error(
                             "[PROTECTION_POSTCONDITION] %s durable block failed: %s",

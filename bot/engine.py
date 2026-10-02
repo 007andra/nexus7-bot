@@ -3120,7 +3120,8 @@ class TradingEngine:
                             await durable.persist_orders(
                                 self, "ambiguous_dispatch", strict=False
                             )
-                            durable._block(self, "orders")
+                            durable._block(self, durable.ORDERS_UNRESOLVED,
+                                           source="ambiguous_dispatch")
                         break
 
                     _oid_for_registry = _order.get("orderId", "") if _order else ""
@@ -3329,7 +3330,8 @@ class TradingEngine:
                                 self, "fill_timeout_reconcile", strict=False
                             )
                             if sig.symbol not in self.positions:
-                                durable._block(self, "orders")
+                                durable._block(self, durable.ORDERS_UNRESOLVED,
+                                               source="fill_timeout_reconcile")
                         last_exc = RuntimeError(
                             f"ordem {_oid_real} não confirmada como FILLED"
                         )

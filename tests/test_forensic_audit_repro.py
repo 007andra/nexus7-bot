@@ -135,13 +135,13 @@ class F002NativeTpslReadinessBypassTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# F-010 (P1) — the durable "orders" block reason is shared between
-# "unresolved/ambiguous order" and "persistence failed". Any later successful
-# persist (e.g. a private-WS transition of another order) clears it while the
-# ambiguous order is still non-terminal.
+# F-010 (P1, FIXED) — the durable "orders" block reason used to be shared
+# between "unresolved/ambiguous order" and "persistence failed", so any later
+# successful persist cleared it while the ambiguous order was non-terminal.
+# Full coverage: tests/test_causal_integrity_blocks*.py.
 # ---------------------------------------------------------------------------
 class F010DurableBlockConflationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_successful_persist_clears_ambiguity_block(self):
+    async def test_successful_persist_does_not_clear_ambiguity_block(self):
         from bot import durable_execution as durable
         from bot.order_state import OrderRegistry, OrderState
 
@@ -149,15 +149,16 @@ class F010DurableBlockConflationTests(unittest.IsolatedAsyncioTestCase):
                                  _durable_state_ok=True, _durable_order_lock=asyncio.Lock())
         ambiguous, _ = engine.orders.get_or_create("bgx7-ambiguous", "BTCUSDT", "Buy", 2.0)
         ambiguous.transition(OrderState.SUBMITTING, source="LOCAL")
-        durable._block(engine, "orders")          # engine.py ambiguous_dispatch path
+        durable._block(engine, durable.ORDERS_UNRESOLVED)   # engine.py ambiguous_dispatch path
         self.assertFalse(durable.can_open(engine))
 
         with patch.object(durable.db, "save_key_value", AsyncMock(return_value=True)):
             await durable.persist_orders(engine, "private_ws_transition")
 
         self.assertEqual(len(engine.orders.pending_orders()), 1, "still unresolved")
-        # Defect: entries are authorised again although the intent is unresolved.
-        self.assertTrue(durable.can_open(engine))
+        # FIXED: persistence success proves persistence health only.
+        self.assertFalse(durable.can_open(engine))
+        self.assertEqual(durable.active_reasons(engine), (durable.ORDERS_UNRESOLVED,))
 
 
 # ---------------------------------------------------------------------------
