@@ -14,6 +14,7 @@ import json
 import os
 import time
 from bisect import bisect_right
+from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -26,6 +27,7 @@ from bot.backtest import (
 )
 from bot.binance_research_data import (
     FundingObservation,
+    daily_book_depth_url,
     daily_metrics_url,
     download_archive_verified,
     monthly_funding_url,
@@ -34,10 +36,15 @@ from bot.binance_research_data import (
     parse_kline_archive,
 )
 from bot.binance_historical_context import (
+    BookDepthSnapshot,
+    BookDepthTimeline,
     MetricsObservation,
     MetricsTimeline,
+    parse_book_depth_archive,
     parse_metrics_archive,
+    shadow_microstructure_context,
 )
+from bot.candidate_trace import ensure_candidate_id
 from bot.config import cfg
 from bot.execution_cost import static_slippage_rate
 from bot.nexus_oos_edge_gate import (
@@ -227,6 +234,84 @@ async def load_verified_metrics(
         artifacts.append(artifact)
 
     return [by_ts[key] for key in sorted(by_ts)], tuple(artifacts)
+
+
+async def load_verified_book_depth(
+    symbol: str,
+    dates: Sequence[str],
+    *,
+    cache_dir: str | Path | None = None,
+    concurrency: int = 8,
+) -> tuple[
+    list[BookDepthSnapshot],
+    tuple[ResearchArtifact, ...],
+    tuple[str, ...],
+]:
+    """Load candidate-day Binance bookDepth with bounded concurrency.
+
+    Missing daily archives are observational gaps. Corrupt archives, checksum
+    mismatches and schema violations still fail closed.
+    """
+    limit = int(concurrency)
+    if limit < 1 or limit > 32:
+        raise ValueError("bookDepth concurrency must be in [1,32]")
+    semaphore = asyncio.Semaphore(limit)
+
+    async def load_one(source_date: str):
+        async with semaphore:
+            url = daily_book_depth_url(symbol, source_date)
+            try:
+                archive = await download_archive_verified(
+                    url, cache_path=_archive_cache_path(cache_dir, url)
+                )
+            except RuntimeError as exc:
+                if "HTTP 404" in str(exc):
+                    return source_date, None, None
+                raise
+            rows = parse_book_depth_archive(
+                archive.payload, source_date=source_date
+            )
+            artifact = ResearchArtifact(
+                source=url,
+                dataset="bookDepth",
+                symbol=str(symbol).upper(),
+                interval="5m",
+                sha256=archive.sha256,
+                rows=len(rows),
+                first_ts=rows[0].timestamp_ms if rows else None,
+                last_ts=rows[-1].timestamp_ms if rows else None,
+            )
+            return source_date, rows, artifact
+
+    loaded = await asyncio.gather(
+        *(load_one(source_date) for source_date in dates)
+    )
+    by_ts: dict[int, BookDepthSnapshot] = {}
+    artifacts: list[ResearchArtifact] = []
+    missing: list[str] = []
+    for source_date, rows, artifact in loaded:
+        if rows is None or artifact is None:
+            missing.append(source_date)
+            continue
+        for row in rows:
+            key = int(row.timestamp_ms)
+            if key in by_ts and by_ts[key] != row:
+                raise ValueError("conflicting Binance bookDepth timestamp")
+            by_ts[key] = row
+        artifacts.append(artifact)
+
+    return (
+        [by_ts[key] for key in sorted(by_ts)],
+        tuple(artifacts),
+        tuple(sorted(missing)),
+    )
+
+
+def _utc_date_from_ms(timestamp_ms: int) -> str:
+    return datetime.fromtimestamp(
+        int(timestamp_ms) / 1000.0,
+        tz=timezone.utc,
+    ).date().isoformat()
 
 
 def derivatives_context_at(
@@ -591,6 +676,7 @@ async def replay_symbol(
             continue
 
         direction = str(sig.direction).upper()
+        candidate_id = ensure_candidate_id(sig)
         outcome = simulate_net_r(
             direction=direction,
             signal_entry=float(sig.entry),
@@ -648,12 +734,96 @@ async def replay_symbol(
             float(r_multiple),
         ).validate())
         diagnostics.append({
+            "candidate_id": candidate_id,
             "timestamp": decision_ts,
             "direction": direction,
+            "signal_score": float(getattr(sig, "score", 0.0) or 0.0),
+            "nexus_expected_value_pct": float(
+                getattr(nx, "expected_value", 0.0) or 0.0
+            ),
+            "nexus_rr_net": float(
+                getattr(nx, "risk_reward", 0.0) or 0.0
+            ),
+            "nexus_setup_quality": float(
+                getattr(nx, "setup_quality", 0.0) or 0.0
+            ),
+            "nexus_regime_compat": float(
+                getattr(nx, "regime_compat", 0.0) or 0.0
+            ),
+            "nexus_confidence": float(
+                getattr(nx, "confidence", 0.0) or 0.0
+            ),
+            "nexus_data_quality": float(
+                getattr(nx, "data_quality", 0.0) or 0.0
+            ),
+            "nexus_market_regime": str(
+                getattr(nx, "market_regime", "UNKNOWN") or "UNKNOWN"
+            ),
+            "round_trip_cost": 2.0 * fee_rate + 2.0 * slippage,
+            "r_multiple": float(r_multiple),
             "derivatives_context_complete": context_complete,
             "metrics_age_ms": derivatives["metrics_age_ms"],
             **diag,
         })
+
+    candidate_dates = tuple(sorted({
+        _utc_date_from_ms(item["timestamp"])
+        for item in diagnostics
+    }))
+    book_depth_rows: list[BookDepthSnapshot] = []
+    book_depth_artifacts: tuple[ResearchArtifact, ...] = ()
+    book_depth_missing_dates: tuple[str, ...] = ()
+    if candidate_dates:
+        (
+            book_depth_rows,
+            book_depth_artifacts,
+            book_depth_missing_dates,
+        ) = await load_verified_book_depth(
+            symbol,
+            candidate_dates,
+            cache_dir=cache_dir,
+        )
+        artifacts = artifacts + book_depth_artifacts
+
+    depth_timeline = BookDepthTimeline(book_depth_rows)
+    micro_available = 0
+    micro_missing = 0
+    micro_quarantined = 0
+    for item in diagnostics:
+        ts = int(item["timestamp"])
+        current_metrics, previous_metrics = metrics_timeline.asof(ts)
+        depth_snapshot = depth_timeline.asof(ts)
+        micro = shadow_microstructure_context(
+            depth_snapshot,
+            current_metrics,
+            previous_metrics,
+            decision_ts_ms=ts,
+            side=str(item["direction"]),
+        )
+        item["shadow_microstructure"] = micro
+        if depth_snapshot is not None:
+            summary = depth_snapshot.summary()
+            bid = summary.get("bid_notional_1pct")
+            ask = summary.get("ask_notional_1pct")
+            item["depth_notional_1pct"] = (
+                float(bid) + float(ask)
+                if bid is not None and ask is not None
+                else None
+            )
+            item["book_depth_source_date"] = depth_snapshot.source_date
+        else:
+            item["depth_notional_1pct"] = None
+            item["book_depth_source_date"] = None
+
+        if micro.get("available") is True:
+            micro_available += 1
+        else:
+            micro_missing += 1
+        if (
+            depth_snapshot is not None
+            and depth_snapshot.quality != "OK"
+        ):
+            micro_quarantined += 1
 
     return (
         {
@@ -663,6 +833,12 @@ async def replay_symbol(
             "candles_4h": len(k4h),
             "funding_events": len(funding),
             "metrics_rows": len(metric_rows),
+            "book_depth_rows": len(book_depth_rows),
+            "book_depth_candidate_dates": len(candidate_dates),
+            "book_depth_missing_dates": list(book_depth_missing_dates),
+            "shadow_microstructure_available": micro_available,
+            "shadow_microstructure_missing": micro_missing,
+            "shadow_microstructure_quarantined": micro_quarantined,
             "derivative_context_complete": derivative_context_complete,
             "derivative_context_missing": derivative_context_missing,
             "approved": approved,
@@ -680,7 +856,10 @@ async def replay_symbol(
                 "historical_open_interest": bool(metric_rows),
                 "historical_long_short_ratio": bool(metric_rows),
                 "metrics_label_shift_normalized": True,
-                "historical_orderbook": False,
+                "historical_orderbook": bool(book_depth_rows),
+                "book_depth_candidate_day_sampling": True,
+                "book_depth_missing_dates": list(book_depth_missing_dates),
+                "book_depth_score_effect": "NONE",
                 "orderbook_affects_current_score": False,
                 "checksums_verified": True,
                 "parity_complete": (
