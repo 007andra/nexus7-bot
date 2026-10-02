@@ -85,6 +85,35 @@ def rank_score(item: Opportunity) -> float:
     return float(score)
 
 
+def with_microstructure(item: Opportunity, snapshot) -> Opportunity:
+    """Attach a complete same-symbol SHADOW snapshot without execution authority."""
+    if snapshot is None or not bool(getattr(snapshot, "complete", False)):
+        raise ValueError("complete microstructure snapshot required")
+    if str(getattr(snapshot, "symbol", "")).upper() != item.symbol.upper():
+        raise ValueError("microstructure symbol mismatch")
+    if getattr(snapshot, "execution_effect", None) != "NONE":
+        raise ValueError("microstructure snapshot cannot affect execution")
+    if bool(getattr(snapshot, "promotion_authority", False)):
+        raise ValueError("microstructure snapshot cannot promote")
+
+    return Opportunity(
+        candidate_id=item.candidate_id,
+        symbol=item.symbol,
+        expected_value=item.expected_value,
+        net_rr=item.net_rr,
+        setup_score=item.setup_score,
+        liquidity_score=item.liquidity_score,
+        regime_confidence=item.regime_confidence,
+        round_trip_cost=item.round_trip_cost,
+        decision_ts=item.decision_ts,
+        side=item.side,
+        confidence=item.confidence,
+        microstructure_alignment=float(snapshot.microstructure_alignment),
+        taker_pressure=float(snapshot.taker_pressure),
+        depth_notional_1pct=float(snapshot.depth_notional_100bps),
+    )
+
+
 def rank_opportunities(items: Sequence[Opportunity]) -> list[tuple[Opportunity, float]]:
     ranked = [(item, rank_score(item)) for item in items]
     return sorted(
