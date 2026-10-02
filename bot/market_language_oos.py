@@ -11,7 +11,7 @@ import random
 from statistics import median
 from typing import Iterable, Mapping, Sequence
 
-from bot.execution_cost import static_round_trip_cost_fraction
+from bot.execution_cost import LEGACY_CONSERVATIVE_TAKER_FEE, static_slippage_rate
 from bot.market_language import forecast_market_language
 
 
