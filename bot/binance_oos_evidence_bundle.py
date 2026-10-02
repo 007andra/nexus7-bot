@@ -18,7 +18,10 @@ from bot.binance_oos_replay import month_range, replay_symbol
 from bot.nexus_oos_edge_gate import build_edge_report, edge_promotion_decision
 from bot.nexus_oos_robustness import analyze_robustness
 from bot.nexus_oos_calibration import calibrate_walk_forward
-from bot.oos_model_validation import ValidationRow, purged_walk_forward
+from bot.oos_model_validation import (
+    ValidationRow,
+    label_aware_purged_embargo_walk_forward,
+)
 from bot.opportunity_ranker import (
     Opportunity,
     apply_cross_sectional_liquidity,
@@ -111,28 +114,54 @@ def build_robustness_report(symbol_reports: list[dict]) -> dict:
 
 def build_calibration_report(symbol_reports: list[dict]) -> dict:
     rows = []
+    missing_label_end = 0
+
     for symbol_report in symbol_reports:
+        diagnostics_by_ts = {}
+        for diagnostic in symbol_report.get("candidate_diagnostics", []) or []:
+            try:
+                ts = float(diagnostic["timestamp"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if ts in diagnostics_by_ts:
+                raise RuntimeError(
+                    f"duplicate calibration diagnostic timestamp: {ts}"
+                )
+            diagnostics_by_ts[ts] = diagnostic
+
         for candidate in symbol_report.get("candidates", []) or []:
             if not candidate.baseline_eligible or not candidate.outcome_known:
                 continue
+            ts = float(candidate.timestamp)
+            diagnostic = diagnostics_by_ts.get(ts)
+            if not isinstance(diagnostic, dict) or diagnostic.get("exit_ts") is None:
+                missing_label_end += 1
+                continue
+            try:
+                label_end = float(diagnostic["exit_ts"])
+            except (TypeError, ValueError, OverflowError):
+                missing_label_end += 1
+                continue
             r_value = float(candidate.r_multiple)
             rows.append(ValidationRow(
-                timestamp=float(candidate.timestamp),
+                timestamp=ts,
                 confidence=float(candidate.confidence),
                 outcome=1 if r_value > 0.0 else 0,
                 r_multiple=r_value,
-            ))
+                label_end_timestamp=label_end,
+            ).validate())
+
     rows.sort(key=lambda row: row.timestamp)
 
-    # Fixed evidence requirements: never shrink windows to manufacture a pass.
-    folds = purged_walk_forward(
+    folds = label_aware_purged_embargo_walk_forward(
         rows,
         train_size=200,
         test_size=75,
-        purge_size=4,
-        step_size=75,
+        embargo_size=4,
     )
     blockers = []
+    if missing_label_end:
+        blockers.append("MISSING_LABEL_END_TIMESTAMPS")
     if len(folds) < 4:
         blockers.append("INSUFFICIENT_CALIBRATION_OOS_FOLDS")
 
@@ -164,11 +193,15 @@ def build_calibration_report(symbol_reports: list[dict]) -> dict:
 
     return {
         "fold_count": len(folds),
+        "rows_with_label_end": len(rows),
+        "missing_label_end": missing_label_end,
         "evidence_complete": not blockers,
         "evidence_blockers": tuple(blockers),
         "methods": methods,
         "fit_scope": "TRAIN_ONLY",
         "evaluation_scope": "OOS_ONLY",
+        "purge_basis": "ACTUAL_LABEL_END_TIMESTAMP",
+        "embargo_rows": 4,
         "live_probability_effect": "NONE",
         "promotion_authority": False,
     }
