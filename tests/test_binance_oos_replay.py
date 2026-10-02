@@ -15,7 +15,6 @@ from bot.binance_oos_replay import (
     month_range,
 )
 from bot.binance_research_data import FundingObservation
-from bot.binance_historical_context import BookDepthSnapshot
 
 
 class BinanceOOSReplayTests(unittest.TestCase):
