@@ -58,8 +58,25 @@ class BinanceOOSReplayTests(unittest.TestCase):
                 convention="END_LABEL",
             ),
         ]
+        timeline = MetricsTimeline(rows)
+        first_context, first_complete = derivatives_context_at(
+            timeline,
+            2500,
+            previous_candidate_oi=None,
+            max_age_ms=1000,
+        )
+        self.assertTrue(first_complete)
+        self.assertIsNone(first_context["oi_delta"])
+        self.assertEqual(
+            first_context["oi_delta_reference"],
+            "PREVIOUS_NEXUS_CANDIDATE",
+        )
+
         context, complete = derivatives_context_at(
-            MetricsTimeline(rows), 2500, max_age_ms=1000
+            timeline,
+            2500,
+            previous_candidate_oi=100.0,
+            max_age_ms=1000,
         )
         self.assertTrue(complete)
         self.assertAlmostEqual(context["oi_delta"], 0.01)
