@@ -5,6 +5,7 @@ from bot.oos_model_validation import (
     aggregate_oos_report,
     brier_score,
     expected_calibration_error,
+    label_aware_purged_embargo_walk_forward,
     log_loss,
     promotion_decision,
     purged_walk_forward,
@@ -33,6 +34,47 @@ class OOSModelValidationTests(unittest.TestCase):
             self.assertEqual(len(fold.test), 10)
             self.assertLess(fold.train[-1].timestamp, fold.test[0].timestamp)
             self.assertGreaterEqual(fold.test[0].timestamp - fold.train[-1].timestamp, 6)
+
+    def test_label_aware_split_excludes_train_labels_crossing_test_start(self):
+        rows = []
+        for i in range(40):
+            # Row 9 is decided before the first test but its outcome becomes
+            # known inside that test window, so it must not enter training.
+            label_end = float(i)
+            if i == 9:
+                label_end = 12.0
+            rows.append(ValidationRow(
+                float(i),
+                0.6,
+                1 if i % 2 else 0,
+                1.0 if i % 2 else -1.0,
+                label_end_timestamp=label_end,
+            ))
+        folds = label_aware_purged_embargo_walk_forward(
+            rows,
+            train_size=9,
+            test_size=5,
+            embargo_size=2,
+        )
+        self.assertTrue(folds)
+        first = folds[0]
+        self.assertEqual(first.test[0].timestamp, 10.0)
+        self.assertNotIn(9.0, [row.timestamp for row in first.train])
+        self.assertTrue(all(
+            (row.label_end_timestamp or row.timestamp)
+            < first.test[0].timestamp
+            for row in first.train
+        ))
+
+    def test_label_aware_split_rejects_overlapping_step_and_embargo(self):
+        with self.assertRaises(ValueError):
+            label_aware_purged_embargo_walk_forward(
+                _rows(80),
+                train_size=30,
+                test_size=10,
+                embargo_size=3,
+                step_size=10,
+            )
 
     def test_brier_and_ece_are_bounded(self):
         vals = _rows(100)
