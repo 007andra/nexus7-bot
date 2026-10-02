@@ -42,6 +42,19 @@ class MicrostructureShadowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "stale order book"):
             build_snapshot("BTCUSDT", depth, self.trades, observed_at_ms=self.now)
 
+    def test_rest_depth_without_event_time_uses_collection_time(self):
+        depth = {
+            "lastUpdateId": 123,
+            "bids": self.depth["bids"],
+            "asks": self.depth["asks"],
+        }
+        snap = build_snapshot(
+            "BTCUSDT", depth, self.trades,
+            observed_at_ms=self.now,
+        )
+        self.assertEqual(snap.book_event_ms, self.now)
+        self.assertTrue(snap.complete)
+
     def test_future_trade_fails_closed(self):
         trades = list(self.trades) + [{"T": self.now + 1, "p": "100", "q": "1", "m": False}]
         with self.assertRaisesRegex(ValueError, "invalid trade timestamp"):
