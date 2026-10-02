@@ -354,7 +354,8 @@ assert inspect.getclosurevars(BinanceClient.place_order).nonlocals['original_pla
     def test_effective_wrapper_order(self):
         self.assertEqual([m for m, _ in chain(core.TradingEngine._open)], [
             "bot.post_trade_forensics", "bot.operator_loss_policy", "bot.legacy_pretrade_advisory",
-            "bot.pilot_risk_cap_hardening", "bot.pilot_live_runtime", "bot.binance_protection_failclosed", "bot.engine"])
+            "bot.min_order_feasibility", "bot.pilot_risk_cap_hardening",
+            "bot.pilot_live_runtime", "bot.binance_protection_failclosed", "bot.engine"])
         self.assertEqual([m for m, _ in chain(core.TradingEngine._refresh_entry_balance)], [
             "bot.binance_cross_portfolio_stress", "bot.pilot_risk_cap_hardening", "bot.pilot_live_runtime",
             "bot.paper_wallet", "bot.engine"])
