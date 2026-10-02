@@ -5,7 +5,6 @@ Multi-Timeframe: 4H → 1H → 15M
 Entrada antecipada: BOS_BREAK > MOMENTUM > PULLBACK
 Indicadores: ADX, BB Width, Choppiness, VWAP, SMC, Delta, OB Imbalance
 """
-import hashlib
 import os
 import numpy as np
 from dataclasses import dataclass, field
@@ -140,31 +139,6 @@ def _rr_from_unrounded_levels(entry: float, raw_sl: float, raw_tp: float) -> flo
         return 0.0
     return abs(raw_tp - entry) / risk
 
-
-def _candidate_id(
-    *,
-    symbol: str,
-    direction: str,
-    formation_bucket: int,
-    entry: float,
-    sl: float,
-    tp: float,
-    score: int,
-    entry_type: str,
-) -> str:
-    """Stable observability id for one 15m setup; never used as trade authority."""
-    payload = "|".join((
-        str(symbol).upper(),
-        str(direction).upper(),
-        str(int(formation_bucket)),
-        f"{float(entry):.12g}",
-        f"{float(sl):.12g}",
-        f"{float(tp):.12g}",
-        str(int(score)),
-        str(entry_type).upper(),
-    ))
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-    return f"nx7-{str(symbol).upper()}-{int(formation_bucket)}-{digest}"
 
 
 @dataclass
@@ -778,16 +752,8 @@ class Analyzer:
         if formation_timestamp > 0:
             signal._bgx_formation_timestamp = formation_timestamp
             signal._bgx_formation_bucket = int(formation_timestamp // 900)
-            signal._bgx_setup_id = _candidate_id(
-                symbol=symbol,
-                direction=direction,
-                formation_bucket=signal._bgx_formation_bucket,
-                entry=price,
-                sl=sl,
-                tp=tp,
-                score=int(combined),
-                entry_type=entry_type,
-            )
+            from bot.candidate_trace import ensure_candidate_id
+            ensure_candidate_id(signal)
         signal._bgx_4h_bias = "LONG" if bull_4h else ("SHORT" if bear_4h else "NEUTRAL")
         signal._bgx_1h_bias = "LONG" if bull_1h else ("SHORT" if bear_1h else "NEUTRAL")
         signal._bgx_15m_bias = (
