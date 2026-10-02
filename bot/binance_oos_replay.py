@@ -512,6 +512,7 @@ def simulate_net_r(
         net / risk_fraction,
         {
             "gross_return": gross,
+            "net_return": net,
             "fee_drag": fees,
             "funding_pnl": funding,
             "funding_events": funding_count,
