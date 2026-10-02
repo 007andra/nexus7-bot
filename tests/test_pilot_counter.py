@@ -152,6 +152,9 @@ class PilotCounterTests(PilotFixture):
         session.post.return_value = LostResponse()
         self.client._session = session
         self.client._execution_ownership = object()
+        # READY_FOR_NEW_ENTRIES is enforced at the transport boundary (F-002).
+        ready = ValidExecutionTestContext(self.client, self.engine.instruments).engine
+        ready._execution_ownership_valid = True
         try:
             with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()):
                 result = await self.client._post(

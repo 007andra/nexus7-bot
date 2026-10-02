@@ -72,6 +72,7 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
             mutations=[]
             async def dispatch(authority,label):
                 c=kucoin.KuCoinClient(); c._execution_ownership=authority
+                c._engine=_engine(self.info)  # READY_FOR_NEW_ENTRIES (F-002 transport gate)
                 c._ensure_session=AsyncMock(); c._throttle=AsyncMock()
                 c._auth_headers=lambda *a,**k:{}
                 class CM:
@@ -181,6 +182,7 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
 
     async def test_restart_B_after_accept_before_ack_lookup_no_second_post(self):
         c=kucoin.KuCoinClient(); c._execution_ownership=object(); c._ensure_session=AsyncMock(); c._throttle=AsyncMock(); c._auth_headers=lambda *a,**k:{}
+        c._engine=_engine(self.info)  # READY_FOR_NEW_ENTRIES (F-002 transport gate)
         created=[]
         class CM:
             async def __aenter__(self): created.append("bgx7-B"); raise asyncio.TimeoutError()
