@@ -2,6 +2,7 @@ import unittest
 
 from bot.binance_oos_evidence_bundle import (
     assert_population_parity,
+    build_opportunity_ranking_report,
     build_primary_report,
     build_robustness_report,
     build_sensitivity_report,
