@@ -11,6 +11,21 @@ import time
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from bot.feature_contract import FeatureSchema, FeatureSpec
+
+
+MICROSTRUCTURE_FEATURE_SCHEMA = FeatureSchema(
+    version="microstructure-v1",
+    features=(
+        FeatureSpec("spread_bps"),
+        FeatureSpec("book_imbalance"),
+        FeatureSpec("taker_pressure"),
+        FeatureSpec("depth_notional_10bps"),
+        FeatureSpec("depth_notional_100bps"),
+        FeatureSpec("microstructure_alignment"),
+    ),
+)
+
 
 @dataclass(frozen=True)
 class MicrostructureSnapshot:
@@ -35,6 +50,23 @@ class MicrostructureSnapshot:
             key: getattr(self, key)
             for key in self.__dataclass_fields__
         }
+
+    def feature_values(self) -> dict[str, float]:
+        return MICROSTRUCTURE_FEATURE_SCHEMA.validate({
+            "spread_bps": self.spread_bps,
+            "book_imbalance": self.book_imbalance,
+            "taker_pressure": self.taker_pressure,
+            "depth_notional_10bps": self.depth_notional_10bps,
+            "depth_notional_100bps": self.depth_notional_100bps,
+            "microstructure_alignment": self.microstructure_alignment,
+        })
+
+    def feature_fingerprint(self) -> str:
+        return MICROSTRUCTURE_FEATURE_SCHEMA.fingerprint(
+            self.feature_values(),
+            symbol=self.symbol,
+            decision_ts=self.observed_at_ms,
+        )
 
 
 def _finite(value: object, *, name: str) -> float:
