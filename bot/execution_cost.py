@@ -179,7 +179,16 @@ def rr_breakdown(entry: float, sl: float, tp: float, cost_fraction: float) -> di
 def candidate_id(sig) -> str:
     from bot.candidate_trace import ensure_candidate_id
 
-    return ensure_candidate_id(sig)
+    try:
+        return ensure_candidate_id(sig)
+    except ValueError:
+        # Compatibility-only identity for read-only cost calibration doubles
+        # that predate full Signal geometry. The executable engine separately
+        # calls ensure_candidate_id() and therefore still fails closed before
+        # dispatch if a real signal lacks required lineage fields.
+        symbol = str(getattr(sig, "symbol", "UNKNOWN") or "UNKNOWN")
+        entry = _finite(getattr(sig, "entry", 0.0))
+        return f"compat:{symbol}:{entry:.10g}"
 
 
 async def fetch_taker_fee(client, symbol: str) -> tuple[float, float | None, str]:
