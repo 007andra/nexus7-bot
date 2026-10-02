@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_DOWN
 from bot import database as db
 from bot.confirmed_rr_exit import identity, _persist
 from bot.conditional_stop_protection import _instrument_info, _to_base_size
+from bot.exit_geometry import initial_risk_per_unit, log_geometry
 from bot.logger import log
 from bot.quantity import quantity_rules, validate_base_quantity
 
@@ -30,7 +31,10 @@ async def check(engine):
                 if pos.direction not in ('LONG', 'SHORT'):
                     raise ValueError('invalid partial direction')
                 profit = price-entry if pos.direction == 'LONG' else entry-price
-                if abs(entry-stop) <= 0 or profit < abs(entry-stop) + entry*0.0003:
+                # Q-01 INV-INITIAL-RISK-001: 1R is the trade's initial risk, not
+                # the current (possibly trailed) stop distance. Unknown -> skip.
+                risk = initial_risk_per_unit(pos)
+                if risk is None or profit < risk + entry*0.0003:
                     continue
                 info = engine.instruments[symbol]
                 multiplier, lot, _, _ = quantity_rules(info)
@@ -88,6 +92,7 @@ async def check(engine):
                 engine._pending_partial_symbols.discard(symbol)
                 continue
             pos.qty = remaining
+            log_geometry(pos, 'PARTIAL_EXIT_STATE', closed_qty=state.get('qty'), tp1_hit=True)
             if state.get('protected') is not True:
                 engine._unprotected_symbols.add(symbol)
                 if await engine.client.set_sl(symbol, pos.entry) is not True:

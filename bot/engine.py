@@ -97,6 +97,11 @@ class Position:
         self.tp          = sig.tp
         self.score       = sig.score
         self.qty         = qty
+        # Q-01: immutable trade geometry. initial_sl defines 1R for the whole
+        # trade (BE/trailing move self.sl, never this); peak_price is the best
+        # price seen, independent of the quantity still held.
+        self.initial_sl  = sig.sl
+        self.peak_price  = sig.entry
         self.opened_at   = datetime.utcnow()
         self.pnl         = 0.0
         self.peak_pnl    = 0.0
@@ -125,6 +130,9 @@ class Position:
             self.pnl = (self.entry - current_price) * self.qty
         if self.pnl > self.peak_pnl:
             self.peak_pnl = self.pnl
+        peak = getattr(self, "peak_price", None)
+        if peak is None or (current_price > peak if self.direction == "LONG" else current_price < peak):
+            self.peak_price = current_price
 
     def pnl_pct(self) -> float:
         if self.entry <= 0 or self.qty <= 0:
@@ -151,12 +159,14 @@ class Position:
             return None
         self.trailing_active = True
         # Trava TRAILING_LOCK % abaixo do pico de preço
+        # Q-01: peak in PRICE units; a partial exit must not inflate it.
+        from bot.exit_geometry import peak_excursion
         if self.direction == "LONG":
-            peak_price = self.entry + (self.peak_pnl / self.qty if self.qty > 0 else 0)
+            peak_price = self.entry + peak_excursion(self)
             new_sl = peak_price * (1 - cfg.TRAILING_LOCK * 0.1)
             return max(new_sl, self.sl)   # nunca recua abaixo do SL original
         else:
-            peak_price = self.entry - (self.peak_pnl / self.qty if self.qty > 0 else 0)
+            peak_price = self.entry - peak_excursion(self)
             new_sl = peak_price * (1 + cfg.TRAILING_LOCK * 0.1)
             return min(new_sl, self.sl)   # nunca recua acima do SL original
 
@@ -1401,6 +1411,7 @@ class TradingEngine:
 
                 sig = Signal(sym, direction, ep, sl, tp, 0.75, "Reconciled orphan", 75)
                 pos = Position(sig, _base_qty)
+                pos.initial_sl = None   # Q-01: rebuilt from exchange; real initial risk unknown
                 pos.pnl = upnl
                 cur = float(p.get("markPrice", ep))
                 pos.update_pnl(cur)
@@ -1571,6 +1582,7 @@ class TradingEngine:
 
                         sig = Signal(sym, direction, ep, sl, tp, 0.75, "sync exchange", 75)
                         pos = Position(sig, _base_sz)
+                        pos.initial_sl = None   # Q-01: rebuilt from exchange; real initial risk unknown
                         pos.pnl = float(bp.get("unrealisedPnl", 0))
                         cur = float(bp.get("markPrice", ep))
                         pos.update_pnl(cur)
@@ -1832,8 +1844,9 @@ class TradingEngine:
                 # TP1 = entry ± distância do SL (1:1 R:R)
                 # RISK-2: adiciona custo estimado de funding (8h × 0.01% = 0.08%)
                 # para garantir que partial TP seja genuinamente lucrativo
-                risk_dist    = abs(pos.entry - pos.sl)
-                if risk_dist <= 0:
+                from bot.exit_geometry import initial_risk_per_unit
+                risk_dist    = initial_risk_per_unit(pos)   # Q-01: 1R inicial
+                if risk_dist is None:
                     continue
                 funding_cost = pos.entry * 0.0001 * 3  # 3 períodos de 8h = 0.03%
                 tp1_long  = pos.entry + risk_dist + funding_cost
@@ -1991,8 +2004,11 @@ class TradingEngine:
             return await check(self)
         for sym, pos in list(self.positions.items()):
             try:
-                risk_dist   = abs(pos.entry - pos.sl)   # distância SL original
-                if risk_dist <= 0:
+                # Q-01: distância do SL ORIGINAL (initial_sl), não do SL atual
+                # (após break-even |entry - sl| = 0 e o 2R nunca disparava).
+                from bot.exit_geometry import initial_risk_per_unit
+                risk_dist   = initial_risk_per_unit(pos)
+                if risk_dist is None:
                     continue
 
                 price = pos.current_price or pos.entry
@@ -3650,6 +3666,7 @@ class TradingEngine:
 
                 sig = Signal(sym, direction, ep, sl, tp, 0.75, "Startup sync", 75)
                 pos = Position(sig, _base_size)
+                pos.initial_sl = None   # Q-01: rebuilt from exchange; real initial risk unknown
                 pos.pnl = upnl
                 cur = float(p.get("markPrice", ep))
                 pos.update_pnl(cur)

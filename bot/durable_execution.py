@@ -111,6 +111,9 @@ def _position_record(position) -> dict:
         "qty_original": position.qty_original,
         "opened_at": position.opened_at.isoformat(),
         "peak_pnl": position.peak_pnl,
+        # Q-01 trade geometry (None = initial risk unknown -> R exits fail closed).
+        "initial_sl": getattr(position, "initial_sl", None),
+        "peak_price": getattr(position, "peak_price", None),
         "trailing_sl": position.trailing_sl,
         "trailing_active": position.trailing_active,
         "trailing_milestone": position.trailing_milestone,
@@ -178,6 +181,18 @@ def _restore_position(record: dict):
         opened_at = opened_at.astimezone(timezone.utc).replace(tzinfo=None)
     position.opened_at = opened_at
     position.peak_pnl = _nonnegative(record.get("peak_pnl", 0), "peak_pnl")
+    # Q-01: legacy snapshots lack the geometry fields. initial risk is never
+    # invented (None -> discretionary R exits fail closed, protection kept);
+    # the peak price falls back to peak_pnl/qty_original, which can only
+    # understate the excursion (peak_pnl never accrued on more than that qty).
+    raw_initial = record.get("initial_sl")
+    position.initial_sl = None if raw_initial is None else _positive(raw_initial, "initial_sl")
+    raw_peak = record.get("peak_price")
+    if raw_peak is None:
+        from bot.exit_geometry import peak_excursion
+        excursion = peak_excursion(position)
+        raw_peak = entry + excursion if direction == "LONG" else entry - excursion
+    position.peak_price = _positive(raw_peak, "peak_price")
     position.trailing_sl = _positive(record.get("trailing_sl", sl), "trailing_sl")
     position.trailing_active = bool(record.get("trailing_active", False))
     position.trailing_milestone = int(record.get("trailing_milestone", 0))

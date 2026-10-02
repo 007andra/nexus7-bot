@@ -58,8 +58,9 @@ def install(TradingEngine, KuCoinClient, taker_fee: float, log) -> None:
                 if not cur or cur <= 0:
                     continue
 
-                risk_dist = abs(pos.entry - pos.sl)
-                if risk_dist <= 0:
+                from bot.exit_geometry import initial_risk_per_unit
+                risk_dist = initial_risk_per_unit(pos)   # Q-01: initial 1R
+                if risk_dist is None:
                     continue
                 funding_cost = pos.entry * 0.0001 * 3
                 tp1_price = (

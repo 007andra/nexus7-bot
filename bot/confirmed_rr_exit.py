@@ -43,7 +43,10 @@ async def check(engine):
             if state is not None and (not isinstance(state, dict) or state.get('idem') != idem or not state.get('client_oid')):
                 raise ValueError('invalid durable RR exit')
             if state is None:
-                distance = abs(entry - stop)
+                # Q-01: 2R is measured on the initial risk; after BE the current
+                # stop distance is 0 and the exit could never fire.
+                from bot.exit_geometry import initial_risk_per_unit
+                distance = initial_risk_per_unit(position) or 0.0
                 profit = price - entry if position.direction == 'LONG' else entry - price
                 if distance <= 0 or profit < 2 * distance:
                     continue

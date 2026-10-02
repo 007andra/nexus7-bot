@@ -147,6 +147,7 @@ def install(TradingEngine, log) -> None:
 
                 sig = Signal(sym, direction, ep, sl, tp, 0.75, "Startup sync", 75)
                 pos = Position(sig, base_size)
+                pos.initial_sl = None  # Q-01: rebuilt from exchange; initial risk unknown
                 pos.pnl = upnl
                 try:
                     cur = float(p.get("markPrice", ep) or ep)
