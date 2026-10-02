@@ -6,7 +6,7 @@ on:
       start_month:
         description: "First complete research month (YYYY-MM)"
         required: true
-        default: "2025-01"
+        default: "2026-01"
       end_month:
         description: "Last complete research month (YYYY-MM)"
         required: true
@@ -25,6 +25,7 @@ jobs:
       contents: read
     env:
       PAPER_TRADE: "true"
+      EXCHANGE: "binance"
       LIVE_TRADING_CONFIRMED: ""
       NEXUS_PILOT_ENABLED: "false"
       PYTHONHASHSEED: "0"
