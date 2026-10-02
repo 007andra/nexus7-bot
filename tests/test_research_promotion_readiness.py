@@ -54,6 +54,9 @@ def _bundle():
         "methodology": {
             "venue": "BINANCE_USDM",
             "source": "data.binance.vision",
+            "evidence_claim": "NEXUS_SELECTION_EDGE",
+            "execution_pnl_claim": False,
+            "instrument_rule_parity": "NOT_MODELED_BY_ALPHA_REPLAY",
             "universe_selection": "PREDECLARED_FIXED_PANEL",
             "claim_scope": "SYMBOL_PANEL_ONLY",
             "symbol_universe": _required_symbols(),
