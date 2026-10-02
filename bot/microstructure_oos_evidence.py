@@ -149,6 +149,22 @@ def _fold_means(values: Sequence[float], folds: int = 4) -> tuple[float, ...]:
     return tuple(out)
 
 
+def _group_uplift(rows: Sequence[Mapping[str, object]], key: str) -> dict:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        label = str(row.get(key, "UNKNOWN") or "UNKNOWN").upper()
+        grouped[label].append(float(row["top_pick_uplift_r"]))
+    return {
+        label: {
+            "batches": len(values),
+            "mean_top_pick_uplift_r": sum(values) / len(values),
+            "positive_batches": sum(1 for value in values if value > 0.0),
+        }
+        for label, values in sorted(grouped.items())
+        if values
+    }
+
+
 def evaluate_microstructure_ranking(
     symbol_reports: Sequence[Mapping[str, object]],
     *,
@@ -238,10 +254,30 @@ def evaluate_microstructure_ranking(
             spearman_deltas.append(spear_delta)
         changed += int(base_top != enriched_top)
         comparable_candidates += len(rows)
+        enriched_by_id = {
+            item.candidate_id: item for item in enriched
+        }
+        enriched_top_item = enriched_by_id[enriched_top]
+        source_row = None
+        for symbol_report in symbol_reports:
+            if str(symbol_report.get("symbol", "") or "").upper() != enriched_top_item.symbol:
+                continue
+            for diagnostic in symbol_report.get("candidate_diagnostics", []) or []:
+                if diagnostic.get("candidate_id") == enriched_top:
+                    source_row = diagnostic
+                    break
+            if source_row is not None:
+                break
+
         batch_rows.append({
             "decision_ts": int(decision_ts),
             "timestamp": int(decision_ts),
             "candidates": len(rows),
+            "enriched_top_symbol": enriched_top_item.symbol,
+            "enriched_top_regime": str(
+                (source_row or {}).get("nexus_market_regime", "UNKNOWN")
+                or "UNKNOWN"
+            ).upper(),
             "base_top_candidate_id": base_top,
             "enriched_top_candidate_id": enriched_top,
             "top_candidate_id": enriched_top,
@@ -302,6 +338,19 @@ def evaluate_microstructure_ranking(
         else None
     )
 
+    by_symbol = _group_uplift(batch_rows, "enriched_top_symbol")
+    by_regime = _group_uplift(batch_rows, "enriched_top_regime")
+    symbols_evaluated = len(by_symbol)
+    regimes_evaluated = len(by_regime)
+    positive_symbols = sum(
+        1 for item in by_symbol.values()
+        if item["mean_top_pick_uplift_r"] > 0.0
+    )
+    positive_regimes = sum(
+        1 for item in by_regime.values()
+        if item["mean_top_pick_uplift_r"] > 0.0
+    )
+
     return {
         "status": (
             "EVIDENCE_AVAILABLE"
@@ -347,6 +396,12 @@ def evaluate_microstructure_ranking(
         "temporal_fold_uplift_r": fold_uplift,
         "temporal_folds_evaluated": len(fold_uplift),
         "positive_uplift_folds": sum(1 for value in fold_uplift if value > 0),
+        "by_symbol": by_symbol,
+        "symbols_evaluated": symbols_evaluated,
+        "positive_uplift_symbols": positive_symbols,
+        "by_regime": by_regime,
+        "regimes_evaluated": regimes_evaluated,
+        "positive_uplift_regimes": positive_regimes,
         "batches": batch_rows,
         "details": batch_rows,
         "outcome_used_in_rank": False,
