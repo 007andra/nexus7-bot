@@ -20,6 +20,7 @@ from bot.nexus_oos_robustness import analyze_robustness
 from bot.nexus_oos_calibration import calibrate_walk_forward
 from bot.oos_model_validation import ValidationRow, purged_walk_forward
 from bot.research_manifest import ResearchManifest
+from bot.research_sensitivity import incremental_cost_surface
 
 
 REPLAY_SOURCE = "binance_oos_replay"
@@ -167,6 +168,39 @@ def build_calibration_report(symbol_reports: list[dict]) -> dict:
     }
 
 
+def build_sensitivity_report(symbol_reports: list[dict]) -> dict:
+    """Attach honest cost sensitivity; parameter grid requires independent replays."""
+    base_net_returns = []
+    for symbol_report in symbol_reports:
+        for diagnostic in symbol_report.get("candidate_diagnostics", []) or []:
+            try:
+                base_net_returns.append(float(diagnostic["net_return"]))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+
+    execution_cost = (
+        incremental_cost_surface(base_net_returns)
+        if base_net_returns
+        else {
+            "status": "NOT_RUN",
+            "reason": "NO_NET_RETURN_DIAGNOSTICS",
+            "points": [],
+            "promotion_effect": "NONE",
+        }
+    )
+    return {
+        "parameter": {
+            "status": "NOT_RUN",
+            "reason": "REQUIRES_INDEPENDENT_REPLAY_PARAMETER_GRID",
+            "parameter_sets": 0,
+            "promotion_effect": "NONE",
+        },
+        "execution_cost": execution_cost,
+        "execution_effect": "NONE",
+        "promotion_authority": False,
+    }
+
+
 def assert_population_parity(primary: dict, robustness: dict) -> None:
     primary_symbols = {
         item["symbol"]: int(item.get("candidate_count", 0))
@@ -220,6 +254,7 @@ async def run(
     primary = build_primary_report(reports)
     robustness = build_robustness_report(reports)
     calibration = build_calibration_report(reports)
+    sensitivity = build_sensitivity_report(reports)
     assert_population_parity(primary, robustness)
 
     manifest = ResearchManifest(
@@ -233,6 +268,7 @@ async def run(
         "primary": primary,
         "robustness": robustness,
         "calibration": calibration,
+        "sensitivity": sensitivity,
         "manifest": manifest.canonical_dict(),
         "manifest_hash": manifest.fingerprint,
         "methodology": {
