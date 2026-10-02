@@ -13,13 +13,13 @@ import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import aiohttp
 
 _BASE = "https://data.binance.vision/data/futures/um/monthly"
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{5,30}$")
 _INTERVAL_RE = re.compile(r"^(1m|3m|5m|15m|30m|1h|2h|4h|6h|8h|12h|1d)$")
+_SHA_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 
 
 def _symbol(value: str) -> str:
@@ -95,6 +95,14 @@ class FundingObservation:
     timestamp: int
     funding_interval_hours: int
     funding_rate: float
+
+
+@dataclass(frozen=True)
+class VerifiedArchive:
+    url: str
+    sha256: str
+    bytes_size: int
+    payload: bytes
 
 
 def _csv_rows_from_zip(payload: bytes) -> list[list[str]]:
@@ -173,19 +181,34 @@ def archive_sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-async def download_archive(
-    url: str,
-    *,
-    cache_path: str | Path | None = None,
-    timeout_s: float = 30.0,
-) -> bytes:
-    """Download one allowlisted Binance Vision zip with optional deterministic cache."""
-    if not str(url).startswith(_BASE + "/"):
-        raise ValueError("research archive host/path not allowlisted")
-    path = Path(cache_path) if cache_path is not None else None
-    if path is not None and path.exists():
-        return await asyncio.to_thread(path.read_bytes)
+def parse_checksum_text(text: str, *, expected_filename: str | None = None) -> str:
+    """Parse Binance Vision sha256 sidecar format and optionally bind filename."""
+    fields = str(text or "").strip().split()
+    if not fields or not _SHA_RE.fullmatch(fields[0]):
+        raise ValueError("invalid Binance checksum sidecar")
+    if expected_filename is not None and len(fields) >= 2:
+        named = fields[1].lstrip("*")
+        if Path(named).name != Path(expected_filename).name:
+            raise ValueError("checksum filename mismatch")
+    return fields[0].lower()
 
+
+def verify_archive_checksum(
+    payload: bytes,
+    checksum_text: str,
+    *,
+    expected_filename: str | None = None,
+) -> str:
+    expected = parse_checksum_text(
+        checksum_text, expected_filename=expected_filename
+    )
+    actual = archive_sha256(payload)
+    if actual != expected:
+        raise ValueError("Binance archive checksum mismatch")
+    return actual
+
+
+async def _http_get_bytes(url: str, timeout_s: float) -> bytes:
     timeout = aiohttp.ClientTimeout(total=float(timeout_s))
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url) as response:
@@ -194,10 +217,77 @@ async def download_archive(
             payload = await response.read()
     if not payload:
         raise RuntimeError("Binance research archive returned empty body")
+    return payload
 
+
+async def download_archive(
+    url: str,
+    *,
+    cache_path: str | Path | None = None,
+    timeout_s: float = 30.0,
+) -> bytes:
+    """Download one allowlisted Binance Vision zip with optional atomic cache."""
+    if not str(url).startswith(_BASE + "/"):
+        raise ValueError("research archive host/path not allowlisted")
+    path = Path(cache_path) if cache_path is not None else None
+    if path is not None and path.exists():
+        return await asyncio.to_thread(path.read_bytes)
+
+    payload = await _http_get_bytes(url, timeout_s)
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         await asyncio.to_thread(tmp.write_bytes, payload)
         await asyncio.to_thread(tmp.replace, path)
     return payload
+
+
+async def download_archive_verified(
+    url: str,
+    *,
+    cache_path: str | Path | None = None,
+    timeout_s: float = 30.0,
+) -> VerifiedArchive:
+    """Download/cache one archive and fail closed unless official checksum matches."""
+    if not str(url).startswith(_BASE + "/") or not str(url).endswith(".zip"):
+        raise ValueError("research archive host/path not allowlisted")
+    path = Path(cache_path) if cache_path is not None else None
+    checksum_path = (
+        path.with_suffix(path.suffix + ".CHECKSUM") if path is not None else None
+    )
+
+    if path is not None and path.exists() and checksum_path and checksum_path.exists():
+        payload = await asyncio.to_thread(path.read_bytes)
+        checksum_text = await asyncio.to_thread(
+            checksum_path.read_text, encoding="utf-8"
+        )
+    else:
+        payload, checksum_bytes = await asyncio.gather(
+            _http_get_bytes(url, timeout_s),
+            _http_get_bytes(url + ".CHECKSUM", timeout_s),
+        )
+        checksum_text = checksum_bytes.decode("utf-8")
+        if path is not None and checksum_path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            checksum_tmp = checksum_path.with_suffix(
+                checksum_path.suffix + ".tmp"
+            )
+            await asyncio.to_thread(tmp.write_bytes, payload)
+            await asyncio.to_thread(
+                checksum_tmp.write_text, checksum_text, encoding="utf-8"
+            )
+            await asyncio.to_thread(tmp.replace, path)
+            await asyncio.to_thread(checksum_tmp.replace, checksum_path)
+
+    digest = verify_archive_checksum(
+        payload,
+        checksum_text,
+        expected_filename=Path(url).name,
+    )
+    return VerifiedArchive(
+        url=str(url),
+        sha256=digest,
+        bytes_size=len(payload),
+        payload=payload,
+    )
