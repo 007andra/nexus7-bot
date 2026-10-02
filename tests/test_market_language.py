@@ -1,7 +1,10 @@
+import ast
+import inspect
 import unittest
 from datetime import datetime, timezone
 
-import bot.market_language as market_language_module\nfrom bot.market_language import (
+import bot.market_language as market_language_module
+from bot.market_language import (
     forecast_batch,
     forecast_market_language,
     model_market_language,
