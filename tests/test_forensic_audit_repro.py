@@ -212,7 +212,7 @@ class F011PrivateWsIdentityTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# F-012 (P1) — naked-position emergency close passes exchange position size
+# F-012 (FIXED; severity corrected) — naked-position emergency close passed exchange position size
 # (KuCoin CONTRACTS) as place_order qty, which is BASE-asset quantity.
 # ---------------------------------------------------------------------------
 class F012NakedGuardUnitTests(unittest.IsolatedAsyncioTestCase):
@@ -253,9 +253,11 @@ class F012NakedGuardUnitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(captured.get("reduce_only"))
         sent_contracts = base_to_contracts(captured["qty"], _INSTRUMENT)
-        # Actual: qty=5.0 is interpreted as 5 BTC -> 5000 contracts for a
-        # 5-contract position (1000x). Correct would be 5 contracts.
-        self.assertEqual(sent_contracts, 5000)
+        # Raw (unlabelled) KuCoin rows are CONTRACTS. Before the fix qty=5.0
+        # was read as 5 BTC -> 5000 contracts (1000x). Production composition
+        # (KuCoinPositionUnitAdapter) was not affected; see
+        # tests/test_emergency_close_units.py for the composed-runtime proof.
+        self.assertEqual(sent_contracts, 5)
 
 
 # ---------------------------------------------------------------------------
