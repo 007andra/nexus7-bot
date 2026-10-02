@@ -6,7 +6,10 @@ from bot.microstructure_oos_evidence import (
 )
 
 
-def _row(candidate_id, ts, *, micro, depth, r, ev=1.0, setup=80.0):
+def _row(
+    candidate_id, ts, *, micro, depth, r, ev=1.0, setup=80.0,
+    regime="TREND",
+):
     return {
         "candidate_id": candidate_id,
         "timestamp": ts,
@@ -16,6 +19,7 @@ def _row(candidate_id, ts, *, micro, depth, r, ev=1.0, setup=80.0):
         "nexus_setup_quality": setup,
         "nexus_regime_compat": 80.0,
         "nexus_confidence": 70.0,
+        "nexus_market_regime": regime,
         "round_trip_cost": 0.001,
         "r_multiple": r,
         "depth_notional_1pct": depth,
@@ -76,6 +80,26 @@ class MicrostructureOOSEvidenceTests(unittest.TestCase):
             and batch["enriched_top_candidate_id"].startswith("btc-")
             for batch in result["batches"]
         ))
+
+    def test_evidence_decomposes_uplift_by_symbol_and_regime(self):
+        reports = _reports(8)
+        for index, row in enumerate(reports[0]["candidate_diagnostics"]):
+            row["nexus_market_regime"] = (
+                "TREND" if index < 4 else "RANGE"
+            )
+        result = evaluate_microstructure_ranking(
+            reports, bootstrap_samples=200, seed=9, temporal_folds=4
+        )
+        self.assertIn("BTCUSDT", result["by_symbol"])
+        self.assertGreater(
+            result["by_symbol"]["BTCUSDT"]["mean_top_pick_uplift_r"],
+            0,
+        )
+        self.assertEqual(result["symbols_evaluated"], 1)
+        self.assertEqual(result["positive_uplift_symbols"], 1)
+        self.assertEqual(set(result["by_regime"]), {"TREND", "RANGE"})
+        self.assertEqual(result["regimes_evaluated"], 2)
+        self.assertEqual(result["positive_uplift_regimes"], 2)
 
     def test_realized_outcomes_do_not_change_pretrade_candidate_ids(self):
         reports = _reports()
