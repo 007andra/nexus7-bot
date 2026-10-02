@@ -40,6 +40,9 @@ class PostfillExchange:
         self.mark = mark
         self.fail_stop_create = fail_stop_create
         self.keep_active = keep_active           # F-013A: entry order still working after fills
+        self.liquidation = None                  # NOVO-F013A-1: position-row fields
+        self.inline_stop = None
+        self.native_legs = True                  # exchange created the st-orders legs
         self.position = None                     # {"qty": signed contracts, "entry": avg}
         self.stops, self.orders, self.fills = [], {}, []
         self.calls = []
@@ -77,9 +80,14 @@ class PostfillExchange:
         if path.endswith("/api/v1/positions"):
             rows = []
             if self.position and self.position["qty"]:
-                rows.append({"symbol": self.kc, "currentQty": self.position["qty"],
-                             "avgEntryPrice": self.position["entry"],
-                             "markPrice": self.mark or self.position["entry"]})
+                row = {"symbol": self.kc, "currentQty": self.position["qty"],
+                       "avgEntryPrice": self.position["entry"],
+                       "markPrice": self.mark or self.position["entry"]}
+                if self.liquidation:
+                    row["liquidationPrice"] = self.liquidation
+                if self.inline_stop:
+                    row["stopLoss"] = self.inline_stop
+                rows.append(row)
             return _ok(rows)
         if path.endswith("/api/v1/stopOrders"):
             return _ok({"items": [dict(s) for s in self.active_stops()]})
@@ -110,7 +118,8 @@ class PostfillExchange:
             if self.fail_stop_create:
                 return Resp({"code": "300000", "msg": "stop rejected"})
             sid = self._id("st")
-            self.stops.append(dict(body, id=sid, status="active", isActive=True))
+            self.stops.append(dict(body, id=sid, status="active", isActive=True,
+                                   createdAt=int(time.time() * 1000)))
             return _ok({"orderId": sid})
         return _ok({"orderId": self._id("kc")})
 
@@ -147,16 +156,17 @@ class PostfillExchange:
                             "isActive": bool(self.keep_active),
                             "cancelExist": filled < requested and not self.keep_active,
                             "status": "open" if self.keep_active else "done",
-                            "reduceOnly": False,
+                            "reduceOnly": False, "createdAt": int(time.time() * 1000),
                             **{k: body[k] for k in ("triggerStopUpPrice", "triggerStopDownPrice")
                                if k in body}}
         close_side = "sell" if sign > 0 else "buy"
         for key, kind in (("triggerStopDownPrice", "down"), ("triggerStopUpPrice", "up")):
-            if body.get(key):
+            if body.get(key) and (self.native_legs is True or kind in (self.native_legs or ())):
                 self.stops.append({"id": self._id("leg"), "clientOid": "", "symbol": self.kc,
                                    "side": close_side, "stop": kind, "stopPrice": float(body[key]),
                                    "stopPriceType": "TP", "closeOrder": True, "reduceOnly": True,
-                                   "type": "market", "status": "active", "isActive": True})
+                                   "type": "market", "status": "active", "isActive": True,
+                                   "createdAt": int(time.time() * 1000)})
         return _ok({"orderId": oid})
 
     # -- F-013A scenario helpers ----------------------------------------------
@@ -197,3 +207,17 @@ class PostfillExchange:
     def partial_exit(self, contracts):
         sign = 1 if self.position["qty"] > 0 else -1
         self.position["qty"] = sign * (abs(self.position["qty"]) - contracts)
+
+    def add_stop(self, price, *, side, stop, client_oid="", created_ms=None, close=True):
+        """A conditional order already on the exchange (stale/foreign/manual)."""
+        self.stops.append({"id": self._id("pre"), "clientOid": client_oid, "symbol": self.kc,
+                           "side": side, "stop": stop, "stopPrice": float(price),
+                           "stopPriceType": "TP", "closeOrder": close, "reduceOnly": True,
+                           "type": "market", "status": "active", "isActive": True,
+                           "createdAt": created_ms or int(time.time() * 1000)})
+
+    def drop_legs(self, kind):
+        """Remove the native leg of ``kind`` ('down'|'up') — e.g. missing SL/TP."""
+        for s in self.stops:
+            if s["id"].startswith("leg") and s["stop"] == kind:
+                s["status"] = "cancelled"

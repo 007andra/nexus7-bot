@@ -154,7 +154,8 @@ class ExitGeometryTests(unittest.TestCase):
 
     def test_reconstructed_positions_have_unknown_initial_risk(self):
         src = open(core.__file__, encoding="utf-8").read()
-        self.assertEqual(src.count("pos.initial_sl = None"), 3)
+        # 4th site: NOVO-F013A-1 timeout adoption (geometry confirmed only by F-013).
+        self.assertEqual(src.count("pos.initial_sl = None"), 4)
         from bot import startup_position_unit_hardening as sp
         self.assertIn("pos.initial_sl = None", open(sp.__file__, encoding="utf-8").read())
         pos = _pos()

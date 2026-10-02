@@ -194,6 +194,12 @@ async def _exchange_stop(client, symbol, direction):
     return max(triggers) if direction == "LONG" else min(triggers)
 
 
+def _looser(direction, live_stop, recorded_stop):
+    live, recorded = float(live_stop), float(recorded_stop)
+    tolerance = max(1e-9, abs(recorded) * 1e-9)
+    return live < recorded - tolerance if direction == "LONG" else live > recorded + tolerance
+
+
 def _entry_grew(position, record, lifecycle):
     """Current entry qty (exchange exposure + BGX-proven reductions) above the
     entry qty the stored geometry was confirmed for."""
@@ -252,6 +258,11 @@ async def restore(engine, symbol):
                     reason = "trade_lifecycle_not_open"
                 elif _entry_grew(position, record, lifecycle):
                     reason = "entry_qty_grew_after_confirmation"
+                elif stop is not None and _looser(position.direction, stop, record["initial_sl"]):
+                    # NOVO-F013A-1: stops only tighten after confirmation, so a
+                    # live stop LOOSER than the recorded initial stop means the
+                    # record is not this exchange truth -> never overrides it.
+                    reason = "durable_geometry_contradicts_exchange_stop"
                 else:
                     reason = validate(record, entry=position.entry)
         except Exception as exc:
@@ -268,7 +279,7 @@ async def restore(engine, symbol):
                 planned_tp=record["initial_tp"], order_id=oid, reason="restart_after_late_entry_fill",
                 opened_ms=lifecycle.get("opened_at_ms"), reduced_qty=lifecycle["confirmed_reduced_qty"])
             position.tp1_hit = bool(getattr(position, "tp1_hit", False) or record["tp1_hit"])
-        elif reason == "exit_geometry_unavailable":
+        elif reason in ("exit_geometry_unavailable", "durable_geometry_contradicts_exchange_stop"):
             # F-013: crash between fill and geometry confirmation. The entry was
             # proven by the restart ownership proof; the stop is read from the
             # exchange by the post-fill reconciliation — never fabricated.

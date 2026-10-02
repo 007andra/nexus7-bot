@@ -197,55 +197,6 @@ def candidate_stop(direction, fill, qty, cost, budget, tick, *, planned_entry=No
     return quantize_protective(raw, tick, direction)
 
 
-# ── Exchange reads ───────────────────────────────────────────────────────────
-async def _exchange_view(client, symbol, direction):
-    """(position_row, active_stop, active_tp, active_stop_order) from one read."""
-    from bot.conditional_stop_protection import _instrument_info, _protective_order, read_stop_orders
-    rows = await client.get_positions()
-    row = next((r for r in rows or [] if r.get("symbol") == symbol
-                and (_pos(r.get("size")) or 0) > 0), None)
-    if row is None:
-        return None, None, None, None
-    orders = await read_stop_orders(client, symbol)
-    if orders is None:
-        return row, None, None, None
-    info = _instrument_info(client, symbol)
-    stops, tps = [], []
-    inline = _pos(row.get("stopLoss"))
-    if inline:
-        stops.append((inline, None))
-    mark = _pos(row.get("markPrice")) or _pos(row.get("avgPrice", row.get("entryPrice")))
-    close_side = "sell" if direction == "LONG" else "buy"
-    for order in orders:
-        qualifies, full, amount = _protective_order(order, row, symbol, info)
-        price = _pos(order.get("stopPrice"))
-        if qualifies and price and (full or amount > 0):
-            stops.append((price, order))
-        elif price and mark and str(order.get("side", "")).lower() == close_side \
-                and (order.get("closeOrder") is True or order.get("reduceOnly") is True) \
-                and ((direction == "LONG" and price > mark) or (direction == "SHORT" and price < mark)):
-            tps.append(price)
-    best = (max(stops, key=lambda x: x[0]) if direction == "LONG"
-            else min(stops, key=lambda x: x[0])) if stops else (None, None)
-    tp = (min(tps) if direction == "LONG" else max(tps)) if tps else None
-    return row, best[0], tp, best[1]
-
-
-async def _is_this_trades_stop(client, symbol, direction, row, active, order, native, planned_sl, tick):
-    """The level sent natively, or a BGX stop owned by THIS lineage (F-001A/Q-01C)."""
-    if native is None:
-        return True                     # restart: no planned level; exchange truth only
-    if _same_level(active, native, tick) or _same_level(active, planned_sl, tick):
-        return True
-    from bot import conditional_stop_lifecycle as lifecycle
-    if isinstance(order, dict) and lifecycle.is_bgx_owned(order):
-        lineage = lifecycle.position_lineage(client, symbol, row)
-        side = "sell" if direction == "LONG" else "buy"
-        return await lifecycle.owned_for_lineage(client, symbol, side, "SL", lineage,
-                                                 str(order.get("clientOid") or ""))
-    return False
-
-
 def _same_level(a, b, tick):
     if a is None or b is None:
         return False
@@ -255,12 +206,13 @@ def _same_level(a, b, tick):
 # ── Reconciliation ───────────────────────────────────────────────────────────
 def mark_unconfirmed(position, *, planned_entry=None, planned_sl=None, planned_tp=None,
                      order_id="", status=None, reason="pending", proven_entry=None, opened_ms=None,
-                     reduced_qty=None):
+                     reduced_qty=None, client_oid=""):
     position.initial_sl = None            # R-based exits fail closed until proven
     position._postfill_state = UNCONFIRMED
     position._postfill_version = None
     position._postfill = {"planned_entry": planned_entry, "planned_sl": planned_sl,
                           "planned_tp": planned_tp, "order_id": str(order_id or ""),
+                          "client_oid": str(client_oid or ""),
                           "status": dict(status or {}), "proven_entry": proven_entry,
                           "opened_ms": int(opened_ms or time.time() * 1000),
                           # restart: BGX-proven reductions already applied to this entry
@@ -329,7 +281,7 @@ async def _entry_fill(client, symbol, ctx, multiplier, row):
         size = _pos(row.get("size"))
         if size and _same_level(row.get("avgPrice", row.get("entryPrice")), ctx["proven_entry"], None):
             fill, terminal = Fill(float(ctx["proven_entry"]), size, "restart_ownership_proof"), True
-    return fill, terminal
+    return fill, terminal, status
 
 
 async def _validate(engine, position, stage):
@@ -344,10 +296,12 @@ async def _validate(engine, position, stage):
     client = engine.client
     if multiplier is None:
         return _invalidate(position, "multiplier_unavailable")
-    row, active, active_tp, active_order = await _exchange_view(client, symbol, direction)
-    if row is None or active is None:
-        return _invalidate(position, "exchange_position_or_stop_unread")
-    fill, terminal = await _entry_fill(client, symbol, ctx, multiplier, row)
+    rows = await client.get_positions()
+    row = next((r for r in rows or [] if r.get("symbol") == symbol
+                and (_pos(r.get("size")) or 0) > 0), None)
+    if row is None:
+        return _invalidate(position, "exchange_position_unread")
+    fill, terminal, status = await _entry_fill(client, symbol, ctx, multiplier, row)
     if fill is None:
         return _invalidate(position, "fill_price_unproven")
     exposure = _pos(row.get("size")) or 0.0
@@ -368,12 +322,24 @@ async def _validate(engine, position, stage):
     log.info("[FILL_PRICE_AUTHORITY] symbol=%s opening_order_id=%s stage=%s fill_source=%s "
              "fill_price=%.10g entry_qty=%.12g terminal=%s late_fill=%s", symbol,
              ctx.get("order_id", "")[:16], stage, fill.source, fill.price, fill.qty, terminal, late)
+    # NOVO-F013A-1: the ACTIVE stop/TP are only those of THIS opening lineage
+    # (native st-orders legs or BGX stops owned for the lineage). Foreign,
+    # stale or fallback-estimated levels never become the trade geometry.
+    known = (version["stop"],) if version else ()
+    protection = await _lineage_protection(client, symbol, direction, ctx, status, tick, row, known)
+    if not protection.readable:
+        return _invalidate(position, "exchange_protection_unread")
+    if protection.sl is None:
+        return _invalidate(position, "no_active_stop_of_this_lineage")
+    if protection.foreign_tighter is not None:
+        return _invalidate(position, "foreign_tighter_stop_present",
+                           foreign_stop=protection.foreign_tighter, lineage_stop=protection.sl)
+    if not _pos(ctx.get("planned_sl")) and protection.native_sl:
+        ctx["planned_sl"] = protection.native_sl        # restart: the order's own trigger
+    if not _pos(ctx.get("planned_tp")) and protection.native_tp:
+        ctx["planned_tp"] = protection.native_tp
     planned_sl = ctx.get("planned_sl")
-    native = quantize_protective(planned_sl, tick, direction) if _pos(planned_sl) else None
-    known = version["stop"] if version else None
-    if not (_same_level(active, known, tick) or await _is_this_trades_stop(
-            client, symbol, direction, row, active, active_order, native, planned_sl, tick)):
-        return _invalidate(position, "active_stop_not_this_trade")
+    active, active_tp = protection.sl, protection.tp
     budget, cost = _budget(engine, symbol)
     if budget is None:
         return _invalidate(position, "risk_budget_unavailable")
@@ -398,15 +364,22 @@ async def _validate(engine, position, stage):
                 repaired = "INVALID_TRIGGER_SIDE"
         if decision.reason in (BETTER, FIRST_PROTECTION) and valid_side:
             ok = await client.set_position_stops(symbol, sl=candidate)
-            _, after, after_tp, _ = await _exchange_view(client, symbol, direction)
-            if after is None:
+            after = await _lineage_protection(client, symbol, direction, ctx, status, tick, None,
+                                              known + (candidate,))
+            if not after.readable or after.sl is None:
                 return _invalidate(position, "stop_readback_after_repair_failed")
-            repaired = "CONFIRMED" if ok and _same_level(after, candidate, tick) else "FAILED"
-            active = after                  # exchange truth, whatever happened
-            active_tp = after_tp if after_tp is not None else active_tp
+            repaired = "CONFIRMED" if ok and _same_level(after.sl, candidate, tick) else "FAILED"
+            active = after.sl                  # exchange truth, whatever happened
+            active_tp = after.tp if after.tp is not None else active_tp
     loss = projected_loss(exposure, fill.price, active, cost)
     state = CONFIRMED if loss <= budget * (1 + 1e-9) else OVER_BUDGET
     tp = active_tp if active_tp is not None else ctx.get("planned_tp")
+    if active_tp is None:
+        # Never invented: the lineage TP is not on the exchange (local target =
+        # the order's own planned/echoed TP when known, else unchanged).
+        log.critical("[NATIVE_PROTECTION_RECOVERY] symbol=%s opening_order_id=%s tp=MISSING_ON_EXCHANGE "
+                     "local_tp_source=%s", symbol, ctx.get("order_id", "")[:16],
+                     "lineage_planned" if tp is not None else "unchanged_unproven")
     _apply(position, fill, exposure, active, tp, state, terminal,
            new_initial=(version is None or repaired == "CONFIRMED"))
     if late:
@@ -426,6 +399,29 @@ async def _validate(engine, position, stage):
         "projected_loss=%.6f risk_budget=%.6f within_budget=%s",
         symbol, stage, state, exposure, fill.price, active, loss, budget, state == CONFIRMED)
     return state
+
+
+async def _lineage_protection(client, symbol, direction, ctx, status, tick, row, accept_levels):
+    from bot import conditional_stop_lifecycle as lifecycle
+    from bot import native_protection
+    lineage_row = row
+
+    async def owned(order, kind):
+        if lineage_row is None:
+            return False
+        side = "sell" if direction == "LONG" else "buy"
+        lineage = lifecycle.position_lineage(client, symbol, lineage_row)
+        return await lifecycle.owned_for_lineage(client, symbol, side, kind, lineage,
+                                                 str(order.get("clientOid") or ""))
+    if lineage_row is None:
+        rows = await client.get_positions()
+        lineage_row = next((r for r in rows or [] if r.get("symbol") == symbol
+                            and (_pos(r.get("size")) or 0) > 0), None)
+    return await native_protection.discover(
+        client, symbol, direction, order_id=ctx.get("order_id", ""),
+        client_oid=ctx.get("client_oid", ""), status=status, planned_sl=ctx.get("planned_sl"),
+        planned_tp=ctx.get("planned_tp"), tick=tick, row=lineage_row, lineage_owned=owned,
+        accept_levels=tuple(level for level in accept_levels if level is not None))
 
 
 async def _record_late_fill(position, entry_qty):
@@ -536,13 +532,14 @@ async def on_exposure_increase(engine, position, exchange_qty):
 
 
 async def adopt_after_timeout(engine, position, *, fill_status, order_id, planned_entry,
-                              planned_sl, planned_tp):
-    """A fill-timeout adoption of THIS order's position enters the pipeline."""
+                              planned_sl, planned_tp, client_oid=""):
+    """A fill-timeout adoption of THIS order's position enters the pipeline
+    (INV-TIMEOUT-GEOMETRY-001: same pipeline, same geometry as no timeout)."""
     if not order_id or position.symbol in (getattr(engine, "_external_position_symbols", set()) or set()):
         return getattr(position, "_postfill_state", None)
     return await reconcile_after_open(engine, position, fill_status=fill_status, order_id=order_id,
                                       planned_entry=planned_entry, planned_sl=planned_sl,
-                                      planned_tp=planned_tp)
+                                      planned_tp=planned_tp, client_oid=client_oid)
 
 
 def request_revalidation(engine, order_id):
@@ -564,11 +561,12 @@ RECONCILE_TIMEOUT_S = 15.0
 
 
 async def reconcile_after_open(engine, position, *, fill_status, order_id, planned_entry,
-                               planned_sl, planned_tp):
+                               planned_sl, planned_tp, client_oid=""):
     """First attempt inside _open (bounded); the LIVE loop retries while UNCONFIRMED."""
     import asyncio
     mark_unconfirmed(position, planned_entry=planned_entry, planned_sl=planned_sl,
-                     planned_tp=planned_tp, order_id=order_id, status=fill_status)
+                     planned_tp=planned_tp, order_id=order_id, status=fill_status,
+                     client_oid=client_oid)
     try:
         return await asyncio.wait_for(reconcile(engine, position), RECONCILE_TIMEOUT_S)
     except asyncio.TimeoutError:

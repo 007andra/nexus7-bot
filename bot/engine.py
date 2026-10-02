@@ -1244,6 +1244,96 @@ class TradingEngine:
 
         return float(contracts) * mult
 
+    async def _adopt_timeout_lineage(self, sym, row, direction, ep, upnl, ctx):
+        """NOVO-F013A-1: adopt the position of a timed-out opening order.
+
+        OPENING LINEAGE -> NATIVE st-orders PROTECTION -> AUTHORITATIVE ACTIVE
+        SL/TP -> F-013/F-013A reconciliation -> local Position. The Position is
+        created UNCONFIRMED (initial_sl=None); only postfill_geometry confirms
+        the geometry after fill authority, read-back and the F-003 recheck.
+        No ATR/liquidation estimate is ever sent or used as geometry."""
+        from bot import native_protection
+        from bot.conditional_stop_lifecycle import owned_for_lineage, position_lineage
+        if ctx.get("direction") != direction:
+            log.critical(
+                f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: lado da exchange ({direction}) ≠ "
+                f"opening order ({ctx.get('direction')}) — NÃO adotada; desprotegida até resolução"
+            )
+            self._unprotected_symbols.add(sym)
+            return None
+        try:
+            _base_qty = self._contracts_to_base_qty(sym, float(row.get("size", 0) or 0))
+        except ValueError as _ue:
+            log.critical(f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: {_ue} — não adotada")
+            self._unprotected_symbols.add(sym)
+            return None
+        tick = (getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize")
+        side = "sell" if direction == "LONG" else "buy"
+
+        async def _owned(order, kind):
+            lineage = position_lineage(self.client, sym, row)
+            return await owned_for_lineage(self.client, sym, side, kind, lineage,
+                                           str(order.get("clientOid") or ""))
+        prot = await native_protection.discover(
+            self.client, sym, direction, order_id=ctx.get("order_id", ""),
+            client_oid=ctx.get("client_oid", ""), planned_sl=ctx.get("planned_sl"),
+            planned_tp=ctx.get("planned_tp"), tick=tick, row=row, lineage_owned=_owned)
+        native_sl = prot.native_sl or ctx.get("planned_sl")
+        native_tp = prot.native_tp or ctx.get("planned_tp")
+        if prot.sl is None and prot.readable and native_sl:
+            # Missing protection: restore the ORIGINAL technical stop of this
+            # lineage (provable: echoed/dispatched trigger) — never an estimate.
+            try:
+                mark = float(row.get("markPrice", ep) or ep)
+            except (TypeError, ValueError):
+                mark = 0.0
+            valid = mark > 0 and (native_sl < mark if direction == "LONG" else native_sl > mark)
+            ok = False
+            if valid:
+                try:
+                    ok = await self.client.set_position_stops(sym, sl=native_sl)
+                except Exception as _se:
+                    log.error(f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: reaplicar stop original falhou: {_se}")
+            log.critical(
+                f"[NATIVE_PROTECTION_RECOVERY] {sym}: SL nativo ausente — stop ORIGINAL "
+                f"{native_sl} reaplicado={ok} trigger_valido={valid} fallback_ATR=NAO_USADO"
+            )
+            if ok:
+                prot = await native_protection.discover(
+                    self.client, sym, direction, order_id=ctx.get("order_id", ""),
+                    client_oid=ctx.get("client_oid", ""), planned_sl=ctx.get("planned_sl"),
+                    planned_tp=ctx.get("planned_tp"), tick=tick, row=row,
+                    lineage_owned=_owned, accept_levels=(native_sl,))
+        local_sl = prot.sl or native_sl
+        local_tp = prot.tp or native_tp
+        if not (local_sl and local_tp):
+            log.critical(f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: lineage sem níveis prováveis — "
+                         f"não adotada; desprotegida até resolução")
+            self._unprotected_symbols.add(sym)
+            return None
+        sig = Signal(sym, direction, ep, local_sl, local_tp, 0.75, "Timeout adoption (native)", 75)
+        pos = Position(sig, _base_qty)
+        pos.initial_sl = None            # confirmed only by postfill_geometry (F-013)
+        pos.pnl = upnl
+        pos._native_protection = prot
+        try:
+            pos.update_pnl(float(row.get("markPrice", ep) or ep))
+        except (TypeError, ValueError):
+            pass
+        self.positions[sym] = pos
+        if prot.sl is not None and prot.foreign_tighter is None:
+            self._unprotected_symbols.discard(sym)
+        else:
+            self._unprotected_symbols.add(sym)
+        log.warning(
+            f"🔧 [NATIVE_PROTECTION_RECOVERY] {sym}: adotada após timeout — opening_order_id="
+            f"{str(ctx.get('order_id', ''))[:16]} {direction} qty={_base_qty} avg={ep} "
+            f"native_sl={prot.native_sl} native_tp={prot.native_tp} level_source={prot.level_source} "
+            f"active_sl={prot.sl} sl_source={prot.sl_source} active_tp={prot.tp} "
+            f"ignored={prot.ignored} fallback_ATR=NAO_USADO initial_sl=NONE(postfill)"
+        )
+        return pos
+
     async def _reconcile_exchange_positions(self, only_symbol: str = None) -> list:
         """
         P0 (ADV-01) — descobre e protege posições que existem na
@@ -1390,6 +1480,34 @@ class TradingEngine:
 
                 direction = "LONG" if side == "Buy" else "SHORT"
 
+                # ══════════════════════════════════════════════════
+                # NOVO-F013A-1 — TIMEOUT ADOPTION OF A KNOWN LINEAGE
+                #
+                # A posição pertence à opening order que acabou de dar
+                # timeout: a proteção nativa (st-orders) dessa lineage é a
+                # autoridade. Timeout não é sinal de mercado — nunca troca
+                # o stop técnico por ATR/liquidação.
+                # (INV-TIMEOUT-GEOMETRY-001 / INV-NO-FALLBACK-STRATEGY-001)
+                # ══════════════════════════════════════════════════
+                _timeout_ctx = (getattr(self, "_timeout_adoptions", None) or {}).get(sym)
+                if _timeout_ctx and not self.paper_trade:
+                    await self._adopt_timeout_lineage(sym, p, direction, ep, upnl, _timeout_ctx)
+                    continue
+
+                # Origem desconhecida: uma proteção condicional já ativa na
+                # exchange nunca é substituída por uma estimativa.
+                _conditional_sl = None
+                if sl_existente <= 0 and not self.paper_trade:
+                    try:
+                        from bot.conditional_stop_protection import conditional_stop_confirmed
+                        from bot import exit_geometry_durability as _egd
+                        _protected, _ev = await conditional_stop_confirmed(self.client, p)
+                        if _protected and _ev != "inline_stop":
+                            _conditional_sl = await _egd._exchange_stop(self.client, sym, direction)
+                    except Exception as _ce:
+                        log.error(f"RECONCILE {sym}: leitura de proteção condicional falhou: {_ce}")
+                        _conditional_sl = None
+
                 # Preço de entrada vem da EXCHANGE (ep), nunca do ticker —
                 # exigência explícita da correção. SL/TP: usa o que já
                 # está na exchange se existir; caso contrário, calcula
@@ -1398,6 +1516,8 @@ class TradingEngine:
                 atr_est = ep * 0.007
                 if sl_existente > 0:
                     sl = sl_existente
+                elif _conditional_sl:
+                    sl = _conditional_sl
                 elif direction == "LONG":
                     sl = max(liq * 1.02, ep - atr_est * 1.5) if liq > 0 else ep - atr_est * 1.5
                 else:
@@ -1433,7 +1553,11 @@ class TradingEngine:
                 )
 
                 # ── Proteção: só marca protegida se a exchange confirmar ──
-                if sl_existente > 0:
+                if _conditional_sl:
+                    self._unprotected_symbols.discard(sym)
+                    log.info(f"✓ RECONCILE {sym}: proteção condicional já ativa "
+                             f"(${_conditional_sl:.6f}) — nenhum stop estimado enviado")
+                elif sl_existente > 0:
                     # A exchange já tinha um stop — nada a enviar, só
                     # confirmar que a marcação de risco está correta.
                     self._unprotected_symbols.discard(sym)
@@ -3356,6 +3480,15 @@ class TradingEngine:
                         # registrada com o entry price REAL da exchange
                         # (nunca ticker) e recebe SL/TP imediatamente.
                         # ══════════════════════════════════════════════
+                        _adoptions = dict(getattr(self, "_timeout_adoptions", None) or {})
+                        _adoptions[sig.symbol] = {
+                            "order_id": _oid_real,
+                            "client_oid": (_order or {}).get("clientOid", "") or "",
+                            "direction": sig.direction, "planned_entry": sig.entry,
+                            "planned_sl": sig.sl, "planned_tp": sig.tp,
+                            "status": (_fill_check.get("status") or {}),
+                        }
+                        self._timeout_adoptions = _adoptions
                         try:
                             _ainda_desprotegidos = await self._reconcile_exchange_positions(
                                 only_symbol=sig.symbol
@@ -3367,11 +3500,15 @@ class TradingEngine:
                                 # stop, F-003 budget) instead of living with an
                                 # orphan geometry and initial_sl=None forever.
                                 from bot import postfill_geometry
+                                _adopted = self.positions[sig.symbol]
+                                _native = getattr(_adopted, "_native_protection", None)
                                 await postfill_geometry.adopt_after_timeout(
-                                    self, self.positions[sig.symbol],
+                                    self, _adopted,
                                     fill_status=(_fill_check.get("status") or {}),
                                     order_id=_oid_real, planned_entry=sig.entry,
-                                    planned_sl=sig.sl, planned_tp=sig.tp,
+                                    planned_sl=(getattr(_native, "native_sl", None) or sig.sl),
+                                    planned_tp=(getattr(_native, "native_tp", None) or sig.tp),
+                                    client_oid=(_order or {}).get("clientOid", "") or "",
                                 )
                             if sig.symbol in self.positions:
                                 try:
@@ -3394,6 +3531,8 @@ class TradingEngine:
                                 f"_reconcile_exchange_positions falhou para "
                                 f"{sig.symbol}: {_re}"
                             )
+                        finally:
+                            (getattr(self, "_timeout_adoptions", None) or {}).pop(sig.symbol, None)
                         if self._durable_state_enforced:
                             await durable.persist_orders(
                                 self, "fill_timeout_reconcile", strict=False
@@ -3497,6 +3636,7 @@ class TradingEngine:
                     self, pos, fill_status=(_fill_check.get("status") or {}),
                     order_id=_oid_real, planned_entry=_planned_entry,
                     planned_sl=_planned_sl, planned_tp=_planned_tp,
+                    client_oid=(_order or {}).get("clientOid", "") or "",
                 )
             # Diagnostic filled-position count only. Submission was consumed
             # before sending, including every ambiguous/error path.

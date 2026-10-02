@@ -243,7 +243,13 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((state, pos.initial_sl, client.created), (pg.UNCONFIRMED, None, []))
 
     async def test_restart_crash_before_repair_uses_real_exchange_stop(self):
+        from unittest.mock import AsyncMock
         client = FakeClient("LONG", 101.0, 0.4, [_stop("LONG", 98.0)])
+        # NOVO-F013A-1: the restart identifies the stop as THIS lineage's native
+        # leg through the opening order's own echoed trigger (KuCoin readback).
+        client.get_order_status = AsyncMock(return_value={
+            "orderId": "entry-1", "isActive": False, "dealSize": 4, "dealValue": 40.4,
+            "triggerStopDownPrice": "98.0", "triggerStopUpPrice": "104.0"})
         pos = _position(entry=101.0, sl=98.0)
         pg.mark_unconfirmed(pos, order_id="entry-1", proven_entry=101.0, reason="restart")
         state = await pg.reconcile(_engine(client, {"SOLUSDT": pos}), pos)
@@ -251,6 +257,13 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(state, (pg.CONFIRMED, pg.OVER_BUDGET))
         self.assertEqual(pos.initial_sl, client.active_sl())
         self.assertLessEqual(pg.projected_loss(0.4, 101.0, pos.initial_sl, COST), 1.0 + 1e-9)
+
+    async def test_restart_without_lineage_evidence_never_adopts_an_arbitrary_stop(self):
+        client = FakeClient("LONG", 101.0, 0.4, [_stop("LONG", 98.0)])   # no order echo, no plan
+        pos = _position(entry=101.0, sl=98.0)
+        pg.mark_unconfirmed(pos, order_id="entry-1", proven_entry=101.0, reason="restart")
+        state = await pg.reconcile(_engine(client, {"SOLUSDT": pos}), pos)
+        self.assertEqual((state, pos.initial_sl, client.created), (pg.UNCONFIRMED, None, []))
 
     async def test_crash_during_replacement_two_stops_most_protective_wins(self):
         from unittest.mock import AsyncMock, patch
