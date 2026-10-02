@@ -360,6 +360,7 @@ def shadow_microstructure_context(
     side: str,
     max_depth_age_ms: int = 15 * 60 * 1000,
     max_metrics_age_ms: int = 15 * 60 * 1000,
+    oi_delta_override: float | None = None,
 ) -> dict:
     """Build pre-trade SHADOW microstructure/flow features.
 
@@ -397,7 +398,11 @@ def shadow_microstructure_context(
         if metrics_ok:
             taker_ratio = current_metrics.taker_ls_volume_ratio
             taker_pressure = _bounded_log_ratio(taker_ratio)
-            if previous_metrics is not None and previous_metrics.sum_open_interest > 0:
+            if oi_delta_override is not None:
+                candidate_delta = float(oi_delta_override)
+                if math.isfinite(candidate_delta):
+                    oi_delta = candidate_delta
+            elif previous_metrics is not None and previous_metrics.sum_open_interest > 0:
                 oi_delta = (
                     current_metrics.sum_open_interest
                     / previous_metrics.sum_open_interest
