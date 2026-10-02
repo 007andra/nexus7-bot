@@ -46,7 +46,8 @@ def cvar(returns, alpha: float = 0.05) -> float:
     return float(np.mean(tail)) if tail.size else cutoff
 
 
-def performance_metrics(returns, periods_per_year: float = 365.0 * 24.0 * 4.0) -> dict:
+def performance_metrics(returns, periods_per_year: float = 1.0) -> dict:
+    """Per-trade metrics; pass a measured annual frequency to annualize ratios."""
     arr = _returns(returns)
     if not arr.size:
         return {
@@ -54,6 +55,8 @@ def performance_metrics(returns, periods_per_year: float = 365.0 * 24.0 * 4.0) -
             "profit_factor": 0.0, "sharpe": 0.0, "sortino": 0.0,
             "max_drawdown": 0.0, "cvar_5": 0.0,
         }
+    if periods_per_year <= 0:
+        raise ValueError("periods_per_year must be positive")
     wins = arr[arr > 0]
     losses = arr[arr < 0]
     gross_win = float(np.sum(wins)) if wins.size else 0.0
@@ -61,13 +64,17 @@ def performance_metrics(returns, periods_per_year: float = 365.0 * 24.0 * 4.0) -
     std = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
     downside = arr[arr < 0]
     downside_std = float(np.std(downside, ddof=1)) if downside.size > 1 else 0.0
-    annualizer = math.sqrt(max(float(periods_per_year), 0.0))
+    annualizer = math.sqrt(float(periods_per_year))
     mean = float(np.mean(arr))
     return {
         "trades": int(arr.size),
         "expectancy": mean,
         "win_rate": float(np.mean(arr > 0)),
-        "profit_factor": gross_win / gross_loss if gross_loss > 0 else (math.inf if gross_win > 0 else 0.0),
+        "profit_factor": (
+            gross_win / gross_loss
+            if gross_loss > 0
+            else (math.inf if gross_win > 0 else 0.0)
+        ),
         "sharpe": mean / std * annualizer if std > 0 else 0.0,
         "sortino": mean / downside_std * annualizer if downside_std > 0 else 0.0,
         "max_drawdown": max_drawdown(arr),
@@ -123,6 +130,8 @@ def monte_carlo_trade_paths(
     arr = _returns(returns)
     if not arr.size:
         return MonteCarloSummary(0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    if np.any(arr <= -1.0):
+        raise ValueError("return <= -100% is not supported")
     if paths <= 0:
         raise ValueError("paths must be positive")
     horizon = int(trades_per_path or arr.size)
@@ -130,8 +139,9 @@ def monte_carlo_trade_paths(
         raise ValueError("trades_per_path must be positive")
     rng = np.random.default_rng(seed)
     samples = rng.choice(arr, size=(int(paths), horizon), replace=True)
-    curves = np.cumprod(1.0 + samples, axis=1)
-    terminal = curves[:, -1] - 1.0
+    paths_curve = np.cumprod(1.0 + samples, axis=1)
+    terminal = paths_curve[:, -1] - 1.0
+    curves = np.concatenate((np.ones((int(paths), 1)), paths_curve), axis=1)
     peaks = np.maximum.accumulate(curves, axis=1)
     drawdowns = np.max(1.0 - curves / peaks, axis=1)
     return MonteCarloSummary(
