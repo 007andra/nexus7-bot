@@ -59,6 +59,8 @@ async def check(engine):
         try:
             if symbol in getattr(engine, '_pending_partial_symbols', set()):
                 continue
+            if getattr(position, '_geometry_unproven', False) is True:
+                continue    # Q-01: no R exit from an invented geometry
             entry, stop, price = map(float, (position.entry, position.sl, position.current_price or position.entry))
             if not all(math.isfinite(v) and v > 0 for v in (entry, stop, price)):
                 continue

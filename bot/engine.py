@@ -1976,6 +1976,8 @@ class TradingEngine:
         Move o SL na exchange via /v5/position/trading-stop.
         """
         for sym, pos in list(self.positions.items()):
+            if getattr(pos, "_geometry_unproven", False) is True:
+                continue    # Q-01: trailing never runs on an invented geometry
             try:
                 # Atualiza PnL com preço atual
                 cur = pos.current_price

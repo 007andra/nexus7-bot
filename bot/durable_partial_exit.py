@@ -20,6 +20,8 @@ async def check(engine):
             if state is None:
                 if pos.tp1_hit:
                     continue
+                if getattr(pos, '_geometry_unproven', False) is True:
+                    continue    # Q-01: no new partial from an invented geometry
                 entry, stop, price = map(float, (pos.entry, pos.sl, pos.current_price))
                 if not all(math.isfinite(x) and x > 0 for x in (entry, stop, price)):
                     raise ValueError('invalid partial prices')
