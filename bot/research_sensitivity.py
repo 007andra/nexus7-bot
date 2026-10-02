@@ -103,3 +103,49 @@ def execution_cost_surface(
         "points": points,
         "promotion_effect": "NONE",
     }
+
+
+def incremental_cost_surface(
+    base_net_returns: Sequence[float],
+    *,
+    extra_round_trip_fee_bps_grid: Sequence[float] = (0.0, 2.0, 5.0, 10.0),
+    extra_round_trip_slippage_bps_grid: Sequence[float] = (0.0, 2.0, 5.0, 10.0),
+) -> dict:
+    """Stress already-net returns with *additional* round-trip execution drag.
+
+    This is the correct surface when the base replay already includes fees,
+    adverse slippage and funding. It never subtracts those baseline costs a
+    second time.
+    """
+    base = tuple(float(value) for value in base_net_returns)
+    if not base:
+        raise ValueError("empty base net return series")
+    if any(not isfinite(value) or value <= -1 for value in base):
+        raise ValueError("invalid base net return")
+
+    points = []
+    for fee_bps in extra_round_trip_fee_bps_grid:
+        for slippage_bps in extra_round_trip_slippage_bps_grid:
+            fee = float(fee_bps)
+            slippage = float(slippage_bps)
+            if (
+                not isfinite(fee)
+                or not isfinite(slippage)
+                or fee < 0
+                or slippage < 0
+            ):
+                raise ValueError("invalid incremental cost grid")
+            extra_drag = (fee + slippage) / 10_000.0
+            stressed = tuple(value - extra_drag for value in base)
+            points.append({
+                "extra_round_trip_fee_bps": fee,
+                "extra_round_trip_slippage_bps": slippage,
+                "extra_drag_fraction": extra_drag,
+                "metrics": performance_metrics(stressed),
+            })
+
+    return {
+        "basis": "BASE_NET_RETURNS_ALREADY_INCLUDE_BASELINE_EXECUTION_COSTS",
+        "points": points,
+        "promotion_effect": "NONE",
+    }
