@@ -25,6 +25,7 @@ def install(TradingEngine, log) -> None:
     from bot import derivatives_news_freshness_hardening as derivatives_hardening
     from bot import news_semantic_hardening as news_semantics
     from bot import nexus_ai
+    from bot import market_language_overlay
     from bot import nexus_regime_transition_consistency as regime_transition
     from bot import kucoin_contract_risk_hardening as cross_risk_hardening
     from bot import exchange as exchange_runtime
@@ -116,6 +117,7 @@ def install(TradingEngine, log) -> None:
         from bot import runtime_release_contract
 
         log.warning(runtime_release_contract.current().accounting_log())
+    market_language_overlay.install(nexus_ai, log)
     regime_transition.install(nexus_ai, log)
     if exchange_runtime.is_binance():
         binance_cross_portfolio_stress.install(TradingEngine, log)
@@ -135,7 +137,7 @@ def install(TradingEngine, log) -> None:
         "restart opening-order lineage recovery, post-trade forensics, Binance read-only exit forensics, direct-close daily-PnL "
         "estimate lineage, confirmed daily-PnL reconciliation, durable external-origin telemetry, "
         "final headline semantics, stop-only CROSS target policy, fail-closed CROSS portfolio "
-        "stop-stress gate, startup readiness final notification via operator run owner, delegated operator margin/drawdown/exit policy, strict NEXUS "
+        "stop-stress gate, startup readiness final notification via operator run owner, delegated operator margin/drawdown/exit policy, native MODEL H market-language forecasting, strict NEXUS "
         "regime-transition consistency and final runtime ownership contract are active; "
         "thresholds_unchanged=true leverage_unchanged=true railway_variables_unchanged=true"
     )
