@@ -19,6 +19,12 @@ from bot.nexus_oos_edge_gate import build_edge_report, edge_promotion_decision
 from bot.nexus_oos_robustness import analyze_robustness
 from bot.nexus_oos_calibration import calibrate_walk_forward
 from bot.oos_model_validation import ValidationRow, purged_walk_forward
+from bot.opportunity_ranker import (
+    Opportunity,
+    apply_cross_sectional_liquidity,
+    evaluate_ranked_outcomes,
+    rank_opportunities,
+)
 from bot.research_manifest import ResearchManifest
 from bot.research_sensitivity import incremental_cost_surface
 
@@ -201,6 +207,167 @@ def build_sensitivity_report(symbol_reports: list[dict]) -> dict:
     }
 
 
+def build_opportunity_ranking_report(symbol_reports: list[dict]) -> dict:
+    """Evaluate same-timestamp cross-symbol SHADOW ranking OOS.
+
+    Rank inputs are strictly pre-trade. Realized R is joined only after the
+    ranking has been computed for evaluation.
+    """
+    grouped: dict[int, list[tuple[Opportunity, float]]] = {}
+    seen_candidates: set[str] = set()
+    total_diagnostics = 0
+    micro_available = 0
+
+    for symbol_report in symbol_reports:
+        symbol = str(symbol_report.get("symbol", "") or "").upper()
+        for item in symbol_report.get("candidate_diagnostics", []) or []:
+            total_diagnostics += 1
+            candidate_id = str(item.get("candidate_id", "") or "")
+            if not candidate_id:
+                continue
+            if candidate_id in seen_candidates:
+                raise RuntimeError(
+                    f"duplicate candidate_id in ranking evidence: {candidate_id}"
+                )
+            seen_candidates.add(candidate_id)
+
+            micro = item.get("shadow_microstructure") or {}
+            alignment = micro.get("directional_alignment")
+            taker_pressure = micro.get("taker_pressure")
+            if micro.get("available") is True:
+                micro_available += 1
+
+            opportunity = Opportunity(
+                candidate_id=candidate_id,
+                symbol=symbol,
+                expected_value=float(
+                    item.get("nexus_expected_value_pct", 0.0) or 0.0
+                ),
+                net_rr=float(item.get("nexus_rr_net", 0.0) or 0.0),
+                setup_score=float(
+                    item.get("nexus_setup_quality", 0.0) or 0.0
+                ),
+                liquidity_score=50.0,
+                regime_confidence=float(
+                    item.get("nexus_regime_compat", 0.0) or 0.0
+                ),
+                round_trip_cost=float(
+                    item.get("round_trip_cost", 0.0) or 0.0
+                ),
+                decision_ts=int(item.get("timestamp", 0) or 0),
+                side=str(item.get("direction", "UNKNOWN") or "UNKNOWN"),
+                confidence=float(
+                    item.get("nexus_confidence", 0.0) or 0.0
+                ),
+                microstructure_alignment=(
+                    float(alignment) if alignment is not None else None
+                ),
+                taker_pressure=(
+                    float(taker_pressure)
+                    if taker_pressure is not None else None
+                ),
+                depth_notional_1pct=(
+                    float(item["depth_notional_1pct"])
+                    if item.get("depth_notional_1pct") is not None
+                    else None
+                ),
+            )
+            grouped.setdefault(opportunity.decision_ts, []).append(
+                (opportunity, float(item.get("r_multiple", 0.0) or 0.0))
+            )
+
+    cross_sections = []
+    top_returns: list[float] = []
+    rest_returns: list[float] = []
+    spearman_values: list[float] = []
+    ranked_candidates = 0
+
+    for timestamp in sorted(grouped):
+        entries = grouped[timestamp]
+        if len(entries) < 2:
+            continue
+        items = apply_cross_sectional_liquidity(
+            [item for item, _ in entries]
+        )
+        realized = {
+            item.candidate_id: realized_r
+            for item, realized_r in entries
+        }
+        ranked = rank_opportunities(items)
+        evaluation = evaluate_ranked_outcomes(items, realized)
+        top_item, top_score = ranked[0]
+        top_r = float(realized[top_item.candidate_id])
+        other_r = [
+            float(realized[item.candidate_id])
+            for item, _score in ranked[1:]
+        ]
+        top_returns.append(top_r)
+        rest_returns.extend(other_r)
+        ranked_candidates += len(ranked)
+        rho = evaluation.get("rank_outcome_spearman")
+        if rho is not None:
+            spearman_values.append(float(rho))
+
+        cross_sections.append({
+            "timestamp": int(timestamp),
+            "candidates": len(ranked),
+            "top_candidate_id": top_item.candidate_id,
+            "top_symbol": top_item.symbol,
+            "top_pretrade_rank_score": float(top_score),
+            "top_realized_r": top_r,
+            "microstructure_available": sum(
+                1 for item in items
+                if item.microstructure_alignment is not None
+            ),
+            "evaluation": evaluation,
+        })
+
+    top_expectancy = (
+        sum(top_returns) / len(top_returns)
+        if top_returns else None
+    )
+    rest_expectancy = (
+        sum(rest_returns) / len(rest_returns)
+        if rest_returns else None
+    )
+    uplift = (
+        top_expectancy - rest_expectancy
+        if top_expectancy is not None and rest_expectancy is not None
+        else None
+    )
+    mean_spearman = (
+        sum(spearman_values) / len(spearman_values)
+        if spearman_values else None
+    )
+
+    return {
+        "status": (
+            "EVIDENCE_AVAILABLE"
+            if cross_sections else "INSUFFICIENT_CROSS_SECTIONAL_SAMPLE"
+        ),
+        "cross_sections": len(cross_sections),
+        "ranked_candidates": ranked_candidates,
+        "total_candidate_diagnostics": total_diagnostics,
+        "microstructure_coverage": (
+            micro_available / total_diagnostics
+            if total_diagnostics else 0.0
+        ),
+        "top1_expectancy_r": top_expectancy,
+        "rest_expectancy_r": rest_expectancy,
+        "top1_uplift_r": uplift,
+        "mean_rank_outcome_spearman": mean_spearman,
+        "details": cross_sections,
+        "rank_inputs": (
+            "expected_value,net_rr,setup_score,liquidity_percentile,"
+            "regime_compat,confidence,cost,microstructure,taker_pressure"
+        ),
+        "outcome_used_in_rank": False,
+        "execution_effect": "NONE",
+        "score_effect": "NONE",
+        "promotion_authority": False,
+    }
+
+
 def assert_population_parity(primary: dict, robustness: dict) -> None:
     primary_symbols = {
         item["symbol"]: int(item.get("candidate_count", 0))
@@ -283,6 +450,8 @@ async def run(
             "fees_included": True,
             "slippage_included": True,
             "funding_included": True,
+            "shadow_microstructure_ranked": True,
+            "opportunity_rank_outcome_leakage": False,
             "platt_calibration_train_only": True,
             "platt_calibration_live_effect": "NONE",
             "authenticated_api": False,
@@ -337,6 +506,12 @@ def main() -> int:
         "approved_candidates": bundle["primary"]["report"]["approved_candidates"],
         "expectancy_uplift_r": bundle["primary"]["report"]["expectancy_uplift_r"],
         "robustness_candidate_count": pooled.get("baseline_candidates"),
+        "opportunity_cross_sections": bundle["opportunity_ranking"].get(
+            "cross_sections"
+        ),
+        "opportunity_top1_uplift_r": bundle["opportunity_ranking"].get(
+            "top1_uplift_r"
+        ),
         "stable_positive_point_estimate": summary.get(
             "stable_positive_point_estimate"
         ),
