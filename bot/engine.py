@@ -2703,6 +2703,13 @@ class TradingEngine:
                 ticker=ticker, funding=funding, oi=oi, oi_delta=oi_delta,
                 news_score=news_score,
             )
+            from bot.candidate_trace import attach_decision
+            _candidate_id = attach_decision(decision, sig)
+            log.info(
+                "[CANDIDATE_TRACE] candidate_id=%s symbol=%s stage=NEXUS_DECISION "
+                "decision_effect=NONE execution_effect=NONE",
+                _candidate_id, sig.symbol,
+            )
 
             # nexus_ai.decide executes in a worker thread. Telegram scheduling
             # must happen back on the engine event loop, never inside that
