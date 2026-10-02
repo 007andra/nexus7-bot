@@ -178,6 +178,7 @@ def evaluate_microstructure_ranking(
     ] = defaultdict(list)
     total_diagnostics = 0
     micro_available = 0
+    micro_quarantined = 0
     agg_trades_pressure_candidates = 0
     seen_candidates: set[str] = set()
 
@@ -190,6 +191,13 @@ def evaluate_microstructure_ranking(
             if not isinstance(row, Mapping):
                 raise ValueError("invalid candidate diagnostic")
             total_diagnostics += 1
+            micro = row.get("shadow_microstructure")
+            if (
+                isinstance(micro, Mapping)
+                and micro.get("available") is not True
+                and "QUARANTINE" in str(micro.get("quality", "") or "")
+            ):
+                micro_quarantined += 1
             enriched = enriched_opportunity(symbol, row)
             if enriched is None:
                 continue
@@ -359,6 +367,7 @@ def evaluate_microstructure_ranking(
         "ranked_candidates": comparable_candidates,
         "total_candidate_diagnostics": total_diagnostics,
         "microstructure_available_candidates": micro_available,
+        "microstructure_quarantined_candidates": micro_quarantined,
         "microstructure_coverage": (
             micro_available / total_diagnostics
             if total_diagnostics else 0.0
