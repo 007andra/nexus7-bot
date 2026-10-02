@@ -17,6 +17,10 @@ class ValidationRow:
     confidence: float  # probability-like value in [0, 1]
     outcome: int       # 1 win, 0 non-win
     r_multiple: float
+    # When known, the timestamp at which the outcome label became observable.
+    # This lets research splits purge overlapping future-label information
+    # exactly instead of approximating leakage with a candidate count.
+    label_end_timestamp: float | None = None
 
     def validate(self) -> "ValidationRow":
         if not isfinite(self.timestamp):
@@ -27,6 +31,12 @@ class ValidationRow:
             raise ValueError("outcome must be 0 or 1")
         if not isfinite(self.r_multiple):
             raise ValueError("r_multiple must be finite")
+        if self.label_end_timestamp is not None:
+            if (
+                not isfinite(self.label_end_timestamp)
+                or self.label_end_timestamp < self.timestamp
+            ):
+                raise ValueError("invalid label_end_timestamp")
         return self
 
 
@@ -79,6 +89,70 @@ def purged_walk_forward(
         if len(train) == train_size and len(test) == test_size:
             folds.append(WalkForwardFold(train=train, test=test))
         test_start += step
+    return folds
+
+
+def label_aware_purged_embargo_walk_forward(
+    rows: Sequence[ValidationRow],
+    *,
+    train_size: int,
+    test_size: int,
+    embargo_size: int = 0,
+    step_size: int | None = None,
+) -> list[WalkForwardFold]:
+    """Chronological folds purged by actual label availability plus embargo.
+
+    A training row is eligible only when its outcome label was observable
+    strictly before the first decision timestamp of the test fold. Rows in the
+    post-test embargo region are permanently excluded from later training.
+    """
+    if train_size <= 0 or test_size <= 0 or embargo_size < 0:
+        raise ValueError("invalid label-aware walk-forward sizes")
+    step = (
+        test_size + embargo_size
+        if step_size is None
+        else int(step_size)
+    )
+    if step < test_size + embargo_size:
+        raise ValueError("step_size must cover test_size + embargo_size")
+
+    ordered = tuple(
+        sorted((row.validate() for row in rows), key=lambda row: row.timestamp)
+    )
+    folds: list[WalkForwardFold] = []
+    embargoed_indices: set[int] = set()
+    test_start = train_size
+
+    while test_start + test_size <= len(ordered):
+        test_end = test_start + test_size
+        test = ordered[test_start:test_end]
+        test_start_ts = float(test[0].timestamp)
+
+        eligible = []
+        for index, row in enumerate(ordered[:test_start]):
+            if index in embargoed_indices:
+                continue
+            label_end = (
+                float(row.label_end_timestamp)
+                if row.label_end_timestamp is not None
+                else float(row.timestamp)
+            )
+            if label_end < test_start_ts:
+                eligible.append(row)
+
+        train = tuple(eligible[-train_size:])
+        if len(train) == train_size:
+            folds.append(
+                WalkForwardFold(
+                    train=train,
+                    test=tuple(test),
+                )
+            )
+
+        embargo_end = min(len(ordered), test_end + embargo_size)
+        embargoed_indices.update(range(test_end, embargo_end))
+        test_start += step
+
     return folds
 
 
