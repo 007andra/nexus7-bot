@@ -166,6 +166,15 @@ async def record_decision(sig, decision):
         return None
     approved = bool(_field(decision, "execution_allowed", default=False) is True)
     raw = decision.to_dict() if hasattr(decision, "to_dict") else (decision if isinstance(decision, dict) else {})
+    if isinstance(raw, dict):
+        raw = dict(raw)
+        try:
+            from bot.candidate_trace import candidate_id_from_decision
+            _candidate_id = candidate_id_from_decision(decision)
+            if _candidate_id:
+                raw["_candidate_id"] = _candidate_id
+        except Exception:
+            pass
     score = _to_float(_field(decision, "setup_quality", "score", "nexus_score"))
     confidence = _to_float(_field(decision, "confidence"))
     regime = str(_field(decision, "regime", default="UNKNOWN") or "UNKNOWN")
