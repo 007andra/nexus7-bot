@@ -757,7 +757,7 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
         "ran_at": datetime.now(timezone.utc).isoformat(),
         "walk_forward": wf,
         "monte_carlo": mc,
-        "execution_model": "KUCOIN_MARKET_PROXY_V1",
+        "execution_model": execution_model,
         "taker_fee_rate": taker_fee,
         "fee_source": fee_source,
         "slippage_rate": execution_context["slippage_rate"],
