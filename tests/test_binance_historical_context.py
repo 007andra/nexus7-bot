@@ -208,6 +208,18 @@ class BinanceHistoricalContextTests(unittest.TestCase):
         rows = parse_book_depth_archive(payload, source_date="2026-09-03")
         self.assertEqual(rows[0].quality, "KNOWN_UPSTREAM_ISSUE_QUARANTINE")
         self.assertFalse(shadow_microstructure_signal(rows[0])["available"])
+        context = shadow_microstructure_context(
+            rows[0],
+            None,
+            None,
+            decision_ts_ms=rows[0].timestamp_ms,
+            side="LONG",
+        )
+        self.assertEqual(
+            context["quality"],
+            "KNOWN_UPSTREAM_ISSUE_QUARANTINE",
+        )
+        self.assertEqual(context["execution_effect"], "NONE")
         timeline = BookDepthTimeline(rows)
         self.assertIsNotNone(timeline.asof(rows[0].timestamp_ms))
 
