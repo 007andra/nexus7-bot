@@ -338,3 +338,121 @@ def shadow_microstructure_signal(snapshot: BookDepthSnapshot | None) -> dict:
         "summary": summary,
         "execution_effect": "NONE",
     }
+
+
+
+def _bounded_log_ratio(value: float | None, *, scale: float = 2.0) -> float | None:
+    """Center a positive ratio at 1.0 and bound it to [-1, 1]."""
+    if value is None:
+        return None
+    raw = float(value)
+    if not math.isfinite(raw) or raw <= 0:
+        return None
+    return math.tanh(math.log(raw) * float(scale))
+
+
+def shadow_microstructure_context(
+    snapshot: BookDepthSnapshot | None,
+    current_metrics: MetricsObservation | None,
+    previous_metrics: MetricsObservation | None,
+    *,
+    decision_ts_ms: int,
+    side: str,
+    max_depth_age_ms: int = 15 * 60 * 1000,
+    max_metrics_age_ms: int = 15 * 60 * 1000,
+) -> dict:
+    """Build pre-trade SHADOW microstructure/flow features.
+
+    The result is observational only. It never enters the production NEXUS
+    score, threshold, sizing or dispatch path.
+    """
+    direction = str(side or "").upper()
+    if direction not in {"LONG", "SHORT"}:
+        raise ValueError("side must be LONG or SHORT")
+    decision_ts = int(decision_ts_ms)
+    if decision_ts <= 0:
+        raise ValueError("decision timestamp required")
+
+    depth = shadow_microstructure_signal(snapshot)
+    depth_age = None
+    depth_ok = False
+    depth_score = None
+    if snapshot is not None:
+        depth_age = decision_ts - int(snapshot.timestamp_ms)
+        depth_ok = (
+            depth.get("available") is True
+            and 0 <= depth_age <= int(max_depth_age_ms)
+        )
+        if depth_ok:
+            depth_score = float(depth["imbalance_score"])
+
+    metrics_age = None
+    oi_delta = None
+    taker_ratio = None
+    taker_pressure = None
+    metrics_ok = False
+    if current_metrics is not None:
+        metrics_age = decision_ts - int(current_metrics.effective_ts_ms)
+        metrics_ok = 0 <= metrics_age <= int(max_metrics_age_ms)
+        if metrics_ok:
+            taker_ratio = current_metrics.taker_ls_volume_ratio
+            taker_pressure = _bounded_log_ratio(taker_ratio)
+            if previous_metrics is not None and previous_metrics.sum_open_interest > 0:
+                oi_delta = (
+                    current_metrics.sum_open_interest
+                    / previous_metrics.sum_open_interest
+                    - 1.0
+                )
+
+    components = []
+    weights = []
+    if depth_score is not None:
+        components.append(max(-1.0, min(1.0, depth_score)))
+        weights.append(0.55)
+    if taker_pressure is not None:
+        components.append(max(-1.0, min(1.0, taker_pressure)))
+        weights.append(0.30)
+    if oi_delta is not None and math.isfinite(float(oi_delta)):
+        # 2% five-minute OI change already represents a large impulse.
+        oi_pressure = math.tanh(float(oi_delta) / 0.02)
+        components.append(max(-1.0, min(1.0, oi_pressure)))
+        weights.append(0.15)
+    else:
+        oi_pressure = None
+
+    composite = None
+    if components:
+        total_weight = sum(weights)
+        composite = sum(
+            value * weight for value, weight in zip(components, weights)
+        ) / total_weight
+
+    side_sign = 1.0 if direction == "LONG" else -1.0
+    directional_alignment = (
+        side_sign * composite if composite is not None else None
+    )
+
+    available = bool(depth_ok or metrics_ok)
+    return {
+        "available": available,
+        "side": direction,
+        "depth_available": depth_ok,
+        "metrics_available": metrics_ok,
+        "depth_age_ms": depth_age,
+        "metrics_age_ms": metrics_age,
+        "depth_imbalance": depth_score,
+        "taker_long_short_ratio": taker_ratio,
+        "taker_pressure": taker_pressure,
+        "oi_delta": oi_delta,
+        "oi_pressure": oi_pressure,
+        "composite_pressure": composite,
+        "directional_alignment": directional_alignment,
+        "quality": (
+            "OK"
+            if available
+            else "INSUFFICIENT_PRETRADE_MICROSTRUCTURE"
+        ),
+        "execution_effect": "NONE",
+        "score_effect": "NONE",
+        "promotion_authority": False,
+    }
