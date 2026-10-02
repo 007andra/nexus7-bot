@@ -94,6 +94,9 @@ def _calibration_green(bundle: Mapping[str, object]) -> bool:
         and successful
         and calibration.get("fit_scope") == "TRAIN_ONLY"
         and calibration.get("evaluation_scope") == "OOS_ONLY"
+        and calibration.get("purge_basis") == "ACTUAL_LABEL_END_TIMESTAMP"
+        and int(calibration.get("embargo_rows", 0) or 0) >= 1
+        and int(calibration.get("missing_label_end", 0) or 0) == 0
         and calibration.get("live_probability_effect") == "NONE"
     )
 
