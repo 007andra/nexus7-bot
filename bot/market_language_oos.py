@@ -189,7 +189,11 @@ def evaluate_market_language_oos(
         raise ValueError("step must be >= horizon to keep OOS labels non-overlapping")
     if warmup < 81:
         raise ValueError("warmup must be >= 81")
-    cost = static_round_trip_cost_fraction(symbol) if cost_fraction is None else float(cost_fraction)
+    cost = (
+        2.0 * LEGACY_CONSERVATIVE_TAKER_FEE + 2.0 * static_slippage_rate(symbol)
+        if cost_fraction is None
+        else float(cost_fraction)
+    )
     if not isfinite(cost) or cost < 0 or cost >= 0.20:
         raise ValueError("invalid round-trip cost fraction")
 
