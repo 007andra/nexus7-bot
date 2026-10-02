@@ -1,4 +1,4 @@
-# NEXUS Native Market Language — MODEL H
+# NEXUS Native Market Language — research candidate
 
 This is a native NEXUS implementation of market-sequence concepts that are
 useful in the MIT-licensed shiyu-coder/Kronos research project. It is not a
@@ -40,9 +40,9 @@ runtime integration and it does not import, call or download Kronos.
    - bounded confidence
 
 7. **Abstention**
-   - MODEL H does not force a LONG/SHORT vote.
+   - The candidate does not force a LONG/SHORT vote.
    - Insufficient data or weak directional edge returns available=False with an
-     explicit ABSTAIN/DATA_UNAVAILABLE reason, so the fusion engine excludes it.
+     explicit ABSTAIN/DATA_UNAVAILABLE reason.
 
 8. **Batch multi-asset forecasting**
    - forecast_batch evaluates assets independently to prevent cross-symbol
@@ -52,12 +52,22 @@ runtime integration and it does not import, call or download Kronos.
    - walk_forward_evaluate performs strict prefix-only forecasts and reports
      coverage, directional accuracy when available and Brier score for P(up).
 
-## Runtime contract
+## Runtime contract for this PR
 
-MODEL H is a normal ModelOutput in the existing NEXUS ensemble. It has no
-method or field for order quantity, leverage or exchange dispatch. Existing MTF,
-regime compatibility, EV, score threshold, risk, portfolio stress, durable
-state, ownership, fencing and exchange execution remain downstream authorities.
+The market-language subsystem is research-only. It is deliberately **not**
+installed by bot/runtime_overlays.py, not appended to nexus_ai.run_ensemble,
+and not referenced by bot/engine.py.
+
+Therefore it cannot change:
+- ensemble direction or confidence;
+- final score or execution_allowed;
+- quantity, leverage, SL/TP;
+- portfolio stress, durable state, ownership or fencing;
+- exchange dispatch or place_order.
+
+Promotion into the production ensemble requires a separate reviewed change
+after out-of-sample/walk-forward evidence demonstrates incremental edge after
+fees and slippage.
 
 ## External dependency policy
 
@@ -70,4 +80,4 @@ No external repository connection.
 
 Attribution/design reference: shiyu-coder/Kronos (MIT), copyright 2025 ShiYu.
 The NEXUS implementation is independently written for the existing NEXUS
-runtime and data contracts.
+research/data contracts.
