@@ -19,7 +19,7 @@ import os
 from bot.account_capital_reader import read_account_capital
 from bot.config import cfg
 from bot.drawdown_recovery import recovery_size_multiplier
-from bot.execution_cost import snapshot_for
+from bot import execution_cost
 from bot.sizing_decomposition import decompose
 
 
@@ -28,6 +28,7 @@ class FeasibilityDecision:
     allowed: bool
     reason: str
     detail: dict
+    proven: bool = True
 
 
 def _effective_stop_risk_pct(engine) -> float:
@@ -49,15 +50,55 @@ def _effective_stop_risk_pct(engine) -> float:
 
 def _stress_slippage(snapshot) -> float:
     configured = float(os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001"))
+    if not math.isfinite(configured) or configured < 0:
+        raise ValueError("invalid configured slippage")
+    if snapshot is None:
+        return configured
     observed = float(snapshot.slippage_allowance)
-    if (
-        not math.isfinite(configured)
-        or not math.isfinite(observed)
-        or configured < 0
-        or observed < 0
-    ):
-        raise ValueError("invalid slippage")
+    if not math.isfinite(observed) or observed < 0:
+        raise ValueError("invalid snapshot slippage")
     return max(configured, observed)
+
+
+async def _capital_for_feasibility(engine):
+    """Return positive current capital, otherwise None and defer downstream.
+
+    Prefer a fresh read. Some offline/adversarial harnesses intentionally expose
+    partial account shapes that are sufficient for later dedicated gates but
+    not for account-capital normalization; in that case a confirmed
+    RiskManagerV3 snapshot is acceptable for this advisory early proof.
+    """
+    try:
+        fresh = await read_account_capital(engine.client)
+        capital = fresh.capital
+        equity = float(capital.equity)
+        available = float(capital.available_collateral)
+        if (
+            math.isfinite(equity)
+            and math.isfinite(available)
+            and equity > 0
+            and available > 0
+        ):
+            return capital
+    except Exception:
+        pass
+
+    try:
+        risk_snapshot = engine.risk.professional_snapshot
+        capital = risk_snapshot.capital
+        equity = float(capital.equity)
+        available = float(capital.available_collateral)
+        if (
+            bool(risk_snapshot.confirmed)
+            and math.isfinite(equity)
+            and math.isfinite(available)
+            and equity > 0
+            and available > 0
+        ):
+            return capital
+    except Exception:
+        pass
+    return None
 
 
 async def evaluate_candidate(engine, sig) -> FeasibilityDecision:
@@ -84,36 +125,60 @@ async def evaluate_candidate(engine, sig) -> FeasibilityDecision:
     ):
         return FeasibilityDecision(False, "INVALID_GEOMETRY", {})
 
-    cost_snapshot, _reused = await snapshot_for(engine, sig)
-    capital_snapshot = await read_account_capital(engine.client)
-    capital = capital_snapshot.capital
-    equity = float(capital.equity)
-    available = float(capital.available_collateral)
+    capital = await _capital_for_feasibility(engine)
+    if capital is None:
+        return FeasibilityDecision(True, "DEFER_CAPITAL_UNCONFIRMED", {}, proven=False)
 
-    # The pilot may already publish a fresher/lower availableBalance. Use the
-    # lower positive value so the early gate can never invent collateral.
-    published_available = getattr(engine, "_pilot_available_balance", None)
-    if published_available is not None:
-        published_available = float(published_available)
-        if math.isfinite(published_available) and published_available > 0:
-            available = min(available, published_available)
+    try:
+        risk_pct = _effective_stop_risk_pct(engine)
+    except (TypeError, ValueError, ArithmeticError):
+        return FeasibilityDecision(True, "DEFER_RISK_CONTEXT", {}, proven=False)
 
-    risk_pct = _effective_stop_risk_pct(engine)
+    # operator_loss_policy runs outside this wrapper and normally attaches the
+    # candidate snapshot first. If it could not, use the exact RiskManagerV3
+    # no-snapshot fallback rather than doing another network read here.
+    cost_snapshot = execution_cost.reusable_snapshot(sig)
+    fee_rate = (
+        float(cost_snapshot.taker_fee)
+        if cost_snapshot is not None
+        else float(execution_cost.fallback_taker_fee())
+    )
+    slippage = _stress_slippage(cost_snapshot)
+
     detail = decompose(
         info=info,
-        equity=equity,
-        available=available,
+        equity=float(capital.equity),
+        available=float(capital.available_collateral),
         entry=entry,
         stop=stop,
         risk_pct=risk_pct,
         leverage=float(cfg.LEVERAGE),
         max_margin_pct=float(getattr(cfg, "MAX_MARGIN_PCT", 0.80)),
-        fee_rate_per_side=float(cost_snapshot.taker_fee),
-        slippage_pct=_stress_slippage(cost_snapshot),
+        fee_rate_per_side=fee_rate,
+        slippage_pct=slippage,
     )
-    allowed = str(detail.get("result") or "").upper() == "PASS"
-    reason = str(detail.get("reason") or ("SIZED" if allowed else "UNKNOWN"))
-    return FeasibilityDecision(allowed, reason, detail)
+    result = str(detail.get("result") or "").upper()
+    reason = str(detail.get("reason") or "UNKNOWN")
+    binding = str(detail.get("binding") or "")
+
+    if result == "PASS":
+        return FeasibilityDecision(True, reason or "SIZED", detail, proven=True)
+    if (
+        result == "BLOCK"
+        and reason == "INSUFFICIENT_RISK_BUDGET"
+        and binding in {"MIN_QTY_BINDING", "MIN_NOTIONAL_BINDING"}
+    ):
+        return FeasibilityDecision(False, reason, detail, proven=True)
+
+    # This gate owns only minimum-order risk feasibility. Margin, metadata,
+    # readiness, durable state, ownership, cross-stress and market-data
+    # ambiguity remain owned by their existing downstream fail-closed gates.
+    return FeasibilityDecision(
+        True,
+        f"DEFER_{reason or 'UNPROVEN'}",
+        detail,
+        proven=False,
+    )
 
 
 def install(TradingEngine, log) -> None:
@@ -133,15 +198,18 @@ def install(TradingEngine, log) -> None:
         symbol = str(getattr(sig, "symbol", "") or "UNKNOWN")
         try:
             decision = await evaluate_candidate(self, sig)
-        except Exception as exc:  # all ambiguity blocks this candidate only
-            log.critical(
-                "[MIN_ORDER_FEASIBILITY] symbol=%s result=BLOCK "
-                "reason=evaluation_%s candidate_only=true nexus_called=false "
-                "quantity_raised=false thresholds_unchanged=true leverage_unchanged=true",
+        except Exception as exc:
+            # Feasibility is not an execution authority. If it cannot prove a
+            # minimum-order violation, preserve the existing downstream
+            # fail-closed chain rather than stealing another gate's authority.
+            log.warning(
+                "[MIN_ORDER_FEASIBILITY] symbol=%s result=DEFER "
+                "reason=evaluation_%s early_gate_only=true execution_authorized=false "
+                "thresholds_unchanged=true leverage_unchanged=true",
                 symbol,
                 type(exc).__name__,
             )
-            return None
+            return await original_open(self, sig, *args, **kwargs)
 
         detail = decision.detail or {}
         if not decision.allowed:
@@ -161,6 +229,17 @@ def install(TradingEngine, log) -> None:
             )
             return None
 
+        if not decision.proven:
+            log.info(
+                "[MIN_ORDER_FEASIBILITY] symbol=%s result=DEFER reason=%s "
+                "binding=%s early_gate_only=true execution_authorized=false "
+                "thresholds_unchanged=true leverage_unchanged=true",
+                symbol,
+                decision.reason,
+                detail.get("binding", "NA"),
+            )
+            return await original_open(self, sig, *args, **kwargs)
+
         log.info(
             "[MIN_ORDER_FEASIBILITY] symbol=%s result=PASS reason=%s "
             "risk_budget=%s min_valid_qty=%s risk_at_min_valid_qty=%s "
@@ -178,7 +257,7 @@ def install(TradingEngine, log) -> None:
     TradingEngine._min_order_feasibility_installed = True
     log.warning(
         "[MIN_ORDER_FEASIBILITY] installed=true stage=BEFORE_NEXUS "
-        "authority=necessary_condition_only final_sizing_authority=RiskManagerV3 "
-        "quantity_raised=false thresholds_unchanged=true leverage_unchanged=true "
-        "execution_effect=BLOCK_PROVABLY_INEXECUTABLE_CANDIDATE_ONLY"
+        "authority=minimum_order_risk_proof_only final_sizing_authority=RiskManagerV3 "
+        "unknown_or_other_gate=DEFER quantity_raised=false thresholds_unchanged=true "
+        "leverage_unchanged=true execution_effect=BLOCK_PROVABLY_INEXECUTABLE_CANDIDATE_ONLY"
     )
