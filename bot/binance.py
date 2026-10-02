@@ -308,6 +308,11 @@ class BinanceClient:
         self._order_registry = None
         self._order_id_symbol: dict[str, str] = {}
         self._client_oid_symbol: dict[str, str] = {}
+        # NOVO-F013A-1c (Binance): protective algo order -> opening lineage
+        # (entry clientOid) that created it, and the CURRENT lineage per
+        # symbol. A BGX algo order is reusable only for its own lineage.
+        self._algo_lineage: dict[str, str] = {}
+        self._protection_lineage: dict[str, str] = {}
         # Conditional orders moved to Binance's Algo service. Keep their
         # user-data-stream lifecycle separate from normal ManagedOrder state:
         # an ALGO_UPDATE is not itself a normal exchange order transition.
@@ -1143,6 +1148,10 @@ class BinanceClient:
                 qty_text,
             )
             protection_failed = False
+            if not reduce_only:
+                # New opening lineage for this symbol: protection of any
+                # previous trade is never reusable by this one.
+                self._protection_lineage[symbol] = client_oid
             if not reduce_only and (sl > 0 or tp > 0):
                 await asyncio.sleep(0.15)
                 try:
@@ -1295,10 +1304,16 @@ class BinanceClient:
                 wanted = _d(trigger_text)
             except (InvalidOperation, ValueError):
                 return False
+            lineage = self._protection_lineage.get(symbol, "")
             for row in existing if isinstance(existing, list) else []:
                 if not isinstance(row, dict):
                     continue
-                if not str(row.get("clientOid", "")).startswith("bgx7-"):
+                algo_oid = str(row.get("clientOid", ""))
+                if not algo_oid.startswith("bgx7-"):
+                    continue
+                # INV-PROTECTION-LINEAGE-001: prefix + side + type + price never
+                # prove that an existing algo order belongs to THIS trade.
+                if not lineage or self._algo_lineage.get(algo_oid) != lineage:
                     continue
                 if row.get("closeOrder") is not True or row.get("isActive") is not True:
                     continue
@@ -1337,6 +1352,8 @@ class BinanceClient:
                         ),
                     }
                 )
+                if self._protection_lineage.get(symbol):
+                    self._algo_lineage[params["clientAlgoId"]] = self._protection_lineage[symbol]
                 result = await self._post(
                     "/fapi/v1/algoOrder",
                     params,
@@ -1368,6 +1385,8 @@ class BinanceClient:
                         ),
                     }
                 )
+                if self._protection_lineage.get(symbol):
+                    self._algo_lineage[params["clientAlgoId"]] = self._protection_lineage[symbol]
                 result = await self._post(
                     "/fapi/v1/algoOrder",
                     params,

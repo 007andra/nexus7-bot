@@ -427,6 +427,10 @@ class BinanceMigrationTests(unittest.TestCase):
             "clientOid": "bgx7-existing-stop",
             "isActive": True,
         }]
+        # NOVO-F013A-1c: the SL being reused was created by THIS opening
+        # lineage (partial protection retry of the same trade).
+        client._protection_lineage["BTCUSDT"] = "bgx7-entry"
+        client._algo_lineage["bgx7-existing-stop"] = "bgx7-entry"
         with patch.object(bn, "PAPER_TRADE", False), patch.object(
             bn, "_live_migration_ready", return_value=True
         ), patch.object(
