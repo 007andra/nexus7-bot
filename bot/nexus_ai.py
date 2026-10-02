@@ -227,6 +227,26 @@ REGIME_MODEL_WEIGHTS = {
     Regime.UNKNOWN:         {"TREND":0.5,"MOMENTUM":0.5,"MEAN_REVERSION":0.5,"BREAKOUT":0.5,"STRUCTURE":0.5,"DERIVATIVES":0.5},
 }
 
+# Native sequence-model weight. The model only exposes itself as available
+# when its own probabilistic edge is strong enough, so these weights do not
+# penalize ordinary setups with ambiguous sequence evidence.
+_MARKET_LANGUAGE_REGIME_WEIGHT = {
+    Regime.TRENDING_BULL: 0.8,
+    Regime.TRENDING_BEAR: 0.8,
+    Regime.RANGE: 0.6,
+    Regime.BREAKOUT: 0.9,
+    Regime.BREAKDOWN: 0.9,
+    Regime.HIGH_VOLATILITY: 0.6,
+    Regime.LOW_VOLATILITY: 0.6,
+    Regime.ACCUMULATION: 0.7,
+    Regime.DISTRIBUTION: 0.7,
+    Regime.CHOPPY: 0.3,
+    Regime.EXTREME_EVENT: 0.0,
+    Regime.UNKNOWN: 0.4,
+}
+for _regime, _weight in _MARKET_LANGUAGE_REGIME_WEIGHT.items():
+    REGIME_MODEL_WEIGHTS[_regime]["MARKET_LANGUAGE"] = _weight
+
 
 def regime_compatibility(regime: Regime, direction: Decision) -> float:
     """0-100: quão compatível é a direção proposta com o regime atual."""
