@@ -1,7 +1,10 @@
 import unittest
 
+from bot.binance_historical_context import MetricsObservation, MetricsTimeline
 from bot.binance_oos_replay import (
     adverse_fill,
+    dates_for_months,
+    derivatives_context_at,
     fee_return_fraction,
     funding_return_fraction,
     month_range,
@@ -15,6 +18,48 @@ class BinanceOOSReplayTests(unittest.TestCase):
             month_range("2025-11", "2026-02"),
             ((2025, 11), (2025, 12), (2026, 1), (2026, 2)),
         )
+
+    def test_dates_for_months_expands_calendar_days(self):
+        days = dates_for_months(((2026, 2),))
+        self.assertEqual(days[0], "2026-02-01")
+        self.assertEqual(days[-1], "2026-02-28")
+        self.assertEqual(len(days), 28)
+
+    def test_derivative_context_uses_latest_available_metric_only(self):
+        rows = [
+            MetricsObservation(
+                label_ts_ms=1000,
+                effective_ts_ms=1000,
+                symbol="BTCUSDT",
+                sum_open_interest=100.0,
+                sum_open_interest_value=10000.0,
+                top_account_ls_ratio=1.0,
+                top_position_ls_ratio=1.2,
+                global_account_ls_ratio=1.0,
+                taker_ls_volume_ratio=1.0,
+                source_date="2026-01-01",
+                convention="END_LABEL",
+            ),
+            MetricsObservation(
+                label_ts_ms=2000,
+                effective_ts_ms=2000,
+                symbol="BTCUSDT",
+                sum_open_interest=101.0,
+                sum_open_interest_value=10100.0,
+                top_account_ls_ratio=1.0,
+                top_position_ls_ratio=1.3,
+                global_account_ls_ratio=1.0,
+                taker_ls_volume_ratio=1.0,
+                source_date="2026-01-01",
+                convention="END_LABEL",
+            ),
+        ]
+        context, complete = derivatives_context_at(
+            MetricsTimeline(rows), 2500, max_age_ms=1000
+        )
+        self.assertTrue(complete)
+        self.assertAlmostEqual(context["oi_delta"], 0.01)
+        self.assertEqual(context["ls_ratio"], 1.3)
 
     def test_adverse_fill_is_directionally_conservative(self):
         self.assertGreater(
