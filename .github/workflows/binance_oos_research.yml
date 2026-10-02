@@ -57,7 +57,7 @@ jobs:
 
       - name: Research integrity tests
         run: |
-          python -m unittest -v             tests.test_binance_research_data             tests.test_binance_historical_context             tests.test_binance_oos_replay             tests.test_binance_oos_evidence_bundle             tests.test_nexus_oos_calibration             tests.test_research_walk_forward             tests.test_research_statistics             tests.test_research_manifest             tests.test_research_sensitivity             tests.test_research_promotion_readiness
+          python -m unittest -v tests.test_binance_research_data tests.test_binance_historical_context tests.test_binance_oos_replay tests.test_binance_oos_evidence_bundle tests.test_nexus_oos_calibration tests.test_research_walk_forward tests.test_research_statistics tests.test_research_manifest tests.test_research_sensitivity tests.test_research_promotion_readiness
 
       - name: Restore Binance public-data cache
         uses: actions/cache@v4
@@ -69,9 +69,28 @@ jobs:
 
       - name: Run checksum-verified Binance USD-M evidence bundle
         shell: bash
+        env:
+          SYMBOLS_INPUT: ${{ inputs.symbols }}
+          START_MONTH_INPUT: ${{ inputs.start_month }}
+          END_MONTH_INPUT: ${{ inputs.end_month }}
         run: |
           set -euo pipefail
-          python -m bot.binance_oos_evidence_bundle             --symbols ${{ inputs.symbols }}             --start-month "${{ inputs.start_month }}"             --end-month "${{ inputs.end_month }}"             --cache-dir artifacts/binance_research_cache             --code-sha "${{ github.sha }}"             --output artifacts/nexus_oos_binance_usdm_bundle.json
+
+          if [[ ! "$SYMBOLS_INPUT" =~ ^[A-Z0-9]+([[:space:]]+[A-Z0-9]+)*$ ]]; then
+            echo "::error::invalid symbols input"
+            exit 1
+          fi
+          if [[ ! "$START_MONTH_INPUT" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
+            echo "::error::invalid start_month input"
+            exit 1
+          fi
+          if [[ ! "$END_MONTH_INPUT" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
+            echo "::error::invalid end_month input"
+            exit 1
+          fi
+
+          read -r -a SYMBOL_ARGS <<< "$SYMBOLS_INPUT"
+          python -m bot.binance_oos_evidence_bundle --symbols "${SYMBOL_ARGS[@]}" --start-month "$START_MONTH_INPUT" --end-month "$END_MONTH_INPUT" --cache-dir artifacts/binance_research_cache --code-sha "${{ github.sha }}" --output artifacts/nexus_oos_binance_usdm_bundle.json
 
       - name: Validate evidence artifact
         run: |
