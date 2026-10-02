@@ -90,7 +90,7 @@ The research candidate now includes a Binance-specific, public, read-only replay
 - bot/market_language_oos.py
 - bot/market_language_binance_replay.py
 
-The replay pages public /fapi/v1/klines history, discards any still-open candle,
+The replay loads official Binance Vision USD-M monthly kline archives, discards any still-open candle,
 and evaluates the model with strict prefix-only chronology. By default, a
 4-candle horizon on 15m data is evaluated every 4 candles, so realized labels do
 not overlap.
