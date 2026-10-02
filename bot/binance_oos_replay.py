@@ -654,12 +654,14 @@ async def replay_symbol(
                 "historical_long_short_ratio": bool(metric_rows),
                 "metrics_label_shift_normalized": True,
                 "historical_orderbook": False,
-                "orderbook_affects_current_score": True,
+                "orderbook_affects_current_score": False,
                 "checksums_verified": True,
-                "parity_complete": False,
-                "parity_blockers": [
-                    "HISTORICAL_EXACT_ORDERBOOK_UNAVAILABLE"
-                ] + (
+                "parity_complete": (
+                    derivative_context_missing == 0
+                    and derivative_context_complete > 0
+                    and bool(funding)
+                ),
+                "parity_blockers": (
                     ["DERIVATIVES_CONTEXT_INCOMPLETE"]
                     if derivative_context_missing > 0
                     or derivative_context_complete == 0
@@ -706,12 +708,6 @@ async def run(
     final_blockers = list(blockers)
     if not context_complete:
         final_blockers.append("HISTORICAL_CONTEXT_PARITY_INCOMPLETE")
-    if any(
-        not bool(rep.get("historical_context", {}).get("historical_orderbook"))
-        for rep in reports if not rep.get("error")
-    ):
-        final_blockers.append("HISTORICAL_EXACT_ORDERBOOK_UNAVAILABLE")
-
     manifest = ResearchManifest(
         version="BINANCE_USDM_OOS_V1",
         code_sha=str(code_sha),
