@@ -99,6 +99,9 @@ class ManagedOrder:
     # ambiguous submit can still be protected after the fill is proven:
     # {"direction": LONG|SHORT, "entry": float, "sl": float, "tp": float}.
     protection_plan: Optional[dict] = None
+    # Observability lineage only: stable NEXUS candidate that originated this
+    # opening intent. Legacy records may omit it.
+    candidate_id: Optional[str] = None
 
     def transition(self, novo: OrderState, **info):
         """
@@ -267,6 +270,7 @@ class ManagedOrder:
             "order_id": self.order_id, "filled_qty": self.filled_qty,
             "terminal": self.is_terminal,
             "transitions": len(self.history),
+            "candidate_id": self.candidate_id,
         }
 
     def to_record(self) -> dict:
@@ -293,6 +297,7 @@ class ManagedOrder:
             "protection_plan": (
                 dict(self.protection_plan) if self.protection_plan else None
             ),
+            "candidate_id": self.candidate_id,
         }
 
     @classmethod
@@ -340,6 +345,13 @@ class ManagedOrder:
         order.protection_plan = normalize_protection_plan(
             record.get("protection_plan")
         )
+        candidate_id = str(record.get("candidate_id") or "")
+        if candidate_id and (
+            len(candidate_id) > 96
+            or any(ch.isspace() for ch in candidate_id)
+        ):
+            raise ValueError("invalid managed order candidate_id")
+        order.candidate_id = candidate_id or None
         return order
 
 
