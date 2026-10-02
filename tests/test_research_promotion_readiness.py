@@ -5,6 +5,7 @@ import unittest
 from bot.research_promotion_readiness import (
     evaluate_readiness,
     evidence_gate_flags,
+    microstructure_evidence,
 )
 
 
@@ -230,6 +231,37 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
         )
         self.assertFalse(result.ready_for_operator_review)
         self.assertIn("METHODOLOGY_GREEN", result.blockers)
+
+
+    def test_microstructure_evidence_is_separate_from_core_gate(self):
+        report = {
+            "population_n": 20,
+            "microstructure_complete_n": 20,
+            "observed_n": 20,
+            "spread_delta_r": 0.15,
+            "spearman_delta": 0.08,
+        }
+        evidence = microstructure_evidence(report)
+        self.assertEqual(evidence["status"], "EVIDENCE_AVAILABLE")
+        self.assertTrue(evidence["evidence_complete"])
+        self.assertEqual(evidence["execution_effect"], "NONE")
+        self.assertFalse(evidence["promotion_authority"])
+
+    def test_microstructure_partial_population_is_insufficient(self):
+        evidence = microstructure_evidence({
+            "population_n": 20,
+            "microstructure_complete_n": 19,
+            "observed_n": 19,
+            "spread_delta_r": 0.15,
+            "spearman_delta": 0.08,
+        })
+        self.assertEqual(evidence["status"], "INSUFFICIENT_EVIDENCE")
+        self.assertFalse(evidence["evidence_complete"])
+
+    def test_microstructure_missing_is_not_evaluated(self):
+        evidence = microstructure_evidence(None)
+        self.assertEqual(evidence["status"], "NOT_EVALUATED")
+        self.assertFalse(evidence["promotion_authority"])
 
 
 if __name__ == "__main__":
