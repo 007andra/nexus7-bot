@@ -9,6 +9,7 @@ import asyncio
 import csv
 import hashlib
 import io
+import math
 import re
 import zipfile
 from dataclasses import dataclass
@@ -70,6 +71,9 @@ class ResearchKline:
     def __post_init__(self) -> None:
         if self.open_time < 0 or self.close_time <= self.open_time:
             raise ValueError("invalid kline timestamps")
+        values = (self.open, self.high, self.low, self.close, self.volume)
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("non-finite kline value")
         if min(self.open, self.high, self.low, self.close) <= 0:
             raise ValueError("invalid kline price")
         if self.high < max(self.open, self.close, self.low):
@@ -95,6 +99,14 @@ class FundingObservation:
     timestamp: int
     funding_interval_hours: int
     funding_rate: float
+
+    def __post_init__(self) -> None:
+        if self.timestamp <= 0:
+            raise ValueError("invalid funding timestamp")
+        if self.funding_interval_hours <= 0:
+            raise ValueError("invalid funding interval")
+        if not math.isfinite(float(self.funding_rate)):
+            raise ValueError("non-finite funding rate")
 
 
 @dataclass(frozen=True)
