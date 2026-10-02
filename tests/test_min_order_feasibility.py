@@ -66,7 +66,7 @@ def _snapshot(symbol, *, taker=0.0005, slippage_allowance=0.002):
 def _evaluate(symbol, info, entry, stop, *, equity=8.75830036, risk_pct=0.005):
     eng = _engine(symbol, info, equity=equity, risk_pct=risk_pct)
     sig = SimpleNamespace(symbol=symbol, entry=entry, sl=stop, direction="LONG")
-    with patch.object(gate, "snapshot_for", AsyncMock(return_value=(_snapshot(symbol), False))), \
+    with patch.object(gate.execution_cost, "reusable_snapshot", return_value=_snapshot(symbol)), \
          patch.object(gate, "read_account_capital", AsyncMock(return_value=_CapitalSnapshot(equity))), \
          patch.object(gate, "recovery_size_multiplier", return_value=1.0):
         return asyncio.run(gate.evaluate_candidate(eng, sig))
@@ -120,7 +120,7 @@ def test_recovery_multiplier_is_applied_to_same_risk_budget_math():
     info = _binance("1", "1", "5")
     eng = _engine(symbol, info, risk_pct=0.01)
     sig = SimpleNamespace(symbol=symbol, entry=0.20, sl=0.199, direction="LONG")
-    with patch.object(gate, "snapshot_for", AsyncMock(return_value=(_snapshot(symbol), False))), \
+    with patch.object(gate.execution_cost, "reusable_snapshot", return_value=_snapshot(symbol)), \
          patch.object(gate, "read_account_capital", AsyncMock(return_value=_CapitalSnapshot())), \
          patch.object(gate, "recovery_size_multiplier", return_value=0.5):
         decision = asyncio.run(gate.evaluate_candidate(eng, sig))
@@ -187,7 +187,7 @@ def test_pass_only_delegates_to_existing_chain():
     assert engine.existing_chain_calls == 1
 
 
-def test_ambiguous_feasibility_failure_is_candidate_only_fail_closed():
+def test_ambiguous_feasibility_failure_defers_to_existing_fail_closed_chain():
     class Engine:
         _min_order_feasibility_installed = False
 
@@ -198,13 +198,39 @@ def test_ambiguous_feasibility_failure_is_candidate_only_fail_closed():
 
         async def _open(self, sig):
             self.existing_chain_calls += 1
+            return "downstream-authority"
 
-    gate.install(Engine, _Log())
+    log = _Log()
+    gate.install(Engine, log)
     engine = Engine()
     with patch.object(gate, "evaluate_candidate", AsyncMock(side_effect=RuntimeError("read failed"))):
         result = asyncio.run(engine._open(SimpleNamespace(symbol="TESTUSDT")))
-    assert result is None
-    assert engine.existing_chain_calls == 0
+    assert result == "downstream-authority"
+    assert engine.existing_chain_calls == 1
+    assert any("result=DEFER" in text for _, text in log.records)
+
+
+def test_margin_only_block_is_deferred_not_stolen_from_downstream_authority():
+    symbol = "ETHUSDT"
+    info = _binance("0.001", "0.001", "20")
+    eng = _engine(symbol, info, equity=1000, risk_pct=0.01)
+    sig = SimpleNamespace(symbol=symbol, entry=100.0, sl=99.5, direction="LONG")
+    # Fresh account shape normalizes to zero available collateral; the already
+    # confirmed V3 snapshot supplies the capital proof used by the real sizing
+    # path. Then force a tiny margin cap so decomposition reaches MARGIN_CAP.
+    v3_capital = CapitalState(equity=1000, available_collateral=0.01)
+    eng.risk.professional_snapshot = SimpleNamespace(
+        confirmed=True,
+        capital=v3_capital,
+    )
+    with patch.object(gate.execution_cost, "reusable_snapshot", return_value=None), \
+         patch.object(gate.execution_cost, "fallback_taker_fee", return_value=0.0006), \
+         patch.object(gate, "read_account_capital", AsyncMock(side_effect=RuntimeError("partial"))), \
+         patch.object(gate, "recovery_size_multiplier", return_value=1.0):
+        decision = asyncio.run(gate.evaluate_candidate(eng, sig))
+    assert decision.allowed is True
+    assert decision.proven is False
+    assert decision.reason == "DEFER_MARGIN_CAP_BINDING"
 
 
 def test_paper_and_nonpilot_paths_are_unchanged():
