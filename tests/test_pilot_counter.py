@@ -14,6 +14,12 @@ class PilotCounterTests(PilotFixture):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.client.place_order = AsyncMock(return_value={'orderId': 'mock'})
+        # This suite counts pilot submissions with a client that has no exchange;
+        # F-013 post-fill exchange reconciliation is isolated (own tests cover it).
+        from unittest.mock import patch
+        patcher = patch("bot.postfill_geometry.reconcile_after_open", AsyncMock(return_value="UNCONFIRMED"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.client.wait_for_fill = AsyncMock(
             return_value={
                 'filled': True,

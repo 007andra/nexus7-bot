@@ -149,6 +149,12 @@ def _material_change(previous, record, tick_size):
 
 async def sync(engine):
     """LIVE loop hook: persist new peaks / partial state, never raising."""
+    try:
+        # F-013: geometry is persisted only after it is confirmed on the exchange.
+        from bot import postfill_geometry
+        await postfill_geometry.reconcile_pending(engine)
+    except Exception as exc:
+        log.error("[POSTFILL_GEOMETRY_UNCONFIRMED] stage=loop_sync error=%s", type(exc).__name__)
     for symbol, position in list((getattr(engine, "positions", {}) or {}).items()):
         try:
             info = (getattr(engine, "instruments", None) or {}).get(symbol) or {}
@@ -233,6 +239,14 @@ async def restore(engine, symbol):
             reason = f"read_failed:{type(exc).__name__}"
     if reason:
         position.initial_sl = None
+        if reason == "exit_geometry_unavailable":
+            # F-013: crash between fill and geometry confirmation. The entry was
+            # proven by the restart ownership proof; the stop is read from the
+            # exchange by the post-fill reconciliation — never fabricated.
+            from bot import postfill_geometry
+            postfill_geometry.mark_unconfirmed(position, order_id=oid,
+                                               proven_entry=position.entry,
+                                               reason="restart_without_geometry")
         tag = "EXIT_GEOMETRY_LINEAGE_MISMATCH" if reason.startswith("lineage_mismatch") \
             else "EXIT_GEOMETRY_RESTORE_REJECTED"
         log.critical(

@@ -3442,43 +3442,17 @@ class TradingEngine:
                 return
 
             # ══════════════════════════════════════════════════════
-            # P1 (Auditoria forense final) — PREÇO DE EXECUÇÃO
+            # F-013 — GEOMETRIA PÓS-FILL ÚNICA
             #
-            # GAP ENCONTRADO: wait_for_fill() já consulta
-            # GET /api/v1/orders/{orderId}, que a KuCoin responde com
-            # dealSize/dealValue (de onde dá para derivar o preço médio
-            # REAL de execução). O código descartava esse dado e usava
-            # o ticker público em cache como aproximação — uma fonte
-            # menos precisa quando já havia uma mais precisa disponível
-            # na mesma resposta que acabara de ser consultada.
-            #
-            # Prioridade: avgDealPrice/dealValue-dealSize (dado real da
-            # ordem) > ticker em cache (aproximação de mercado).
+            # O sinal NÃO é mais deslocado pelo delta do fill: o stop nativo
+            # já enviado à KuCoin permanecia no nível original enquanto a
+            # Position nascia com SL/TP deslocados (duas geometrias). O
+            # ticker em cache nunca é prova de fill (INV-FILL-AUTHORITY-001).
+            # Em LIVE a Position nasce UNCONFIRMED (initial_sl=None, saídas
+            # por R fail-closed) e postfill_geometry a reconcilia: fill
+            # autoritativo -> stop ativo na exchange -> risco F-003.
             # ══════════════════════════════════════════════════════
-            try:
-                _fill = 0.0
-                _st = _fill_check.get("status", {}) or {}
-                _deal_size  = float(_st.get("dealSize", 0)  or 0)
-                _deal_value = float(_st.get("dealValue", 0) or 0)
-                if _deal_size > 0 and _deal_value > 0:
-                    _fill = _deal_value / _deal_size   # preço médio real
-                if _fill <= 0:
-                    _tk = self.client.get_cached_ticker(sig.symbol) or {}
-                    _fill = float(_tk.get("lastPrice", 0) or 0)
-                if _fill > 0:
-                    _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
-                    if _slip_pct > 0.05:
-                        log.warning(
-                            f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
-                            f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
-                        )
-                    # Desloca SL/TP na mesma proporção para preservar o R:R
-                    _delta = _fill - sig.entry
-                    sig.entry += _delta
-                    sig.sl    += _delta
-                    sig.tp    += _delta
-            except Exception as e:
-                log.debug(f"fill price {sig.symbol}: {e}")
+            _planned_entry, _planned_sl, _planned_tp = sig.entry, sig.sl, sig.tp
 
             # EXEC-01: `qty` aqui vem de RiskManager.size() e JÁ está em
             # UNIDADE BASE — NÃO converter. Este é o caminho de origem
@@ -3487,6 +3461,13 @@ class TradingEngine:
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
+            if not self.paper_trade:
+                from bot import postfill_geometry
+                await postfill_geometry.reconcile_after_open(
+                    self, pos, fill_status=(_fill_check.get("status") or {}),
+                    order_id=_oid_real, planned_entry=_planned_entry,
+                    planned_sl=_planned_sl, planned_tp=_planned_tp,
+                )
             # Diagnostic filled-position count only. Submission was consumed
             # before sending, including every ambiguous/error path.
             if self.pilot.enabled:
@@ -3525,10 +3506,12 @@ class TradingEngine:
                     )
                 else:
                     trade_id = await db.save_trade_open(
-                        sig.symbol, side, sig.entry, qty,
+                        sig.symbol, side, pos.entry, pos.qty,
                         cfg.LEVERAGE, pre_score["total"],
                         score_features=_feats,
-                        sl=sig.sl,             # ITEM 4: define 1R do trade
+                        # ITEM 4 / F-013: 1R from the CONFIRMED initial stop;
+                        # while unconfirmed, the stop actually sent natively.
+                        sl=pos.initial_sl if pos.initial_sl is not None else pos.sl,
                         direction=sig.direction,
                     )
             except db.PersistenceError as exc:
