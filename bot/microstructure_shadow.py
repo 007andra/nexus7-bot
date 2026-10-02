@@ -139,15 +139,22 @@ def build_snapshot(
     mid = (best_bid + best_ask) / 2.0
     spread_bps = (best_ask - best_bid) / mid * 10_000.0
 
-    book_event_ms = int(
+    raw_book_event_ms = (
         depth.get("E")
         or depth.get("T")
         or depth.get("eventTime")
-        or now_ms
+    )
+    # REST /fapi/v1/depth has no exchange event timestamp. In that case the
+    # only defensible causal timestamp is when this response was collected;
+    # do not pretend Binance supplied event-time freshness.
+    book_event_ms = int(
+        raw_book_event_ms
+        if raw_book_event_ms is not None
+        else now_ms
     )
     if book_event_ms > now_ms:
         raise ValueError("future book timestamp")
-    if now_ms - book_event_ms > max_age_ms:
+    if raw_book_event_ms is not None and now_ms - book_event_ms > max_age_ms:
         raise ValueError("stale order book")
 
     bid_10 = _notional_within(bids, mid=mid, band=0.001)
