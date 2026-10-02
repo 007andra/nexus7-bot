@@ -114,6 +114,13 @@ def apply_exchange_order_truth(
         raise ValueError("non-finite durable order quantity")
     if requested <= 0:
         raise ValueError("invalid durable requested quantity")
+    if data.get("size") not in (None, ""):
+        # F-011 INV-ORDER-FILL-001: exchange cumulative fill bounded by the
+        # exchange order size, which must belong to this order.
+        from bot.order_event_identity import check_fill
+        instruments = getattr(engine, "instruments", None) or {}
+        check_fill(order, filled=filled, size=data.get("size"),
+                   info=instruments.get(order.symbol) if isinstance(instruments, dict) else None)
 
     has_active_flag = "isActive" in data
     active = bool(data.get("isActive")) if has_active_flag else None

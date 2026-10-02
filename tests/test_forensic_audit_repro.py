@@ -165,7 +165,8 @@ class F010DurableBlockConflationTests(unittest.IsolatedAsyncioTestCase):
 # validating symbol/side and re-index any orderId onto the internal order.
 # ---------------------------------------------------------------------------
 class F011PrivateWsIdentityTests(unittest.IsolatedAsyncioTestCase):
-    @unittest.expectedFailure
+    # FIXED (F-011): permanent regression guard. Full coverage:
+    # tests/test_order_event_identity.py.
     async def test_event_for_other_symbol_must_not_mutate_or_reindex(self):
         from bot.kucoin import KuCoinClient
         from bot.order_state import OrderRegistry, OrderState
@@ -186,6 +187,7 @@ class F011PrivateWsIdentityTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertIsNone(registry.get_by_order_id("foreign-9"))
         self.assertEqual(order.state, OrderState.SUBMITTED)
+        self.assertEqual(order.filled_qty, 0.0)
 
 
 # ---------------------------------------------------------------------------

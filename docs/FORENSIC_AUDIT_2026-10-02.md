@@ -231,11 +231,14 @@ Template fields abbreviated where obvious. "Repro" = test in `tests/test_forensi
 - **Repro:** `F010DurableBlockConflationTests`.
 - **Fix:** separate reasons (`orders_persist` vs `orders_unresolved`); only `reconcile_pending`/startup reconcile may clear `orders_unresolved`.
 
-#### F-011 — Private-WS events mutate internal orders without identity validation; overfill accepted
+#### F-011 — Private-WS events mutate internal orders without identity validation; overfill accepted (FIXED)
 - `bot/kucoin.py:1853-1946`. Correlation by orderId, fallback by clientOid, **no check of symbol/side**; `registry.index_order_id(order_id, mo.client_oid)` maps any incoming orderId onto the internal order; `filled_qty` not bounded by `qty`.
 - **Repro:** `F011PrivateWsIdentityTests` — an `ETHUSDTM` sell event carrying the BTC order's clientOid indexes `foreign-9` and marks the BTC Buy order `FILLED` with `filled_qty=7.0` (qty 2.0). The result is persisted by the callback.
 - External events are untrusted (rule 15). Impact: wrong FILLED state, wrong exposure accounting, `unreconciled_filled_orders` keyed to wrong symbol.
 - **Fix:** reject events whose `symbol`/`side` mismatch the ManagedOrder, refuse re-index when an orderId is already bound to another clientOid or the order already has a different `order_id`, clamp/reject `filledSize > qty`.
+
+- **Fixed (2026-10-02):** `bot/order_event_identity.py` is the single identity/fill validator. The private-WS handler now resolves a candidate (orderId vs clientOid conflict ⇒ reject), proves identity (canonical symbol mandatory, clientOid/orderId must not contradict, ≥1 strong id must match, side must match, reduceOnly/closeOrder events never touch entry orders) and bounds the cumulative contract fill by the exchange order `size` (which must match the order) BEFORE any mutation; duplicates are no-ops and nothing is persisted unless state changed. `ManagedOrder.transition` rejects decreasing/non-finite cumulative fills; `OrderRegistry.index_order_id` refuses orderId rebinding; REST `apply_exchange_order_truth` applies the same fill bound. Tests: `tests/test_order_event_identity*.py`.
+- **New finding F-011B (P2, not fixed):** `ManagedOrder.qty` unit is not formalized — entry orders created by `engine._open` store BASE qty while client-created reduce orders store CONTRACTS, and KuCoin `filledSize` is always CONTRACTS. `apply_exchange_order_truth` compares `filled >= qty` across units (correct by accident for multiplier<1, never 'full' for multiplier>1 symbols such as DOGE). Proposed: add an explicit `qty_unit` to ManagedOrder.
 
 #### F-012 — Naked-position emergency close sends contracts as base quantity (1000× for BTC)
 - `bot/prelive_protection_failclosed.py:183` passes `qty=size` where `size = abs(currentQty)` in **contracts** (`kucoin.get_positions`, `kucoin.py:1603`). `place_order` expects base-asset quantity and converts once more (`quantity.base_to_contracts`).

@@ -26,6 +26,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-race-partial",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "match",
                 "status": "match",
                 "filledSize": "0.4",
@@ -46,6 +48,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-direct-fill",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "match",
                 "status": "done",
                 "filledSize": "1.0",
@@ -67,6 +71,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-late-open",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "match",
                 "status": "match",
                 "filledSize": "0.2",
@@ -80,6 +86,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-late-open",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "open",
                 "status": "open",
                 "filledSize": "0",
@@ -96,6 +104,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-dup-partial",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "match",
                 "status": "match",
                 "filledSize": "0.5",
@@ -116,6 +126,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-part-cancel",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "match",
                 "status": "match",
                 "filledSize": "0.3",
@@ -128,6 +140,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-part-cancel",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "canceled",
                 "status": "done",
                 "filledSize": "0.3",
@@ -145,6 +159,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-fill-cancel",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "match",
                 "status": "done",
                 "filledSize": "1.0",
@@ -157,6 +173,8 @@ class PrivateWsRaceHardeningTests(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "orderId": "oid-fill-cancel",
                 "clientOid": order.client_oid,
+                "symbol": "XBTUSDTM",  # real tradeOrders payloads carry symbol
+                "size": str(order.qty),  # and the order size (contracts)
                 "type": "canceled",
                 "status": "done",
                 "filledSize": "0",

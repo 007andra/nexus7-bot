@@ -1887,10 +1887,19 @@ class KuCoinClient:
         if registry is None:
             return
 
-        # Correlação primária por orderId (Fase 2); fallback client_oid
-        mo = registry.get_by_order_id(order_id) if order_id else None
-        if mo is None and client_oid:
-            mo = registry.get(client_oid)
+        # F-011: identify a candidate, then PROVE identity and fill validity
+        # before any registry/order mutation (bot.order_event_identity).
+        from bot.order_event_identity import (
+            OrderEventRejected, check_fill, check_identity, log_rejection,
+        )
+        by_id = registry.get_by_order_id(order_id) if order_id else None
+        by_coid = registry.get(client_oid) if client_oid else None
+        if by_id is not None and by_coid is not None and by_id is not by_coid:
+            log_rejection("PRIVATE_WS", "identifier_conflict", by_id,
+                          symbol=data.get("symbol", ""), order_id=order_id,
+                          client_oid=client_oid)
+            return
+        mo = by_id or by_coid
         if mo is None:
             # Evento de uma ordem que este processo não rastreia (ex:
             # ordem manual do usuário, ou processo reiniciado). Não é
@@ -1901,8 +1910,24 @@ class KuCoinClient:
             )
             return
 
-        if order_id:
-            registry.index_order_id(order_id, mo.client_oid)
+        _type   = data.get("type", "")
+        _status = data.get("status", "")
+        try:
+            check_identity(
+                mo, symbol=data.get("symbol", ""), order_id=order_id,
+                client_oid=client_oid, side=data.get("side"),
+                reduce_only=data.get("reduceOnly"), close_order=data.get("closeOrder"),
+            )
+            filled = None
+            if _type in ("match", "filled") or _status == "done":
+                info = (getattr(self, "_instruments", None) or {}).get(mo.symbol)
+                filled = check_fill(mo, filled=data.get("filledSize", 0),
+                                    size=data.get("size"), info=info)
+        except OrderEventRejected as exc:
+            log_rejection("PRIVATE_WS", exc.reason, mo, symbol=data.get("symbol", ""),
+                          order_id=order_id, client_oid=client_oid,
+                          filled=data.get("filledSize"))
+            return
 
         _evt_ts = float(data.get("ts", 0) or 0) / 1e9 if data.get("ts") else time.time()
         # Evento mais antigo que a última atualização conhecida: ignora
@@ -1914,20 +1939,17 @@ class KuCoinClient:
             )
             return
 
-        _type   = data.get("type", "")
-        _status = data.get("status", "")
-        filled  = float(data.get("filledSize", 0) or 0)
-        match_sz = float(data.get("matchSize", 0) or 0)
         match_px = float(data.get("matchPrice", 0) or 0)
-
+        before = (mo.state, mo.filled_qty, mo.order_id)
+        bind = {"order_id": order_id} if order_id else {}
         try:
             if _type == "canceled" or (_status == "done" and filled == 0):
-                mo.transition(OrderState.CANCELLED, source="WS")
+                mo.transition(OrderState.CANCELLED, source="WS", **bind)
             elif _status == "done" and filled > 0:
                 mo.transition(
                     OrderState.FILLED, filled_qty=filled,
                     avg_price=match_px if match_px else mo.avg_price,
-                    source="WS",
+                    source="WS", **bind,
                 )
                 log.info(
                     f"✅ [FILLED] source=PRIVATE_WS "
@@ -1937,18 +1959,30 @@ class KuCoinClient:
                     f"tradeOrders:{data.get('symbol','?')}"
                 )
             elif _type == "match":
-                mo.transition(
-                    OrderState.PARTIALLY_FILLED, filled_qty=filled,
-                    avg_price=match_px if match_px else mo.avg_price,
-                    source="WS",
-                )
+                if filled is not None and abs(filled - float(mo.filled_qty or 0)) <= 1e-12 \
+                        and mo.state == OrderState.PARTIALLY_FILLED:
+                    pass   # duplicate cumulative fill: idempotent no-op
+                else:
+                    mo.transition(
+                        OrderState.PARTIALLY_FILLED, filled_qty=filled,
+                        avg_price=match_px if match_px else mo.avg_price,
+                        source="WS", **bind,
+                    )
             elif _type == "open" and mo.state == OrderState.SUBMITTING:
                 mo.transition(OrderState.SUBMITTED, order_id=order_id, source="WS")
         except InvalidTransition as e:
             # Transição impossível pelo evento WS — não é bug do WS
             # necessariamente, pode ser reconexão com evento fora de
             # ordem. Loga e mantém o estado atual (fail-safe).
-            log.warning(f"WS privado: transição inválida ignorada: {e}")
+            log.warning(f"[ORDER_EVENT_TRANSITION_REJECTED] WS privado: {e}")
+            return
+
+        if order_id and mo.order_id == order_id:
+            registry.index_order_id(order_id, mo.client_oid)
+        if (mo.state, mo.filled_qty, mo.order_id) == before:
+            return   # nothing changed: no persistence (idempotent)
+        log.info("[ORDER_EVENT_ACCEPTED] clientOid=%s orderId=%s symbol=%s state=%s filled=%s",
+                 mo.client_oid, mo.order_id or "?", mo.symbol, mo.state.value, mo.filled_qty)
 
         persist_callback = getattr(registry, "persist_callback", None)
         if callable(persist_callback):
