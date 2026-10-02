@@ -6,6 +6,7 @@ independent evidence engine.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Mapping, Sequence
 
@@ -39,10 +40,16 @@ def compare_rankers_oos(
     ids = [item.candidate_id for item in items]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate candidate id")
+    complete = [
+        item for item in items
+        if item.microstructure_alignment is not None
+        and item.taker_pressure is not None
+        and item.depth_notional_1pct is not None
+    ]
     observed = [
-        item
-        for item in items
+        item for item in complete
         if item.candidate_id in realized_r
+        and math.isfinite(float(realized_r[item.candidate_id]))
     ]
     base = evaluate_ranked_outcomes(
         [strip_microstructure(item) for item in observed],
@@ -55,12 +62,7 @@ def compare_rankers_oos(
     enriched_spearman = enriched.get("rank_outcome_spearman")
     return {
         "population_n": len(items),
-        "microstructure_complete_n": sum(
-            1 for item in items
-            if item.microstructure_alignment is not None
-            and item.taker_pressure is not None
-            and item.depth_notional_1pct is not None
-        ),
+        "microstructure_complete_n": len(complete),
         "observed_n": len(observed),
         "base": base,
         "microstructure": enriched,
