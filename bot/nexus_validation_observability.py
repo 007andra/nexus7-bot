@@ -44,6 +44,15 @@ def observe_nexus_validation(method):
         try:
             await nexus_persistence.record_decision(sig, decision)
             asyncio.create_task(nexus_persistence.evaluate_pending(self.client))
+            try:
+                from bot import nexus_shadow_drift
+                asyncio.create_task(nexus_shadow_drift.refresh())
+            except Exception as exc:
+                log.debug(
+                    "[NEXUS_SHADOW_DRIFT] schedule_failed error=%s "
+                    "decision_effect=NONE execution_effect=NONE",
+                    type(exc).__name__,
+                )
         except Exception as exc:
             log.debug(
                 "[NEXUS_PERSISTENCE] best_effort_failed error=%s "
