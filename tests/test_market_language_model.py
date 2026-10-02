@@ -18,8 +18,8 @@ def test_market_language_model_fails_closed_on_short_history():
     assert out.direction.value == "WAIT"
 
 
-def test_market_language_model_emits_long_when_native_forecast_is_strong(monkeypatch):
-    forecast = MarketLanguageForecast(
+def _strong_long_forecast():
+    return MarketLanguageForecast(
         probability_up=0.82,
         probability_down=0.18,
         probability_flat=0.0,
@@ -33,21 +33,9 @@ def test_market_language_model_emits_long_when_native_forecast_is_strong(monkeyp
         sample_count=128,
     )
 
-    import bot.market_language_model as mlm
-    monkeypatch.setattr(mlm, "forecast_distribution", lambda *a, **k: forecast)
 
-    c, h, l, v = _inputs()
-    out = model_market_language(c, h, l, v)
-
-    assert out.available is True
-    assert out.direction.value == "LONG"
-    assert out.confidence > 0
-    assert out.details["native"] is True
-    assert out.details["external_model"] is False
-
-
-def test_market_language_model_abstains_instead_of_diluting_weak_edge(monkeypatch):
-    forecast = MarketLanguageForecast(
+def _weak_forecast():
+    return MarketLanguageForecast(
         probability_up=0.52,
         probability_down=0.48,
         probability_flat=0.0,
@@ -61,11 +49,35 @@ def test_market_language_model_abstains_instead_of_diluting_weak_edge(monkeypatc
         sample_count=128,
     )
 
-    import bot.market_language_model as mlm
-    monkeypatch.setattr(mlm, "forecast_distribution", lambda *a, **k: forecast)
 
-    c, h, l, v = _inputs()
-    out = model_market_language(c, h, l, v)
+def test_market_language_model_emits_long_when_native_forecast_is_strong():
+    import bot.market_language_model as mlm
+
+    original = mlm.forecast_distribution
+    mlm.forecast_distribution = lambda *a, **k: _strong_long_forecast()
+    try:
+        c, h, l, v = _inputs()
+        out = model_market_language(c, h, l, v)
+    finally:
+        mlm.forecast_distribution = original
+
+    assert out.available is True
+    assert out.direction.value == "LONG"
+    assert out.confidence > 0
+    assert out.details["native"] is True
+    assert out.details["external_model"] is False
+
+
+def test_market_language_model_abstains_instead_of_diluting_weak_edge():
+    import bot.market_language_model as mlm
+
+    original = mlm.forecast_distribution
+    mlm.forecast_distribution = lambda *a, **k: _weak_forecast()
+    try:
+        c, h, l, v = _inputs()
+        out = model_market_language(c, h, l, v)
+    finally:
+        mlm.forecast_distribution = original
 
     assert out.available is False
     assert out.direction.value == "WAIT"
