@@ -50,6 +50,7 @@ def install() -> None:
     from bot import nexus_structure_semantics as _nexus_structure_semantics
     from bot import nexus_decision_consistency as _nexus_decision_consistency
     from bot import nexus_live_cost_calibration as _nexus_live_cost_calibration
+    from bot import min_order_feasibility as _min_order_feasibility
     from bot import nexus_prefinal_veto_observability as _nexus_prefinal_veto_observability
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import daily_stop_runtime_hardening as _daily_stop_runtime_hardening
@@ -184,6 +185,7 @@ def install() -> None:
     _nexus_structure_semantics.install(_nexus_ai, _log)
     _nexus_decision_consistency.install(_nexus_ai, _log)
     _nexus_live_cost_calibration.install(TradingEngine, _nexus_ai, _log)
+    _min_order_feasibility.install(TradingEngine, _log)
     _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
 
