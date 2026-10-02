@@ -402,6 +402,161 @@ def _receipt_key(symbol: str, opening_order_id: str) -> str:
     return "binance:exit_forensics:" + token
 
 
+def _opening_context(engine, opening_order_id: str) -> dict | None:
+    """Read durable candidate geometry already held by OrderRegistry."""
+    registry = getattr(engine, "orders", None)
+    if registry is None:
+        return None
+    order = None
+    getter = getattr(registry, "get_by_order_id", None)
+    if callable(getter):
+        try:
+            order = getter(str(opening_order_id))
+        except Exception:
+            order = None
+    if order is None:
+        try:
+            rows = registry.snapshot()
+        except Exception:
+            rows = []
+        row = next(
+            (
+                item for item in rows
+                if isinstance(item, dict)
+                and str(item.get("order_id") or "") == str(opening_order_id)
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        return {
+            "candidate_id": str(row.get("candidate_id") or "") or None,
+            "protection_plan": (
+                dict(row.get("protection_plan"))
+                if isinstance(row.get("protection_plan"), dict) else None
+            ),
+        }
+    return {
+        "candidate_id": str(getattr(order, "candidate_id", "") or "") or None,
+        "protection_plan": (
+            dict(getattr(order, "protection_plan", None))
+            if isinstance(getattr(order, "protection_plan", None), dict)
+            else None
+        ),
+    }
+
+
+def build_execution_attribution(
+    engine,
+    *,
+    opening_order_id: str,
+    receipt: dict,
+) -> dict:
+    """Attribute fills/costs only from durable plan + fills-authoritative receipt."""
+    out = {
+        "status": "UNAVAILABLE",
+        "execution_effect": "NONE",
+    }
+    if not isinstance(receipt, dict):
+        return out
+    if (
+        receipt.get("status") != "RECONCILED"
+        or receipt.get("pnl_fill_authority") is not True
+    ):
+        return out
+
+    context = _opening_context(engine, opening_order_id)
+    if not context or not isinstance(context.get("protection_plan"), dict):
+        out["reason"] = "DURABLE_PROTECTION_PLAN_UNAVAILABLE"
+        return out
+
+    plan = context["protection_plan"]
+    try:
+        direction = str(plan["direction"]).upper()
+        planned_entry = float(plan["entry"])
+        actual_entry = float(receipt["open_vwap"])
+        actual_exit = float(receipt["close_vwap"])
+        qty = float(receipt["opening_qty"])
+        fees = float(receipt["commission"])
+        funding = float(receipt["funding"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        out["reason"] = "ATTRIBUTION_INPUT_INVALID"
+        return out
+    if (
+        direction not in {"LONG", "SHORT"}
+        or min(planned_entry, actual_entry, actual_exit, qty) <= 0
+        or fees < 0
+        or not all(math.isfinite(value) for value in (
+            planned_entry, actual_entry, actual_exit, qty, fees, funding
+        ))
+    ):
+        out["reason"] = "ATTRIBUTION_INPUT_INVALID"
+        return out
+
+    side_mult = 1.0 if direction == "LONG" else -1.0
+    entry_slippage_bps = (
+        side_mult * (actual_entry - planned_entry) / planned_entry * 10_000.0
+    )
+    out.update({
+        "status": "ENTRY_ATTRIBUTED",
+        "candidate_id": context.get("candidate_id"),
+        "direction": direction,
+        "planned_entry": planned_entry,
+        "actual_entry": actual_entry,
+        "entry_slippage_bps": entry_slippage_bps,
+        "fees": fees,
+        "funding": funding,
+    })
+
+    close_ids = list(receipt.get("close_order_ids") or [])
+    cause = str(receipt.get("cause") or "")
+    planned_exit = None
+    if len(close_ids) == 1 and cause == "BGX_ALGO_STOP_MARKET":
+        planned_exit = float(plan.get("sl", 0) or 0)
+    elif (
+        len(close_ids) == 1
+        and cause.startswith("BGX_ALGO_TAKE_PROFIT")
+    ):
+        planned_exit = float(plan.get("tp", 0) or 0)
+
+    if planned_exit is None or planned_exit <= 0:
+        out["reason"] = "EXIT_PLAN_NOT_SINGLE_LEVEL_AUTHORITATIVE"
+        return out
+
+    from bot.trade_attribution import TradeAttributionInput, attribute_trade
+
+    attribution = attribute_trade(TradeAttributionInput(
+        side=direction,
+        qty=qty,
+        decision_entry=planned_entry,
+        actual_entry=actual_entry,
+        decision_exit=planned_exit,
+        actual_exit=actual_exit,
+        fees=fees,
+        funding=funding,
+        regime="UNKNOWN",
+        exit_reason=cause,
+    ))
+    try:
+        exchange_net = float(receipt["net_after_funding"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        exchange_net = float("nan")
+    tolerance = max(1e-8, abs(exchange_net) * 1e-6) if math.isfinite(exchange_net) else 0.0
+    reconciles_exchange = (
+        math.isfinite(exchange_net)
+        and abs(float(attribution["net_pnl"]) - exchange_net) <= tolerance
+    )
+    out.update({
+        "status": "FULL_ATTRIBUTION",
+        "planned_exit": planned_exit,
+        "actual_exit": actual_exit,
+        "components": attribution,
+        "exchange_net_after_funding": exchange_net,
+        "reconciles_exchange_net": reconciles_exchange,
+    })
+    return out
+
+
 async def _handoff_confirmed_daily_pnl(
     engine, receipt: dict, *, symbol: str, opening_order_id: str, log
 ) -> bool:
@@ -517,6 +672,18 @@ async def capture_exit(
     receipt["captured_at_ms"] = int(time.time() * 1000)
     receipt["source"] = "BINANCE_EXIT_FORENSICS_READ_ONLY"
     receipt["execution_effect"] = "NONE"
+    try:
+        receipt["execution_attribution"] = build_execution_attribution(
+            engine,
+            opening_order_id=opening_order_id,
+            receipt=receipt,
+        )
+    except Exception as exc:
+        receipt["execution_attribution"] = {
+            "status": "UNAVAILABLE",
+            "reason": type(exc).__name__,
+            "execution_effect": "NONE",
+        }
 
     try:
         encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -573,7 +740,8 @@ async def capture_exit(
         "[BINANCE_EXIT_FORENSICS] symbol=%s result=%s opening_order_id=%s "
         "close_order_ids=%s cause=%s cause_authority=%s pnl_fill_authority=%s "
         "open_vwap=%s close_vwap=%s realized_pnl=%s commission=%s funding=%s "
-        "net_after_funding=%s income_crosscheck=%s endpoints=%s "
+        "net_after_funding=%s attribution_status=%s entry_slippage_bps=%s "
+        "attribution_reconciles=%s income_crosscheck=%s endpoints=%s "
         "decision_effect=NONE execution_effect=NONE",
         symbol,
         receipt.get("status", "UNKNOWN"),
@@ -588,6 +756,17 @@ async def capture_exit(
         receipt.get("commission", "NA"),
         receipt.get("funding", "NA"),
         receipt.get("net_after_funding", "NA"),
+        (receipt.get("execution_attribution") or {}).get("status", "UNAVAILABLE"),
+        (
+            f"{float((receipt.get('execution_attribution') or {}).get('entry_slippage_bps')):.3f}"
+            if (receipt.get("execution_attribution") or {}).get("entry_slippage_bps") is not None
+            else "NA"
+        ),
+        str(bool(
+            (receipt.get("execution_attribution") or {}).get(
+                "reconciles_exchange_net", False
+            )
+        )).lower(),
         str(bool(receipt.get("realized_income_crosscheck"))).lower(),
         json.dumps(endpoint_state, sort_keys=True, separators=(",", ":")),
     )
