@@ -234,7 +234,8 @@ class MarketLanguageModel:
             max_order = min(self.order, i)
             for size in range(1, max_order + 1):
                 context = tuple(x.token for x in obs[i-size:i])
-                self.transitions[(size, context, temporal_key)][next_token] += 1
+                if temporal_key is not None:
+                    self.transitions[(size, context, temporal_key)][next_token] += 1
                 self.transitions[(size, context, None)][next_token] += 1
 
     def next_counts(
@@ -335,9 +336,23 @@ def forecast_market_language(
     observations = tokenize_candles(candles)
     if len(observations) < min_tokens:
         return ForecastDistribution(
-            False, f"DATA_UNAVAILABLE: tokens={len(observations)}<{min_tokens}",
-            0, horizon, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            1.0, 0.0, len(observations), len({x.token for x in observations}),
+            available=False,
+            reason=f"DATA_UNAVAILABLE: tokens={len(observations)}<{min_tokens}",
+            sample_count=0,
+            horizon=horizon,
+            probability_up=0.0,
+            probability_down=0.0,
+            mean_return=0.0,
+            median_return=0.0,
+            q10_return=0.0,
+            q90_return=0.0,
+            dispersion=0.0,
+            median_max_upside=0.0,
+            median_max_downside=0.0,
+            entropy=1.0,
+            confidence=0.0,
+            token_count=len(observations),
+            unique_tokens=len({x.token for x in observations}),
         )
 
     model = MarketLanguageModel(observations, order=order)
@@ -381,9 +396,23 @@ def forecast_market_language(
 
     if not terminal_returns:
         return ForecastDistribution(
-            False, "NO_FORECAST_PATHS", 0, horizon, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, len(observations),
-            len({x.token for x in observations}),
+            available=False,
+            reason="NO_FORECAST_PATHS",
+            sample_count=0,
+            horizon=horizon,
+            probability_up=0.0,
+            probability_down=0.0,
+            mean_return=0.0,
+            median_return=0.0,
+            q10_return=0.0,
+            q90_return=0.0,
+            dispersion=0.0,
+            median_max_upside=0.0,
+            median_max_downside=0.0,
+            entropy=1.0,
+            confidence=0.0,
+            token_count=len(observations),
+            unique_tokens=len({x.token for x in observations}),
         )
 
     n = len(terminal_returns)
