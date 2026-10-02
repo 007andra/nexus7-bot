@@ -46,7 +46,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          python -m bot.market_language_binance_replay             --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT             --limit-15m 6000             --warmup 240             --horizon 4             --output artifacts/market_language_binance_oos.json
+          python -m bot.market_language_binance_replay             --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT             --source vision --limit-15m 3000             --warmup 240             --horizon 4             --output artifacts/market_language_binance_oos.json
           code=$?
           set -e
           echo "research_evidence_exit_code=$code"
