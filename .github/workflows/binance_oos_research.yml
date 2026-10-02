@@ -117,6 +117,9 @@ jobs:
           required = {
               "venue": "BINANCE_USDM",
               "source": "data.binance.vision",
+              "evidence_claim": "NEXUS_SELECTION_EDGE",
+              "execution_pnl_claim": False,
+              "instrument_rule_parity": "NOT_MODELED_BY_ALPHA_REPLAY",
               "archive_checksums_verified": True,
               "shared_candidate_population": True,
               "closed_candles_only": True,
