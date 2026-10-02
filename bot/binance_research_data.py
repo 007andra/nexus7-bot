@@ -17,7 +17,9 @@ from pathlib import Path
 
 import aiohttp
 
-_BASE = "https://data.binance.vision/data/futures/um/monthly"
+_ROOT = "https://data.binance.vision/data/futures/um"
+_BASE = _ROOT + "/monthly"
+_DAILY = _ROOT + "/daily"
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{5,30}$")
 _INTERVAL_RE = re.compile(r"^(1m|3m|5m|15m|30m|1h|2h|4h|6h|8h|12h|1d)$")
 _SHA_RE = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -56,6 +58,34 @@ def monthly_funding_url(symbol: str, year: int, month: int) -> str:
     y, m = _ym(year, month)
     name = f"{sym}-fundingRate-{y:04d}-{m:02d}.zip"
     return f"{_BASE}/fundingRate/{sym}/{name}"
+
+
+def _date_parts(value: str) -> tuple[int, int, int]:
+    import datetime as _dt
+
+    try:
+        day = _dt.date.fromisoformat(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("date must be YYYY-MM-DD") from exc
+    if day.year < 2019:
+        raise ValueError("date predates Binance futures archive")
+    return day.year, day.month, day.day
+
+
+def daily_metrics_url(symbol: str, date: str) -> str:
+    sym = _symbol(symbol)
+    y, m, d = _date_parts(date)
+    stamp = f"{y:04d}-{m:02d}-{d:02d}"
+    name = f"{sym}-metrics-{stamp}.zip"
+    return f"{_DAILY}/metrics/{sym}/{name}"
+
+
+def daily_book_depth_url(symbol: str, date: str) -> str:
+    sym = _symbol(symbol)
+    y, m, d = _date_parts(date)
+    stamp = f"{y:04d}-{m:02d}-{d:02d}"
+    name = f"{sym}-bookDepth-{stamp}.zip"
+    return f"{_DAILY}/bookDepth/{sym}/{name}"
 
 
 @dataclass(frozen=True)
@@ -239,7 +269,7 @@ async def download_archive(
     timeout_s: float = 30.0,
 ) -> bytes:
     """Download one allowlisted Binance Vision zip with optional atomic cache."""
-    if not str(url).startswith(_BASE + "/"):
+    if not str(url).startswith(_ROOT + "/"):
         raise ValueError("research archive host/path not allowlisted")
     path = Path(cache_path) if cache_path is not None else None
     if path is not None and path.exists():
@@ -261,7 +291,7 @@ async def download_archive_verified(
     timeout_s: float = 30.0,
 ) -> VerifiedArchive:
     """Download/cache one archive and fail closed unless official checksum matches."""
-    if not str(url).startswith(_BASE + "/") or not str(url).endswith(".zip"):
+    if not str(url).startswith(_ROOT + "/") or not str(url).endswith(".zip"):
         raise ValueError("research archive host/path not allowlisted")
     path = Path(cache_path) if cache_path is not None else None
     checksum_path = (
