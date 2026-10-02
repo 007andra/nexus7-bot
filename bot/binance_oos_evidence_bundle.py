@@ -473,6 +473,7 @@ async def run(
         "opportunity_ranking": opportunity_ranking,
         "manifest": manifest.canonical_dict(),
         "manifest_hash": manifest.fingerprint,
+        "dataset_fingerprint": manifest.dataset_fingerprint,
         "methodology": {
             "venue": "BINANCE_USDM",
             "source": "data.binance.vision",
