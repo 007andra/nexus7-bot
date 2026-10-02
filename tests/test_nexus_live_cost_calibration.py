@@ -158,6 +158,7 @@ def test_candidate_lineage_conflict_is_observational_only():
     decision = SimpleNamespace(_bgx_candidate_id="candidate-from-core")
     assert calibration._attach_cost_context(decision, ctx, _Log()) is False
     assert decision._bgx_candidate_id == "candidate-from-core"
+    assert not hasattr(decision, "_bgx_nexus_cost_context")
 
 
 
