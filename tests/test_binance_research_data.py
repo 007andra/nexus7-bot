@@ -4,10 +4,13 @@ import zipfile
 
 from bot.binance_research_data import (
     archive_sha256,
+    agg_trade_gap_diagnostics,
+    daily_agg_trades_url,
     daily_book_depth_url,
     daily_metrics_url,
     monthly_funding_url,
     monthly_kline_url,
+    parse_agg_trades_archive,
     parse_checksum_text,
     parse_funding_archive,
     parse_kline_archive,
@@ -31,6 +34,11 @@ class BinanceResearchDataTests(unittest.TestCase):
     def test_funding_url_is_usdm_monthly_archive(self):
         url = monthly_funding_url("ETHUSDT", 2026, 2)
         self.assertTrue(url.endswith("ETHUSDT-fundingRate-2026-02.zip"))
+
+    def test_daily_agg_trades_url_is_usdm_archive(self):
+        url = daily_agg_trades_url("btcusdt", "2026-08-31")
+        self.assertTrue(url.endswith("BTCUSDT-aggTrades-2026-08-31.zip"))
+        self.assertIn("/futures/um/daily/aggTrades/BTCUSDT/", url)
 
     def test_daily_context_urls_are_usdm_archives(self):
         metrics = daily_metrics_url("btcusdt", "2026-08-31")
@@ -79,6 +87,26 @@ class BinanceResearchDataTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             parse_checksum_text(text, expected_filename="ETHUSDT.zip")
+
+    def test_parse_agg_trades_and_report_gaps_without_interpolation(self):
+        payload = _zip_csv(
+            "x.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "timestamp,buyer_was_maker\n"
+            "10,100.0,2.0,100,101,1700000000000,false\n"
+            "12,99.0,1.5,103,103,1700000000100,true\n",
+        )
+        rows = parse_agg_trades_archive(payload)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].aggressor_side, "BUY")
+        self.assertEqual(rows[1].aggressor_side, "SELL")
+        self.assertEqual(rows[0].notional, 200.0)
+        gaps = agg_trade_gap_diagnostics(rows)
+        self.assertEqual(gaps["aggregate_id_gap_events"], 1)
+        self.assertEqual(gaps["missing_aggregate_ids"], 1)
+        self.assertEqual(gaps["underlying_id_gap_events"], 1)
+        self.assertEqual(gaps["missing_underlying_ids"], 1)
+        self.assertFalse(gaps["interpolation_applied"])
 
     def test_invalid_symbol_is_rejected(self):
         with self.assertRaises(ValueError):
