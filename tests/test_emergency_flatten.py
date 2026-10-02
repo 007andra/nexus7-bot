@@ -27,9 +27,16 @@ class FakeExchange:
         self.paused_at_order = []
         self.fail_reads = 0
         self.malformed = None
+        self.stop_orders_unreadable = False
 
     def get_instruments(self):
         return INFO
+
+    async def get_stop_orders(self, symbol):
+        # F-001A scans stop orders after flatness; this account has none.
+        if self.stop_orders_unreadable:
+            raise RuntimeError("stopOrders unavailable")
+        return []
 
     def build_client_oid(self, symbol, side, qty, idem_key=None, contracts=None):
         return "bgx7-" + str(abs(hash(idem_key)))[:12]
@@ -213,6 +220,13 @@ class EmergencyFlattenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["status"], "FAILED")
         self.assertTrue(engine._running)
         self.assertFalse(engine.active)
+
+    async def test_unreadable_stop_orders_never_reported_clean(self):
+        ex = FakeExchange({"BTCUSDT": 5})
+        ex.stop_orders_unreadable = True
+        out = await _engine(ex).close_all_positions()
+        self.assertEqual(out["status"], "FLAT_BUT_PROTECTION_CLEANUP_FAILED")
+        self.assertIn("BTCUSDT:UNREADABLE", out["remaining_stale_protections"])
 
     async def test_paper_mode_sends_nothing(self):
         ex = FakeExchange({"BTCUSDT": 5})
