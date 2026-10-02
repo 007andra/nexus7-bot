@@ -15,6 +15,11 @@ on:
         description: "Space-separated Binance USD-M symbols"
         required: true
         default: "BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT"
+      include_agg_trades:
+        description: "Enable heavy candidate-day real aggTrades microstructure evidence"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   research:
@@ -58,7 +63,7 @@ jobs:
 
       - name: Research integrity tests
         run: |
-          python -m unittest -v tests.test_binance_research_data tests.test_binance_historical_context tests.test_binance_oos_replay tests.test_binance_oos_evidence_bundle tests.test_microstructure_shadow tests.test_microstructure_oos_evidence tests.test_nexus_oos_calibration tests.test_research_walk_forward tests.test_research_statistics tests.test_research_manifest tests.test_research_sensitivity tests.test_opportunity_ranker tests.test_research_promotion_readiness
+          python -m unittest -v tests.test_binance_research_data tests.test_binance_historical_context tests.test_binance_oos_replay tests.test_binance_oos_evidence_bundle tests.test_microstructure_shadow tests.test_microstructure_oos tests.test_microstructure_oos_evidence tests.test_nexus_oos_calibration tests.test_research_walk_forward tests.test_research_statistics tests.test_research_manifest tests.test_research_sensitivity tests.test_opportunity_ranker tests.test_research_promotion_readiness
 
       - name: Restore Binance public-data cache
         uses: actions/cache@v4
@@ -74,6 +79,7 @@ jobs:
           SYMBOLS_INPUT: ${{ inputs.symbols }}
           START_MONTH_INPUT: ${{ inputs.start_month }}
           END_MONTH_INPUT: ${{ inputs.end_month }}
+          INCLUDE_AGG_TRADES: ${{ inputs.include_agg_trades }}
         run: |
           set -euo pipefail
 
@@ -91,9 +97,16 @@ jobs:
           fi
 
           read -r -a SYMBOL_ARGS <<< "$SYMBOLS_INPUT"
-          python -m bot.binance_oos_evidence_bundle --symbols "${SYMBOL_ARGS[@]}" --start-month "$START_MONTH_INPUT" --end-month "$END_MONTH_INPUT" --cache-dir artifacts/binance_research_cache --code-sha "${{ github.sha }}" --output artifacts/nexus_oos_binance_usdm_bundle.json
+          EXTRA_ARGS=()
+          if [[ "$INCLUDE_AGG_TRADES" == "true" ]]; then
+            EXTRA_ARGS+=(--include-agg-trades)
+          fi
+
+          python -m bot.binance_oos_evidence_bundle --symbols "${SYMBOL_ARGS[@]}" --start-month "$START_MONTH_INPUT" --end-month "$END_MONTH_INPUT" --cache-dir artifacts/binance_research_cache --code-sha "${{ github.sha }}" "${EXTRA_ARGS[@]}" --output artifacts/nexus_oos_binance_usdm_bundle.json
 
       - name: Validate evidence artifact
+        env:
+          INCLUDE_AGG_TRADES: ${{ inputs.include_agg_trades }}
         run: |
           python - <<'PY'
           import json
@@ -128,6 +141,7 @@ jobs:
               "exchange_mutations": False,
               "runtime_policy_mutations": False,
               "promotion_authority": False,
+              "agg_trades_interpolation_applied": False,
           }
           for key, expected in required.items():
               if methodology.get(key) != expected:
@@ -135,6 +149,20 @@ jobs:
                       f"methodology mismatch {key}: "
                       f"{methodology.get(key)!r} != {expected!r}"
                   )
+
+          expected_agg_mode = (
+              "CANDIDATE_DAY_REAL"
+              if str(__import__("os").environ.get(
+                  "INCLUDE_AGG_TRADES", "false"
+              )).lower() == "true"
+              else "DISABLED"
+          )
+          if methodology.get("agg_trades_mode") != expected_agg_mode:
+              raise SystemExit(
+                  "aggTrades mode mismatch: "
+                  f"{methodology.get('agg_trades_mode')!r} "
+                  f"!= {expected_agg_mode!r}"
+              )
 
           primary = payload.get("primary") or {}
           robustness = payload.get("robustness") or {}
@@ -160,6 +188,11 @@ jobs:
               "execution_cost_sensitivity_points": len(
                   (sensitivity.get("execution_cost") or {}).get("points") or []
               ),
+              "agg_trades_mode": methodology.get("agg_trades_mode"),
+              "agg_trades_coverage": (
+                  payload.get("opportunity_ranking") or {}
+              ).get("agg_trades_coverage"),
+              "microstructure_review": payload.get("microstructure_review"),
               "manifest_hash": manifest_hash,
               "dataset_fingerprint": dataset_fingerprint,
           }, indent=2, sort_keys=True))
