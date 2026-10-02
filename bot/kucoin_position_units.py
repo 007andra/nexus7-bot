@@ -37,15 +37,23 @@ class KuCoinPositionUnitAdapter:
         try:
             rows = await self._client.get_positions()
         except PositionSnapshotUnconfirmed as exc:
-            # F-014: keep the non-authoritative contract; convert the valid rows
-            # (informational only) to base units when possible.
-            try:
-                valid = self._normalize(exc.valid_rows)
-            except Exception:
-                valid = []
+            # F-014: keep the non-authoritative contract. NOVO-01: valid rows may
+            # drive risk reduction, so each is converted on its own; a row that
+            # cannot be converted becomes UNKNOWN instead of vanishing.
+            valid, unknown = [], set(exc.unknown_symbols)
+            unidentified = exc.unidentified_rows
+            for row in exc.valid_rows:
+                try:
+                    valid.extend(self._normalize([row]))
+                except Exception:
+                    symbol = str(row.get("symbol") or "") if isinstance(row, dict) else ""
+                    if symbol:
+                        unknown.add(symbol)
+                    else:
+                        unidentified += 1
             raise PositionSnapshotUnconfirmed(
-                exc.state, valid_rows=valid, unknown_symbols=exc.unknown_symbols,
-                unidentified_rows=exc.unidentified_rows, rejected=exc.rejected,
+                exc.state, valid_rows=valid, unknown_symbols=unknown,
+                unidentified_rows=unidentified, rejected=exc.rejected,
             ) from exc
         if not isinstance(rows, list):
             raise RuntimeError("KuCoin positions payload is not a list")

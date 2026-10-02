@@ -131,10 +131,18 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
         sl, tp = _number(sl), _number(tp)
         if sl < 0 or tp < 0 or not (sl > 0 or tp > 0):
             return False
-        positions = await client.get_positions()
+        # NOVO-01: protecting a validly identified position is risk reducing;
+        # another symbol's malformed row must not block it. An UNKNOWN target
+        # symbol is never mutated.
+        from bot.position_snapshot import read_for_risk_reduction
+        view = await read_for_risk_reduction(client, source="native_stop_repair")
+        if symbol in view.unknown_symbols:
+            log.critical("[RISK_REDUCTION_UNKNOWN_SKIPPED] stage=stop_repair symbol=%s "
+                         "reason=row_rejected mutation=NONE", symbol)
+            return False
         pos = next(
             (
-                p for p in positions
+                p for p in view.rows
                 if p.get("symbol") == symbol
                 and abs(_number(p.get("size"))) > 0
             ),
@@ -142,6 +150,9 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
         )
         if pos is None:
             return False
+        if not view.authoritative:
+            log.critical("[RISK_REDUCTION_VALID_ROW] stage=stop_repair symbol=%s action=set_stop "
+                         "snapshot_authority=%s", symbol, view.state)
         side = str(pos.get("side", "")).lower()
         if side not in ("buy", "sell", "long", "short"):
             return False

@@ -21,6 +21,10 @@ reduce-only orders, deterministic clientOid per minute, a per-engine lock and
 exchange re-reads before every order.
 F-001A: after verified flatness, close/reduce-only stop orders left on flat
 symbols are cancelled and re-verified (step 4b); leftovers keep resume blocked.
+NOVO-01: a malformed row never freezes the reduction of validly identified
+positions. Valid rows are closed, UNKNOWN rows are never touched, a finite
+second pass closes rows that became valid, and the status stays non-success
+(UNKNOWN_REMAINS / PARTIAL_FAILURE) while any UNKNOWN exposure remains.
 """
 from __future__ import annotations
 
@@ -49,23 +53,6 @@ def _summary(status, reason, results, remaining):
         "remaining_stale_protections": [],
         "stale_protection_scan_skipped": [],
     }
-
-
-def _open_rows(rows):
-    if not isinstance(rows, list):
-        raise ValueError("positions payload is not a list")
-    out = []
-    for row in rows:
-        if not isinstance(row, dict) or not row.get("symbol"):
-            raise ValueError("position row malformed")
-        size = row.get("size")
-        try:
-            if float(size) == 0:
-                continue
-        except (TypeError, ValueError):
-            pass  # unparseable size is kept and fails closed downstream
-        out.append(row)
-    return out
 
 
 async def close_all_positions(engine, *, reason="operator_close_all",
@@ -105,37 +92,41 @@ async def close_all_positions(engine, *, reason="operator_close_all",
                 pos_lock.release()
 
 
-async def _terminalize_lineages(engine, rows):
+async def _terminalize_lineages(engine, rows, view=None):
     try:
         from bot import trade_lifecycle
-        await trade_lifecycle.terminalize_positions(
-            getattr(engine, "positions", {}), rows, "emergency_flatten")
+        positions = getattr(engine, "positions", {}) or {}
+        if view is not None:
+            # NOVO-01: only lineages whose symbol is PROVEN flat; an UNKNOWN or
+            # unidentified row keeps every possibly-matching lineage OPEN.
+            positions = {s: p for s, p in positions.items() if view.flat_proven(s)}
+        await trade_lifecycle.terminalize_positions(positions, rows, "emergency_flatten")
     except Exception as exc:
         log.error("[TRADE_LINEAGE_TERMINAL_FAILED] stage=emergency_flatten error=%s", type(exc).__name__)
 
 
-async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
-                   verify_attempts, verify_delay_s):
+async def _read(client, stage):
+    from bot.position_snapshot import read_for_risk_reduction
+    view = await read_for_risk_reduction(client, source=f"emergency_flatten.{stage}")
+    if not view.readable:
+        log.critical("[EMERGENCY_FLATTEN_INCOMPLETE] stage=%s error=positions_unreadable "
+                     "exposure=UNKNOWN", stage)
+        return None
+    for symbol in view.unknown_symbols:
+        log.critical("[RISK_REDUCTION_UNKNOWN_SKIPPED] stage=%s symbol=%s reason=row_rejected "
+                     "mutation=NONE assumed=POSSIBLY_OPEN", stage, symbol)
+    if view.unidentified_rows:
+        log.critical("[RISK_REDUCTION_UNKNOWN_SKIPPED] stage=%s symbol=UNIDENTIFIED rows=%s "
+                     "mutation=NONE flat_proof=NONE", stage, view.unidentified_rows)
+    return view
+
+
+async def _close_rows(engine, rows, instrument_info, close_qty, fill_timeout_s,
+                      results, requested, partial):
     client = engine.client
-    try:
-        rows = _open_rows(await client.get_positions())
-    except Exception as exc:
-        log.critical("[EMERGENCY_FLATTEN_INCOMPLETE] stage=discover error=%s "
-                     "exposure=UNKNOWN", type(exc).__name__)
-        return _summary("FAILED", "positions_unconfirmed", [], ["UNKNOWN"])
-
-    if not rows:
-        log.critical("[EMERGENCY_FLATTEN_VERIFY] status=ALREADY_FLAT remaining=0")
-        await _terminalize_lineages(engine, [])
-        summary = _summary("ALREADY_FLAT", "no_open_positions", [], [])
-        await _retire_stale_protections(engine, summary, set())
-        return summary
-
     counts = {}
     for row in rows:
         counts[row["symbol"]] = counts.get(row["symbol"], 0) + 1
-
-    results, requested = [], []
     for row in rows:
         sym = str(row["symbol"])
         side = str(row.get("side", ""))
@@ -165,6 +156,9 @@ async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
             entry["client_oid"] = client.build_client_oid(sym, close_side, close["base_qty"], idem)
         except Exception:
             entry["client_oid"] = ""
+        if partial:
+            log.critical("[RISK_REDUCTION_VALID_ROW] symbol=%s side=%s size=%s action=reduce_only_close "
+                         "snapshot_authority=PARTIAL_INVALID", sym, side, row.get("size"))
         log.critical(
             "[EMERGENCY_FLATTEN_ORDER] symbol=%s position_side=%s close_side=%s "
             "open_contracts=%s request_contracts=%s base_qty=%s reduceOnly=true clientOid=%s",
@@ -192,32 +186,72 @@ async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
         except Exception as exc:
             entry["detail"] = f"fill_check_error:{type(exc).__name__}"
 
-    # VERIFY against exchange truth; never infer flatness from submissions.
-    remaining = None
-    for attempt in range(max(1, verify_attempts)):
+
+async def _verify(client, requested, attempts, delay_s):
+    """Re-read until requested symbols are gone and the read is authoritative."""
+    view = None
+    for attempt in range(max(1, attempts)):
         if attempt:
-            await asyncio.sleep(verify_delay_s)
-        try:
-            after = _open_rows(await client.get_positions())
-        except Exception as exc:
-            log.critical("[EMERGENCY_FLATTEN_INCOMPLETE] stage=verify error=%s exposure=UNKNOWN",
-                         type(exc).__name__)
-            remaining = None
+            await asyncio.sleep(delay_s)
+        view = await _read(client, "verify")
+        if view is None:
             continue
-        remaining = {str(r["symbol"]): r.get("size") for r in after}
-        if not any(s in remaining for s in requested):
+        if not any(s in view.symbols() or s in view.unknown_symbols for s in requested) \
+                and view.authoritative:
             break
+    return view
 
-    if remaining is not None:
-        await _terminalize_lineages(engine, after)   # NOVO-02: authoritative flat proof
 
+async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
+                   verify_attempts, verify_delay_s, max_passes=2):
+    client = engine.client
+    view = await _read(client, "discover")
+    if view is None:
+        return _summary("FAILED", "positions_unconfirmed", [], ["UNKNOWN"])
+
+    if view.authoritative and not view.rows:
+        log.critical("[EMERGENCY_FLATTEN_VERIFY] status=ALREADY_FLAT remaining=0")
+        await _terminalize_lineages(engine, [])
+        summary = _summary("ALREADY_FLAT", "no_open_positions", [], [])
+        await _retire_stale_protections(engine, summary, set())
+        return summary
+
+    results, requested = [], []
+    after = view
+    for pass_no in range(max(1, max_passes)):
+        handled = {e["symbol"] for e in results}
+        todo = [r for r in view.rows if r["symbol"] not in handled]
+        if not todo and pass_no:
+            break
+        await _close_rows(engine, todo, instrument_info, close_qty, fill_timeout_s,
+                          results, requested, not view.authoritative)
+        # VERIFY against exchange truth; never infer flatness from submissions.
+        after = await _verify(client, requested, verify_attempts, verify_delay_s)
+        if after is None:
+            break
+        # Second pass (finite): a row that was UNKNOWN may now be valid.
+        view = after
+        if not [r for r in after.rows if r["symbol"] not in {e["symbol"] for e in results}]:
+            break
+        log.critical("[EMERGENCY_FLATTEN_PARTIAL_AUTHORITY] pass=%s newly_valid=%s action=second_pass",
+                     pass_no + 1, ",".join(sorted(after.symbols() - {e["symbol"] for e in results})))
+
+    if after is not None:
+        await _terminalize_lineages(engine, after.rows, after)   # NOVO-02 + NOVO-01
+
+    still = set(after.symbols()) if after is not None else set()
+    unknown = set(after.unknown_symbols) if after is not None else set()
     for entry in results:
         sym = entry["symbol"]
-        if remaining is None:
+        if after is None:
             if entry["result"] == "SUBMITTED":
                 entry["result"] = "UNKNOWN"
                 entry["detail"] = "verify_unavailable"
-        elif sym not in remaining:
+        elif sym in unknown or (sym not in still and not after.flat_proven(sym)):
+            if entry["result"] in ("SUBMITTED", "FAILED"):
+                entry["result"] = "UNKNOWN"
+            entry["detail"] = entry["detail"] or "flat_unproven_partial_snapshot"
+        elif sym not in still:
             entry["result"] = "CLOSED" if sym in requested else entry["result"]
             if entry["result"] == "FAILED" and sym not in requested:
                 entry["result"], entry["detail"] = "ALREADY_FLAT", "absent_on_verify"
@@ -233,21 +267,43 @@ async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
             entry["result"], entry["detail"] or "-",
         )
 
-    if remaining is None:
+    unidentified = after.unidentified_rows if after is not None else 0
+    if after is None:
         status, left = "FAILED", ["UNKNOWN"]
     else:
-        left = sorted(remaining)
+        left = sorted(still | unknown) + (["UNIDENTIFIED"] if unidentified else [])
         if not left:
             status = "FLAT"
-        elif any(e["result"] == "CLOSED" for e in results):
+        elif still and any(e["result"] == "CLOSED" for e in results):
             status = "PARTIAL_FAILURE"
-        else:
+        elif still:
             status = "FAILED"
+        else:
+            status = "UNKNOWN_REMAINS"    # valid exposure reduced; UNKNOWN != FLAT
+    if after is not None and not after.authoritative:
+        log.critical(
+            "[EMERGENCY_FLATTEN_PARTIAL_AUTHORITY] valid_symbols=%s unknown_symbols=%s "
+            "unidentified_rows=%s actions_sent=%s remaining_unknown=%s status=%s",
+            ",".join(sorted({e["symbol"] for e in results})) or "NONE",
+            ",".join(sorted(unknown)) or "NONE", unidentified, len(requested),
+            ",".join(sorted(unknown) + (["UNIDENTIFIED"] if unidentified else [])) or "NONE",
+            status,
+        )
     log.critical("[EMERGENCY_FLATTEN_VERIFY] status=%s remaining=%s", status, left or 0)
-    summary = _summary(status, "verified" if remaining is not None else "verify_unavailable",
+    summary = _summary(status, "verified" if after is not None else "verify_unavailable",
                        results, left)
-    if remaining is not None:
-        await _retire_stale_protections(engine, summary, set(remaining))
+    summary.update({
+        "snapshot_state": after.state if after is not None else "READ_FAILED",
+        "unknown_symbols": sorted(unknown),
+        "unidentified_rows": unidentified,
+    })
+    if after is not None:
+        if unidentified:
+            # No symbol is provably flat: never retire protection (F-001A).
+            summary["stale_protection_scan_skipped"] = ["UNIDENTIFIED_POSITION_ROWS"]
+            log.critical("[EMERGENCY_PROTECTION_SCAN] skipped=unidentified_position_rows")
+        else:
+            await _retire_stale_protections(engine, summary, still | unknown)
     if summary["status"] not in _TERMINAL_OK:
         log.critical("[EMERGENCY_FLATTEN_INCOMPLETE] status=%s remaining=%s "
                      "remaining_stale_protections=%s entries_paused=true "

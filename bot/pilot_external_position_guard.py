@@ -37,16 +37,19 @@ def install(TradingEngine, log):
         return not getattr(engine, "paper_trade", False)
 
     async def _unexpected_positions(engine):
-        try:
-            rows = await engine.client.get_positions()
-        except Exception as exc:
+        # NOVO-01: classify the VALID rows of a partial snapshot so protection
+        # of known positions keeps running; UNKNOWN rows are never classified
+        # nor mutated and keep the entry block set below.
+        from bot.position_snapshot import read_for_risk_reduction
+        view = await read_for_risk_reduction(engine.client, source="pilot_external_guard")
+        if not view.readable:
             log.critical(
                 "[EXTERNAL_POSITION_IMMUTABLE] result=BLOCKED "
-                "reason=position_read_failed error=%s action=no_mutation",
-                type(exc).__name__,
+                "reason=position_read_failed action=no_mutation",
             )
             setattr(engine, "_pilot_external_position_guard_blocked", True)
             return None
+        rows = view.rows
 
         local = set(getattr(engine, "positions", {}) or {})
         explicit_external = set(getattr(engine, "_external_position_symbols", set()) or set())
@@ -99,8 +102,14 @@ def install(TradingEngine, log):
             for sym in protected:
                 unprotected_set.discard(sym)
 
-        blocked = bool(unprotected)
+        blocked = bool(unprotected) or view.unknown_remains()
         setattr(engine, "_pilot_external_position_guard_blocked", blocked)
+        if view.unknown_remains():
+            log.critical(
+                "[EXTERNAL_POSITION_IMMUTABLE] result=BLOCKED reason=position_state_unknown "
+                "unknown_symbols=%s unidentified_rows=%s action=no_mutation_entries_blocked",
+                ",".join(view.unknown_symbols) or "NONE", view.unidentified_rows,
+            )
 
         if unprotected:
             log.critical(

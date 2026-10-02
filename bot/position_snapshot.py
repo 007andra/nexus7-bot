@@ -151,3 +151,102 @@ def normalize_kucoin_positions(raw_rows, to_standard, *, source="kucoin.get_posi
             unidentified_rows=unidentified, rejected=rejected,
         )
     return positions
+
+
+class RiskReductionView:
+    """Which exchange positions may be used for RISK-REDUCING actions (NOVO-01).
+
+    Question A (may a symbol be concluded closed?) still needs an authoritative
+    snapshot. Question B (may a validly identified open position be reduced or
+    protected?) does not: one malformed row must never freeze the reduction of
+    every other, validly identified position.
+
+      rows               valid OPEN rows whose symbol has no rejected row
+      unknown_symbols    identified but rejected -> never mutated, never flat
+      unidentified_rows  rows whose symbol is unknowable -> no symbol is
+                         provably flat while > 0 (the row may be any symbol)
+
+    INV-RISK-REDUCTION-PARTIAL-SNAPSHOT-001, INV-PARTIAL-SNAPSHOT-NO-FLAT-001,
+    INV-UNKNOWN-NO-MUTATION-001.
+    """
+
+    __slots__ = ("state", "rows", "unknown_symbols", "unidentified_rows")
+
+    def __init__(self, state, rows=(), unknown_symbols=(), unidentified_rows=0):
+        self.state = state
+        self.unknown_symbols = tuple(sorted(set(unknown_symbols)))
+        self.unidentified_rows = int(unidentified_rows)
+        self.rows = [r for r in rows if r.get("symbol") not in self.unknown_symbols]
+
+    @property
+    def readable(self):
+        return self.state != READ_FAILED
+
+    @property
+    def authoritative(self):
+        return self.state in (VALID_COMPLETE, VALID_EMPTY)
+
+    def symbols(self):
+        return {str(r.get("symbol")) for r in self.rows}
+
+    def row(self, symbol):
+        """The single valid row of ``symbol``; None when absent/unknown/ambiguous."""
+        if symbol in self.unknown_symbols:
+            return None
+        matches = [r for r in self.rows if r.get("symbol") == symbol]
+        return matches[0] if len(matches) == 1 else None
+
+    def flat_proven(self, symbol):
+        """Absence proves flatness only for an identified, readable response."""
+        return (self.readable and self.unidentified_rows == 0
+                and symbol not in self.unknown_symbols and symbol not in self.symbols())
+
+    def unknown_remains(self):
+        return bool(self.unknown_symbols) or self.unidentified_rows > 0
+
+
+def _open(rows):
+    out = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("symbol"):
+            raise ValueError("position row malformed")
+        try:
+            if float(row.get("size") or 0) == 0:
+                continue
+        except (TypeError, ValueError):
+            pass   # unparseable size is kept and fails closed downstream
+        out.append(row)
+    return out
+
+
+async def read_for_risk_reduction(client, *, source):
+    """Canonical read for risk-reducing consumers; never raises.
+
+    A PARTIAL_INVALID read yields its validly identified rows; anything else
+    that fails (REST/auth/payload) is READ_FAILED with no usable rows.
+    """
+    try:
+        rows = await client.get_positions()
+        if not isinstance(rows, list):
+            raise ValueError("positions payload is not a list")
+        rows = _open(rows)
+    except PositionSnapshotUnconfirmed as exc:
+        if exc.state != PARTIAL_INVALID:
+            return RiskReductionView(READ_FAILED)
+        try:
+            valid = _open(exc.valid_rows)
+        except ValueError:
+            return RiskReductionView(READ_FAILED)
+        view = RiskReductionView(PARTIAL_INVALID, valid, exc.unknown_symbols, exc.unidentified_rows)
+        log.critical(
+            "[POSITION_SNAPSHOT_PARTIAL] source=%s valid_symbols=%s unknown_symbols=%s "
+            "unidentified_rows=%s risk_reduction=VALID_ROWS_ONLY close_inference=FORBIDDEN",
+            source, ",".join(sorted(view.symbols())) or "NONE",
+            ",".join(view.unknown_symbols) or "NONE", view.unidentified_rows,
+        )
+        return view
+    except Exception as exc:
+        log.critical("[POSITION_SNAPSHOT_READ_FAILED] source=%s error=%s risk_reduction=NONE",
+                     source, type(exc).__name__)
+        return RiskReductionView(READ_FAILED)
+    return RiskReductionView(VALID_COMPLETE if rows else VALID_EMPTY, rows)

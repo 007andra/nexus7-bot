@@ -168,13 +168,17 @@ def install(TradingEngine, kucoin_mod, log):
         async def _guard_naked_positions_with_conditional_protection(self):
             if getattr(self, "paper_trade", False):
                 return
-            try:
-                positions = await self.client.get_positions()
-            except Exception as exc:
-                log.debug("_guard_naked_positions: %s", exc)
+            # NOVO-01: guard every VALID row even when another row is malformed;
+            # UNKNOWN symbols are never stop-attached nor emergency-closed.
+            from bot.position_snapshot import read_for_risk_reduction
+            view = await read_for_risk_reduction(self.client, source="naked_guard")
+            if not view.readable:
                 return
+            for sym in view.unknown_symbols:
+                log.critical("[RISK_REDUCTION_UNKNOWN_SKIPPED] stage=naked_guard symbol=%s "
+                             "reason=row_rejected mutation=NONE", sym)
 
-            for p in positions:
+            for p in view.rows:
                 try:
                     sym = p.get("symbol", "")
                     if (getattr(self, "_pilot_external_position_guard_patched", False)
