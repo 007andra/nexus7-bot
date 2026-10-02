@@ -270,6 +270,61 @@ def parse_book_depth_archive(
     return tuple(result)
 
 
+class AggTradeTimeline:
+    """Timestamp-indexed historical aggressor flow without future leakage."""
+
+    def __init__(self, rows) -> None:
+        values = sorted(
+            tuple(rows),
+            key=lambda row: (int(row.timestamp), int(row.aggregate_trade_id)),
+        )
+        self.rows = values
+        self.timestamps = [int(row.timestamp) for row in values]
+
+    def pressure(
+        self,
+        decision_ts_ms: int,
+        *,
+        window_ms: int = 5 * 60 * 1000,
+    ) -> dict:
+        """Return BUY-vs-SELL aggressor pressure using trades known by decision time."""
+        decision_ts = int(decision_ts_ms)
+        if decision_ts <= 0 or window_ms <= 0:
+            raise ValueError("invalid aggTrades pressure window")
+        right = bisect_right(self.timestamps, decision_ts)
+        left = bisect_right(self.timestamps, decision_ts - int(window_ms))
+        rows = self.rows[left:right]
+        buy_notional = 0.0
+        sell_notional = 0.0
+        for row in rows:
+            if row.aggressor_side == "BUY":
+                buy_notional += float(row.notional)
+            else:
+                sell_notional += float(row.notional)
+        total = buy_notional + sell_notional
+        pressure = (
+            (buy_notional - sell_notional) / total
+            if total > 0 else None
+        )
+        latest_ts = int(rows[-1].timestamp) if rows else None
+        return {
+            "available": bool(rows) and total > 0,
+            "window_ms": int(window_ms),
+            "rows": len(rows),
+            "buy_notional": buy_notional,
+            "sell_notional": sell_notional,
+            "taker_pressure": pressure,
+            "latest_trade_ts_ms": latest_ts,
+            "age_ms": (
+                decision_ts - latest_ts if latest_ts is not None else None
+            ),
+            "future_rows_used": False,
+            "execution_effect": "NONE",
+            "score_effect": "NONE",
+            "promotion_authority": False,
+        }
+
+
 class MetricsTimeline:
     def __init__(self, rows: Iterable[MetricsObservation]) -> None:
         values = sorted(rows, key=lambda row: row.effective_ts_ms)
@@ -361,6 +416,7 @@ def shadow_microstructure_context(
     max_depth_age_ms: int = 15 * 60 * 1000,
     max_metrics_age_ms: int = 15 * 60 * 1000,
     oi_delta_override: float | None = None,
+    agg_trade_pressure_override: float | None = None,
 ) -> dict:
     """Build pre-trade SHADOW microstructure/flow features.
 
@@ -409,6 +465,11 @@ def shadow_microstructure_context(
                     - 1.0
                 )
 
+    if agg_trade_pressure_override is not None:
+        raw_pressure = float(agg_trade_pressure_override)
+        if math.isfinite(raw_pressure):
+            taker_pressure = max(-1.0, min(1.0, raw_pressure))
+
     components = []
     weights = []
     if depth_score is not None:
@@ -448,6 +509,11 @@ def shadow_microstructure_context(
         "depth_imbalance": depth_score,
         "taker_long_short_ratio": taker_ratio,
         "taker_pressure": taker_pressure,
+        "taker_pressure_source": (
+            "AGG_TRADES"
+            if agg_trade_pressure_override is not None
+            else "METRICS_RATIO"
+        ),
         "oi_delta": oi_delta,
         "oi_pressure": oi_pressure,
         "composite_pressure": composite,
