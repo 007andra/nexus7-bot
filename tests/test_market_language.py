@@ -1,6 +1,4 @@
 import numpy as np
-import pytest
-
 from bot.market_language import (
     causal_zscore,
     forecast_distribution,
@@ -56,7 +54,7 @@ def test_nucleus_filter_removes_low_mass_tail():
     assert p[1] > 0
     assert p[2] == 0
     assert p[3] == 0
-    assert p.sum() == pytest.approx(1.0)
+    assert np.isclose(p.sum(), 1.0)
 
 
 def test_signal_contract_is_selective():
@@ -80,5 +78,9 @@ def test_walk_forward_is_past_only_and_reports_metrics():
 def test_invalid_candle_geometry_fails_closed():
     c, h, l, v = _series()
     h[-1] = l[-1] * 0.9
-    with pytest.raises(ValueError, match="geometry"):
+    try:
         hierarchical_tokens(c, h, l, v)
+    except ValueError as exc:
+        assert "geometry" in str(exc)
+    else:
+        raise AssertionError("invalid candle geometry must fail closed")
