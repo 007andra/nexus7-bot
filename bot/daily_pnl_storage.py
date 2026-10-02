@@ -4,19 +4,18 @@ Legacy ledgers remain readable on every checkpoint, including records written
 by an overlapping old deployment. Identical events deduplicate; conflicting
 evidence fails closed. No historical daily-stop flags are imported.
 """
-import hashlib
 import json
 import math
-import os
 from datetime import datetime, timezone
 
 from bot import database as db
 
 
 def scope():
-    value = '|'.join(os.environ.get(k, '') for k in (
-        'RAILWAY_PROJECT_ID', 'RAILWAY_SERVICE_ID', 'RAILWAY_ENVIRONMENT_ID'))
-    return hashlib.sha256(value.encode()).hexdigest()[:24]
+    # NOVO-03: stable financial scope; legacy Railway-scoped keys are read by
+    # database.load_key_value during migration.
+    from bot.financial_namespace import stable_scope
+    return stable_scope()
 
 
 def ledger_key(day):
