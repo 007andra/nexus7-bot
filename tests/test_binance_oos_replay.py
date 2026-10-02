@@ -1,4 +1,7 @@
+import asyncio
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from bot.binance_historical_context import MetricsObservation, MetricsTimeline
 from bot.binance_oos_replay import (
@@ -7,6 +10,7 @@ from bot.binance_oos_replay import (
     derivatives_context_at,
     fee_return_fraction,
     funding_return_fraction,
+    load_verified_metrics,
     month_range,
 )
 from bot.binance_research_data import FundingObservation
@@ -60,6 +64,78 @@ class BinanceOOSReplayTests(unittest.TestCase):
         self.assertTrue(complete)
         self.assertAlmostEqual(context["oi_delta"], 0.01)
         self.assertEqual(context["ls_ratio"], 1.3)
+
+    def test_metrics_loader_rejects_unbounded_concurrency(self):
+        with self.assertRaises(ValueError):
+            asyncio.run(
+                load_verified_metrics(
+                    "BTCUSDT",
+                    ("2026-01-01",),
+                    concurrency=33,
+                )
+            )
+
+    def test_metrics_loader_merges_by_requested_date_not_completion_order(self):
+        dates = ("2026-01-01", "2026-01-02", "2026-01-03")
+        timestamps = {
+            "2026-01-01": 1000,
+            "2026-01-02": 2000,
+            "2026-01-03": 3000,
+        }
+
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+            # Force reverse-ish completion order to prove gather timing cannot
+            # alter deterministic merge order.
+            if "2026-01-01" in url:
+                await asyncio.sleep(0.02)
+            elif "2026-01-02" in url:
+                await asyncio.sleep(0.01)
+            return SimpleNamespace(
+                payload=url.encode("utf-8"),
+                sha256=("a" if "01-01" in url else "b" if "01-02" in url else "c") * 64,
+            )
+
+        def fake_parse(payload, *, source_date):
+            ts = timestamps[source_date]
+            return (
+                MetricsObservation(
+                    label_ts_ms=ts,
+                    effective_ts_ms=ts,
+                    symbol="BTCUSDT",
+                    sum_open_interest=100.0 + ts,
+                    sum_open_interest_value=10000.0,
+                    top_account_ls_ratio=1.0,
+                    top_position_ls_ratio=1.2,
+                    global_account_ls_ratio=1.0,
+                    taker_ls_volume_ratio=1.0,
+                    source_date=source_date,
+                    convention="END_LABEL",
+                ),
+            )
+
+        with patch(
+            "bot.binance_oos_replay.download_archive_verified",
+            side_effect=fake_download,
+        ), patch(
+            "bot.binance_oos_replay.parse_metrics_archive",
+            side_effect=fake_parse,
+        ):
+            rows, artifacts = asyncio.run(
+                load_verified_metrics(
+                    "BTCUSDT",
+                    dates,
+                    concurrency=3,
+                )
+            )
+
+        self.assertEqual(
+            [row.effective_ts_ms for row in rows],
+            [1000, 2000, 3000],
+        )
+        self.assertEqual(
+            [artifact.first_ts for artifact in artifacts],
+            [1000, 2000, 3000],
+        )
 
     def test_adverse_fill_is_directionally_conservative(self):
         self.assertGreater(
