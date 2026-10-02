@@ -3183,7 +3183,12 @@ class TradingEngine:
             # P0: chave de idempotência FIXA para todas as tentativas deste
             # sinal. Garante que retries reusem o mesmo clientOid e a
             # exchange rejeite duplicatas.
-            _idem = f"{sig.symbol}_{side}_{qty}_{int(time.time()//60)}"
+            # Stable candidate lineage is also the idempotency namespace:
+            # retries of one setup reuse one clientOid, while distinct setups
+            # cannot collide merely because symbol/side/qty share a minute.
+            from bot.candidate_trace import ensure_candidate_id
+            _candidate_id = ensure_candidate_id(sig)
+            _idem = f"candidate:{_candidate_id}"
             _client_oid = self.client.build_client_oid(
                 sig.symbol, side, qty, _idem
             )
@@ -3206,6 +3211,11 @@ class TradingEngine:
                     "clientOid=%s reason=new_financial_intent_same_minute",
                     sig.symbol, _generation, _client_oid,
                 )
+            log.info(
+                "[CANDIDATE_TRACE] candidate_id=%s clientOid=%s symbol=%s "
+                "side=%s stage=PRE_DISPATCH_IDENTITY",
+                _candidate_id, _client_oid, sig.symbol, side,
+            )
 
             for attempt in range(1, MAX_RETRIES + 1):
                 _managed = None
@@ -3279,6 +3289,10 @@ class TradingEngine:
                     _managed, _ = self.orders.get_or_create(
                         _client_oid, sig.symbol, side, qty
                     )
+                    # Candidate lineage becomes durable in the same record that
+                    # is persisted before any exchange network dispatch.
+                    from bot.candidate_trace import bind_managed_order
+                    bind_managed_order(_managed, sig)
                     try:
                         _managed.transition(OrderState.SUBMITTING, source="REST")
                     except InvalidTransition as _ie:
