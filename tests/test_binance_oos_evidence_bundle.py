@@ -4,6 +4,7 @@ from bot.binance_oos_evidence_bundle import (
     assert_population_parity,
     build_primary_report,
     build_robustness_report,
+    build_sensitivity_report,
 )
 from bot.nexus_oos_edge_gate import CandidateOutcome
 
@@ -62,6 +63,28 @@ class BinanceOOSEvidenceBundleTests(unittest.TestCase):
         robustness["robustness"]["pooled"]["baseline_candidates"] += 1
         with self.assertRaises(RuntimeError):
             assert_population_parity(primary, robustness)
+
+    def test_sensitivity_reports_cost_stress_but_not_fake_parameter_grid(self):
+        reports = _reports()
+        for report in reports:
+            report["candidate_diagnostics"] = [
+                {"net_return": 0.01},
+                {"net_return": -0.005},
+                {"net_return": 0.004},
+                {"net_return": -0.002},
+            ]
+        sensitivity = build_sensitivity_report(reports)
+        self.assertEqual(
+            sensitivity["parameter"]["status"],
+            "NOT_RUN",
+        )
+        self.assertEqual(
+            sensitivity["parameter"]["parameter_sets"],
+            0,
+        )
+        self.assertTrue(sensitivity["execution_cost"]["points"])
+        self.assertEqual(sensitivity["execution_effect"], "NONE")
+        self.assertFalse(sensitivity["promotion_authority"])
 
     def test_incomplete_context_cannot_claim_edge_proven(self):
         reports = _reports()
