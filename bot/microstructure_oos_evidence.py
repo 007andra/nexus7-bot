@@ -173,7 +173,9 @@ def evaluate_microstructure_ranking(
     temporal_folds: int = 4,
 ) -> dict:
     """Compare base vs enriched cross-symbol rankings on identical OOS batches."""
-    by_ts: dict[int, list[tuple[Opportunity, Opportunity, float]]] = defaultdict(list)
+    by_ts: dict[
+        int, list[tuple[Opportunity, Opportunity, float, str]]
+    ] = defaultdict(list)
     total_diagnostics = 0
     micro_available = 0
     agg_trades_pressure_candidates = 0
@@ -203,7 +205,12 @@ def evaluate_microstructure_ranking(
                 raise ValueError("duplicate candidate_id in microstructure evidence")
             seen_candidates.add(base.candidate_id)
             realized = _finite(row.get("r_multiple"), name="r_multiple")
-            by_ts[base.decision_ts].append((base, enriched, realized))
+            regime = str(
+                row.get("nexus_market_regime", "UNKNOWN") or "UNKNOWN"
+            ).upper()
+            by_ts[base.decision_ts].append(
+                (base, enriched, realized, regime)
+            )
 
     batch_rows = []
     top_pick_deltas: list[float] = []
@@ -257,27 +264,19 @@ def evaluate_microstructure_ranking(
         enriched_by_id = {
             item.candidate_id: item for item in enriched
         }
+        regime_by_id = {
+            row[0].candidate_id: row[3] for row in rows
+        }
         enriched_top_item = enriched_by_id[enriched_top]
-        source_row = None
-        for symbol_report in symbol_reports:
-            if str(symbol_report.get("symbol", "") or "").upper() != enriched_top_item.symbol:
-                continue
-            for diagnostic in symbol_report.get("candidate_diagnostics", []) or []:
-                if diagnostic.get("candidate_id") == enriched_top:
-                    source_row = diagnostic
-                    break
-            if source_row is not None:
-                break
 
         batch_rows.append({
             "decision_ts": int(decision_ts),
             "timestamp": int(decision_ts),
             "candidates": len(rows),
             "enriched_top_symbol": enriched_top_item.symbol,
-            "enriched_top_regime": str(
-                (source_row or {}).get("nexus_market_regime", "UNKNOWN")
-                or "UNKNOWN"
-            ).upper(),
+            "enriched_top_regime": regime_by_id.get(
+                enriched_top, "UNKNOWN"
+            ),
             "base_top_candidate_id": base_top,
             "enriched_top_candidate_id": enriched_top,
             "top_candidate_id": enriched_top,
