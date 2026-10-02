@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -34,6 +35,18 @@ from bot.research_sensitivity import incremental_cost_surface
 
 REPLAY_SOURCE = "binance_oos_replay"
 EXECUTION_MODEL = "BINANCE_USDM_RESEARCH_PROXY_V1"
+
+
+def _symbol_universe(symbols: list[str]) -> tuple[list[str], str]:
+    normalized = sorted({str(symbol).upper().strip() for symbol in symbols})
+    if not normalized or any(not symbol for symbol in normalized):
+        raise ValueError("research symbol universe must be non-empty")
+    raw = json.dumps(
+        normalized,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return normalized, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 async def collect(
@@ -445,8 +458,9 @@ async def run(
     from bot.runtime_bootstrap import install as install_runtime
 
     install_runtime()
+    symbol_universe, symbol_universe_hash = _symbol_universe(symbols)
     reports, artifacts = await collect(
-        symbols,
+        symbol_universe,
         start_month=start_month,
         end_month=end_month,
         cache_dir=cache_dir,
@@ -477,6 +491,10 @@ async def run(
         "methodology": {
             "venue": "BINANCE_USDM",
             "source": "data.binance.vision",
+            "universe_selection": "PREDECLARED_FIXED_PANEL",
+            "claim_scope": "SYMBOL_PANEL_ONLY",
+            "symbol_universe": symbol_universe,
+            "symbol_universe_hash": symbol_universe_hash,
             "archive_checksums_verified": True,
             "shared_candidate_population": True,
             "closed_candles_only": True,
