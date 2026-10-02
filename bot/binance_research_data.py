@@ -267,6 +267,12 @@ async def download_archive_verified(
             _http_get_bytes(url + ".CHECKSUM", timeout_s),
         )
         checksum_text = checksum_bytes.decode("utf-8")
+        # Verify before any bytes are admitted into the deterministic cache.
+        digest = verify_archive_checksum(
+            payload,
+            checksum_text,
+            expected_filename=Path(url).name,
+        )
         if path is not None and checksum_path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
