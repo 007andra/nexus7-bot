@@ -11,7 +11,8 @@ from bot.market_language import (
     temporal_context,
     tokenize_candles,
 )
-from bot.nexus_models import run_ensemble
+from bot import market_language_overlay, nexus_ai
+from bot.nexus_models import run_ensemble as canonical_run_ensemble
 
 
 def _series(n=180, drift=0.0012):
@@ -31,6 +32,14 @@ def _series(n=180, drift=0.0012):
         })
         price = close
     return rows
+
+
+class _Log:
+    def warning(self, *args, **kwargs):
+        return None
+
+    def debug(self, *args, **kwargs):
+        return None
 
 
 class MarketLanguageTests(unittest.TestCase):
@@ -130,16 +139,19 @@ class MarketLanguageTests(unittest.TestCase):
         self.assertNotIn("TradingEngine", source)
         self.assertNotIn("ExchangeClient", source)
 
-    def test_ensemble_contains_model_h_once(self):
+    def test_ensemble_contains_model_h_once_via_overlay(self):
         rows = _series()
-        models = run_ensemble(
-            [x["c"] for x in rows],
-            [x["h"] for x in rows],
-            [x["l"] for x in rows],
-            [x["v"] for x in rows],
-            opens=[x["o"] for x in rows],
-            timestamps=[x["ts"] for x in rows],
-        )
+        closes = [x["c"] for x in rows]
+        highs = [x["h"] for x in rows]
+        lows = [x["l"] for x in rows]
+        volumes = [x["v"] for x in rows]
+
+        canonical = canonical_run_ensemble(closes, highs, lows, volumes)
+        self.assertEqual(len(canonical), 7)
+        self.assertNotIn("MARKET_LANGUAGE", [m.name for m in canonical])
+
+        market_language_overlay.install(nexus_ai, _Log())
+        models = nexus_ai.run_ensemble(closes, highs, lows, volumes)
         names = [m.name for m in models]
         self.assertEqual(names.count("MARKET_LANGUAGE"), 1)
         self.assertEqual(len(models), 8)
