@@ -180,6 +180,14 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
                     payload = _lineage(sig, nexus, order_record)
                     pos._forensic_lineage = payload
                     await _persist_lineage(payload, log)
+                    if not getattr(self, "paper_trade", True):
+                        # Q-01B: durable exit geometry for this exact trade lineage.
+                        try:
+                            from bot import exit_geometry_durability
+                            await exit_geometry_durability.persist(pos, "entry_confirmed")
+                        except Exception as exc:
+                            log.error("[EXIT_GEOMETRY_PERSIST_FAILED] symbol=%s stage=entry error=%s",
+                                      symbol, type(exc).__name__)
                 else:
                     log.warning(
                         "[TRADE_LINEAGE] symbol=%s durable=false reason=NO_CONFIRMED_OPENING_ORDER execution_effect=NONE", symbol,

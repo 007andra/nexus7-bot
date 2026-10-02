@@ -54,7 +54,8 @@ def _legacy_trailing(pos, giveback):
 
 
 def simulate(R, path_r, entry=100.0, risk=1.0, step=0.01, mode="after", monotonic_be=None,
-             gap_segment=None, trail_next_cycle=False):
+             gap_segment=None, trail_next_cycle=False, restart_at=None,
+             restart_restore=True):
     """LONG trade, 1R = ``risk`` price units; path_r = list of R waypoints.
 
     mode="before": pre-Q-01 rules (trailing from peak_pnl/qty, partial and 2R
@@ -66,6 +67,8 @@ def simulate(R, path_r, entry=100.0, risk=1.0, step=0.01, mode="after", monotoni
         monotonic_be = mode == "after"
     sig = Signal("SIM", "LONG", entry, entry - risk, entry + R * risk, 0.8)
     pos = Pos(sig, 1.0)
+    pos._forensic_lineage = {"order_id": "sim-open-1"}
+    restarted = False
     exchange_sl = entry - risk
     fills = []                       # (price, qty)
     events = []
@@ -95,6 +98,28 @@ def simulate(R, path_r, entry=100.0, risk=1.0, step=0.01, mode="after", monotoni
             pos.qty = 0; break
         pos.update_pnl(px)
         profit = px - entry
+        # Q-01B restart parity: crash + restart at the chosen moment. The new
+        # Position is rebuilt like the startup loader (estimated sl/tp, no
+        # initial risk, exchange stop as current stop) and the durable record
+        # is applied exactly as on a real restart.
+        if restart_at and not restarted and (
+                (restart_at == "before_partial" and not pos.tp1_hit and profit >= 0.9 * risk)
+                or (restart_at == "after_partial" and pos.tp1_hit)):
+            import json as _json
+            from bot import exit_geometry_durability as durability
+            record = _json.loads(_json.dumps(durability.build_record(pos)))
+            est = entry * 0.007
+            fresh = Pos(Signal("SIM", "LONG", entry, entry - est * 1.5, entry + est * 3.0, 0.75), pos.qty)
+            fresh._forensic_lineage = dict(pos._forensic_lineage)
+            fresh.initial_sl = None
+            fresh.sl = fresh.trailing_sl = exchange_sl
+            fresh.update_pnl(px)
+            assert durability.validate(record, symbol="SIM", direction="LONG",
+                                       opening_order_id="sim-open-1", entry=entry) is None
+            if restart_restore:          # False = pre-Q-01B (history lost)
+                durability.apply_record(fresh, record)
+            pos, restarted = fresh, True
+            events.append(f"RESTART@{profit/risk:+.2f}R")
         one_r = abs(entry - pos.sl) if mode == "before" else (initial_risk_per_unit(pos) or 0.0)
         # durable_partial_exit
         if not pos.tp1_hit and one_r > 0 and profit >= one_r + entry * 0.0003:
@@ -186,6 +211,18 @@ def main():
                   f"be_loosened={st['be_loosened_r']:.2f}R be_skipped={st['be_skipped']} "
                   f"stop_replacements={st['stop_replacements']}  " + " ".join(e for e in ev if e))
 
+    print()
+    print("== Q-01B restart parity (same path, crash+restart at different moments) ==")
+    for R in (2.0, 3.0):
+        for name, path in PATHS.items():
+            row = []
+            for at in (None, "before_partial", "after_partial"):
+                g, _, ev, st = simulate(R, path, mode="after", restart_at=at)
+                row.append(f"{(at or 'no_restart'):>14s}={g:+.2f}R")
+            g_lost, _, _, _ = simulate(R, path, mode="after", restart_at="before_partial",
+                                       restart_restore=False)
+            row.append(f"pre-Q-01B(before_partial)={g_lost:+.2f}R")
+            print(f"  R={R} {name:24s} " + "  ".join(row))
 
 if __name__ == "__main__":
     main()

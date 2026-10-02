@@ -185,6 +185,7 @@ async def prove_restart_ownership(engine, position: dict) -> OwnershipProof:
         return _reject("durable_registry_unreadable", symbol=symbol)
 
     candidates = []
+    reduced = []        # Q-01B: same lineage, exposure reduced by BGX itself
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -203,10 +204,34 @@ async def prove_restart_ownership(engine, position: dict) -> OwnershipProof:
         except (TypeError, ValueError):
             continue
         if not _same_base_qty(durable_qty, position_qty, info):
+            if (math.isfinite(durable_qty) and durable_qty > position_qty
+                    and _durable_fill_matches_position(record, durable_qty, info)):
+                reduced.append(record)
             continue
         if not _durable_fill_matches_position(record, position_qty, info):
             continue
         candidates.append(record)
+
+    expected_fill_qty = position_qty
+    reason = "exact_durable_exchange_proof"
+    if not candidates and reduced:
+        # A residual smaller than the opening fill is owned only when BGX has
+        # durable evidence of reducing THIS exact lineage (partial intent /
+        # persisted tp1). Size similarity alone never adopts a position.
+        from bot.exit_geometry_durability import reduce_evidence
+        evidenced = []
+        for record in reduced:
+            try:
+                if await reduce_evidence(symbol, str(record.get("order_id") or "")):
+                    evidenced.append(record)
+            except Exception:
+                return _reject("reduce_evidence_unreadable", symbol=symbol)
+        if len(evidenced) == 1:
+            candidates = evidenced
+            expected_fill_qty = float(evidenced[0].get("qty", 0) or 0)
+            reason = "exact_durable_exchange_proof_after_reduce"
+        elif len(evidenced) > 1:
+            return _reject("ambiguous_durable_fills", symbol=symbol)
 
     if not candidates:
         return _reject("no_exact_durable_fill", symbol=symbol)
@@ -242,7 +267,7 @@ async def prove_restart_ownership(engine, position: dict) -> OwnershipProof:
         return _reject("exchange_order_cancelled", symbol=symbol)
 
     filled_qty = _filled_base_qty(status, info)
-    if not _same_base_qty(filled_qty, position_qty, info):
+    if not _same_base_qty(filled_qty, expected_fill_qty, info):
         return _reject("exchange_fill_quantity_mismatch", symbol=symbol)
 
     protected, protection = await conditional_stop_confirmed(engine.client, position)
@@ -251,7 +276,7 @@ async def prove_restart_ownership(engine, position: dict) -> OwnershipProof:
 
     return OwnershipProof(
         True,
-        "exact_durable_exchange_proof",
+        reason,
         symbol=symbol,
         client_oid=client_oid,
         order_id=order_id,

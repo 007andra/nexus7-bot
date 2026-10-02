@@ -16,6 +16,9 @@ from bot.quantity import quantity_rules, validate_base_quantity
 
 async def check(engine):
     engine._pending_partial_symbols = set()
+    # Q-01B: keep the durable exit geometry (peak / partial state) current.
+    from bot import exit_geometry_durability
+    await exit_geometry_durability.sync(engine)
     for symbol, pos in list(engine.positions.items()):
         try:
             key, idem = identity(symbol, pos)
@@ -96,6 +99,13 @@ async def check(engine):
                 continue
             pos.qty = remaining
             log_geometry(pos, 'PARTIAL_EXIT_STATE', closed_qty=state.get('qty'), tp1_hit=True)
+            # Q-01B: real residual + tp1 + peak persisted as one record.
+            from bot import exit_geometry_durability
+            try:
+                await exit_geometry_durability.persist(pos, 'partial_fill')
+            except Exception as exc:
+                log.error('[EXIT_GEOMETRY_PERSIST_FAILED] symbol=%s stage=partial error=%s',
+                          symbol, type(exc).__name__)
             if state.get('protected') is not True:
                 # Q-01C INV-STOP-MONOTONIC-001: break-even is a floor. A stop
                 # already at or beyond BE (e.g. trailed) is kept, no exchange call.

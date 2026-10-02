@@ -41,6 +41,7 @@ def install(TradingEngine, log) -> None:
     from bot import volume_ratio_diagnostics
     from bot import market_viability_fail_closed
     from bot import restart_opening_order_lineage
+    from bot import exit_geometry_durability
     from bot import post_trade_forensics
     from bot import daily_pnl_estimate_lineage_hardening
     from bot import durable_daily_pnl
@@ -85,6 +86,7 @@ def install(TradingEngine, log) -> None:
     market_risk_coverage_observability.install(market_risk_runtime, log)
     entry_latency_observability.install(log)
     restart_opening_order_lineage.install(TradingEngine, log)
+    exit_geometry_durability.install(TradingEngine, log)
     post_trade_forensics.install(
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
     )
