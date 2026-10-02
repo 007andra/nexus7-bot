@@ -144,6 +144,23 @@ def test_dict_decision_handoff_is_optional_and_never_breaks_validation():
     assert decision == before
 
 
+def test_candidate_lineage_conflict_is_observational_only():
+    snapshot = SimpleNamespace(candidate_id="candidate-from-cost")
+    ctx = calibration.NexusCostContext(
+        symbol="BTCUSDT",
+        taker_fee=0.00042,
+        slippage=0.0002,
+        fee_source="test",
+        slippage_source="test",
+        spread_bps=2.0,
+        snapshot=snapshot,
+    )
+    decision = SimpleNamespace(_bgx_candidate_id="candidate-from-core")
+    assert calibration._attach_cost_context(decision, ctx, _Log()) is False
+    assert decision._bgx_candidate_id == "candidate-from-core"
+
+
+
 def test_expected_value_outside_candidate_context_keeps_legacy_defaults():
     calibration._FEE_CACHE.clear()
     nexus = _fake_nexus_module()
