@@ -318,16 +318,23 @@ def derivatives_context_at(
     timeline: MetricsTimeline,
     decision_ts_ms: int,
     *,
+    previous_candidate_oi: float | None = None,
     max_age_ms: int = 15 * 60 * 1000,
 ) -> tuple[dict, bool]:
-    """Return causal NEXUS derivative inputs plus exact-parity flag."""
-    current, previous = timeline.asof(decision_ts_ms)
+    """Return causal derivatives with LIVE-equivalent OI-delta semantics.
+
+    LIVE records OI when a candidate reaches NEXUS and the next candidate
+    compares against that stored value. Replay must mirror that cadence.
+    """
+    current, _previous_metrics_row = timeline.asof(decision_ts_ms)
     if current is None:
         return {
             "oi": None,
             "oi_delta": None,
             "ls_ratio": None,
             "metrics_age_ms": None,
+            "current_oi": None,
+            "oi_delta_reference": "PREVIOUS_NEXUS_CANDIDATE",
         }, False
     age = int(decision_ts_ms) - int(current.effective_ts_ms)
     if age < 0 or age > int(max_age_ms):
@@ -336,16 +343,33 @@ def derivatives_context_at(
             "oi_delta": None,
             "ls_ratio": None,
             "metrics_age_ms": age,
+            "current_oi": None,
+            "oi_delta_reference": "PREVIOUS_NEXUS_CANDIDATE",
         }, False
-    inputs = current.as_nexus_inputs(previous)
-    complete = (
-        inputs["oi"] is not None
-        and inputs["oi_delta"] is not None
-        and inputs["ls_ratio"] is not None
-    )
-    inputs["metrics_age_ms"] = age
-    return inputs, bool(complete)
 
+    current_oi = float(current.sum_open_interest)
+    oi_delta = None
+    if previous_candidate_oi is not None:
+        previous = float(previous_candidate_oi)
+        if previous > 0 and current_oi > 0:
+            oi_delta = current_oi / previous - 1.0
+
+    inputs = {
+        "oi": {
+            "openInterest": current_oi,
+            "openInterestValue": current.sum_open_interest_value,
+            "timestamp": current.effective_ts_ms,
+        },
+        "oi_delta": oi_delta,
+        "ls_ratio": current.top_position_ls_ratio,
+        "taker_ls_ratio": current.taker_ls_volume_ratio,
+        "metrics_age_ms": age,
+        "current_oi": current_oi,
+        "oi_delta_reference": "PREVIOUS_NEXUS_CANDIDATE",
+    }
+    # A missing first delta mirrors a fresh LIVE process and is not data loss.
+    complete = current_oi > 0 and inputs["ls_ratio"] is not None
+    return inputs, bool(complete)
 
 def adverse_fill(
     price: float,
@@ -652,6 +676,7 @@ async def replay_symbol(
     approved = rejected = 0
     derivative_context_complete = 0
     derivative_context_missing = 0
+    previous_candidate_oi: float | None = None
 
     for i in range(80, len(k15) - 40):
         decision_ts = ts15[i]
@@ -697,10 +722,14 @@ async def replay_symbol(
         ticker = {"lastPrice": str(float(k15[i]["o"]))}
         funding_now = latest_funding(funding, decision_ts)
         derivatives, context_complete = derivatives_context_at(
-            metrics_timeline, decision_ts
+            metrics_timeline,
+            decision_ts,
+            previous_candidate_oi=previous_candidate_oi,
         )
         derivative_context_complete += int(context_complete)
         derivative_context_missing += int(not context_complete)
+        if derivatives["current_oi"] is not None:
+            previous_candidate_oi = float(derivatives["current_oi"])
         with _freeze_full_clock(decision_ts):
             nx = nexus_ai.decide(
                 symbol,
@@ -763,6 +792,8 @@ async def replay_symbol(
             "r_multiple": float(r_multiple),
             "derivatives_context_complete": context_complete,
             "metrics_age_ms": derivatives["metrics_age_ms"],
+            "oi_delta_reference": derivatives["oi_delta_reference"],
+            "oi_delta": derivatives["oi_delta"],
             **diag,
         })
 
@@ -856,6 +887,7 @@ async def replay_symbol(
                 "historical_open_interest": bool(metric_rows),
                 "historical_long_short_ratio": bool(metric_rows),
                 "metrics_label_shift_normalized": True,
+                "oi_delta_semantics": "PREVIOUS_NEXUS_CANDIDATE",
                 "historical_orderbook": bool(book_depth_rows),
                 "book_depth_candidate_day_sampling": True,
                 "book_depth_missing_dates": list(book_depth_missing_dates),
