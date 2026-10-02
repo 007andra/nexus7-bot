@@ -131,16 +131,20 @@ async def _active_stop(client, symbol, level, tick):
     return False
 
 
-async def reconcile(engine, sig, qty, fill_status, log) -> Geometry:
-    """Post-fill geometry for a freshly opened LIVE position. Never raises."""
+async def reconcile(engine, sig, qty, fill_status, log, *, position_fill=None) -> Geometry:
+    """Post-fill geometry for a freshly opened LIVE position. Never raises.
+
+    ``position_fill``: the exchange average entry of a position adopted after a
+    fill timeout (the position IS this order's fill: it did not exist before)."""
     symbol, direction = sig.symbol, sig.direction
     planned_entry, planned_sl, planned_tp = float(sig.entry), float(sig.sl), float(sig.tp)
-    fill = fill_price(fill_status)
+    fill = _pos(position_fill) if position_fill is not None else fill_price(fill_status)
     if fill is None:
         log.critical(
             "[POSTFILL_GEOMETRY_UNCONFIRMED] symbol=%s reason=fill_price_unproven "
             "ticker_used=false local_geometry=PLANNED(exchange levels) shifted=false", symbol)
         return Geometry(UNCONFIRMED, planned_entry, planned_sl, planned_tp, "none")
+    source = "position_avg_entry" if position_fill is not None else "order_status"
     info = (getattr(engine, "instruments", None) or {}).get(symbol) or {}
     tick = info.get("tickSize")
     try:
@@ -149,7 +153,7 @@ async def reconcile(engine, sig, qty, fill_status, log) -> Geometry:
         log.critical(
             "[POSTFILL_GEOMETRY_UNCONFIRMED] symbol=%s reason=risk_authority_%s fill=%.10g "
             "local_geometry=EXCHANGE_LEVELS", symbol, type(exc).__name__, fill)
-        return Geometry(UNCONFIRMED, fill, planned_sl, planned_tp, "order_status")
+        return Geometry(UNCONFIRMED, fill, planned_sl, planned_tp, source)
     stop, repaired = planned_sl, "NOOP"
     candidate = candidate_stop(direction, fill, float(qty), planned_entry, planned_sl, metrics, tick)
     if candidate is not None and _better(direction, candidate, planned_sl):
@@ -181,9 +185,9 @@ async def reconcile(engine, sig, qty, fill_status, log) -> Geometry:
     within = math.isfinite(budget) and projected <= budget + max(1e-12, budget * 1e-6)
     state = CONFIRMED if within else OVER_BUDGET
     (log.warning if state == CONFIRMED else log.critical)(
-        "[POSTFILL_GEOMETRY_RECONCILE] symbol=%s state=%s fill_source=order_status fill=%.10g "
+        "[POSTFILL_GEOMETRY_RECONCILE] symbol=%s state=%s fill_source=%s fill=%.10g "
         "planned_entry=%.10g planned_sl=%.10g candidate_sl=%s stop_repair=%s active_sl=%.10g "
         "tp=%.10g qty=%.12g projected_loss=%.6f risk_budget=%.6f ticker_used=false shifted=false",
-        symbol, state, fill, planned_entry, planned_sl, candidate, repaired, stop, planned_tp,
+        symbol, state, source, fill, planned_entry, planned_sl, candidate, repaired, stop, planned_tp,
         float(qty), projected, budget)
-    return Geometry(state, fill, stop, planned_tp, "order_status", repaired, projected, budget)
+    return Geometry(state, fill, stop, planned_tp, source, repaired, projected, budget)

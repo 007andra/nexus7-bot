@@ -1390,13 +1390,45 @@ class TradingEngine:
 
                 direction = "LONG" if side == "Buy" else "SHORT"
 
+                # ══════════════════════════════════════════════════
+                # NOVO-F013A-1 — a Binance não traz stopLoss na linha da
+                # posição: sem isto o loader SEMPRE enviava SL/TP estimados
+                # (ATR/liquidação), mesmo com a proteção nativa ativa.
+                # Timeout não é sinal de mercado: a lineage conhecida usa os
+                # próprios níveis; origem desconhecida nunca substitui um stop
+                # condicional já ativo por estimativa.
+                # ══════════════════════════════════════════════════
+                from bot import timeout_adoption as _ta
+                _timeout_ctx = (getattr(self, "_timeout_adoptions", None) or {}).get(sym)
+                _lineage_levels = None
+                _conditional_sl = None
+                if not self.paper_trade:
+                    _tick = (getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize")
+                    if _timeout_ctx and _timeout_ctx.get("direction") == direction:
+                        _lineage_levels = await _ta.adopt_known_lineage(
+                            self.client, sym, direction, p, _timeout_ctx, _tick, log)
+                    elif _timeout_ctx:
+                        log.critical(
+                            f"🚨 [TIMEOUT_ADOPTION] {sym}: lado da exchange ({direction}) ≠ "
+                            f"opening order ({_timeout_ctx.get('direction')}) — não adotada"
+                        )
+                        self._unprotected_symbols.add(sym)
+                        continue
+                    elif sl_existente <= 0:
+                        _conditional_sl = await _ta.existing_conditional_stop(
+                            self.client, sym, direction)
+
                 # Preço de entrada vem da EXCHANGE (ep), nunca do ticker —
                 # exigência explícita da correção. SL/TP: usa o que já
                 # está na exchange se existir; caso contrário, calcula
                 # um SL conservador baseado na liquidação (mesma fórmula
                 # já usada e validada em _load_existing_positions).
                 atr_est = ep * 0.007
-                if sl_existente > 0:
+                if _lineage_levels is not None:
+                    sl, tp_existente = _lineage_levels[0], _lineage_levels[1]
+                elif _conditional_sl:
+                    sl = _conditional_sl
+                elif sl_existente > 0:
                     sl = sl_existente
                 elif direction == "LONG":
                     sl = max(liq * 1.02, ep - atr_est * 1.5) if liq > 0 else ep - atr_est * 1.5
@@ -1432,7 +1464,18 @@ class TradingEngine:
                 )
 
                 # ── Proteção: só marca protegida se a exchange confirmar ──
-                if sl_existente > 0:
+                if _lineage_levels is not None:
+                    # Lineage conhecida: proteção já reconciliada nos níveis
+                    # originais por timeout_adoption (nunca estimativa).
+                    if _lineage_levels[2]:
+                        self._unprotected_symbols.discard(sym)
+                    else:
+                        self._unprotected_symbols.add(sym)
+                elif _conditional_sl:
+                    self._unprotected_symbols.discard(sym)
+                    log.info(f"✓ RECONCILE {sym}: stop condicional já ativo "
+                             f"(${_conditional_sl:.6f}) — nenhuma estimativa enviada")
+                elif sl_existente > 0:
                     # A exchange já tinha um stop — nada a enviar, só
                     # confirmar que a marcação de risco está correta.
                     self._unprotected_symbols.discard(sym)
@@ -3444,10 +3487,26 @@ class TradingEngine:
                         # registrada com o entry price REAL da exchange
                         # (nunca ticker) e recebe SL/TP imediatamente.
                         # ══════════════════════════════════════════════
+                        _adoptions = dict(getattr(self, "_timeout_adoptions", None) or {})
+                        _adoptions[sig.symbol] = {
+                            "order_id": _oid_real,
+                            "client_oid": (_order or {}).get("clientOid", "") or "",
+                            "direction": sig.direction,
+                            "planned_sl": sig.sl, "planned_tp": sig.tp,
+                        }
+                        self._timeout_adoptions = _adoptions
                         try:
                             _ainda_desprotegidos = await self._reconcile_exchange_positions(
                                 only_symbol=sig.symbol
                             )
+                            _adopted = self.positions.get(sig.symbol)
+                            if _adopted is not None and not self.paper_trade:
+                                # F-013 at the adopted position's exchange average:
+                                # same budget authority and stop repair as no-timeout.
+                                from bot import postfill_risk_recheck as _pfg
+                                _geo = await _pfg.reconcile(
+                                    self, sig, _adopted.qty, {}, log, position_fill=_adopted.entry)
+                                _adopted.sl = _adopted.trailing_sl = _geo.sl
                             if sig.symbol in self.positions:
                                 try:
                                     _managed.transition(
@@ -3469,6 +3528,8 @@ class TradingEngine:
                                 f"_reconcile_exchange_positions falhou para "
                                 f"{sig.symbol}: {_re}"
                             )
+                        finally:
+                            (getattr(self, "_timeout_adoptions", None) or {}).pop(sig.symbol, None)
                         if self._durable_state_enforced:
                             await durable.persist_orders(
                                 self, "fill_timeout_reconcile", strict=False

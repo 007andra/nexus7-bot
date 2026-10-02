@@ -104,6 +104,82 @@ class BinancePostfillGeometryTests(_Harness):
         self.assertIsNone(pfg.fill_price({"_synthetic": True, "dealSize": "1", "dealValue": "100"}))
         self.assertEqual(pfg.fill_price({"isActive": False, "dealSize": "2", "dealValue": "201"}), 100.5)
 
+    # ── NOVO-F013A-1: timeout adoption ─────────────────────────────────────
+    def _no_position_at_ack(self):
+        orig = self.client.set_position_stops.side_effect
+        calls = {"n": 0}
+
+        async def first_fails(symbol, sl=0, tp=0):
+            calls["n"] += 1
+            if calls["n"] == 1:                 # ACK protection: position not visible yet
+                self.rows.append({"symbol": "ETHUSDT", "side": "Buy", "size": self.sized_qty,
+                                  "sizeUnit": "BASE_ASSET", "entryPrice": self.fill,
+                                  "markPrice": self.mark or self.fill})
+                return False
+            return await orig(symbol, sl=sl, tp=tp)
+        self.client.set_position_stops = AsyncMock(side_effect=first_fails)
+
+    async def _timeout_open(self, fill=100.0):
+        self.fill = fill
+        self.client.wait_for_fill = AsyncMock(return_value={
+            "filled": False, "status": {"isActive": True}, "timed_out": True})
+        await self.engine._open(self.signal)
+        return self.engine.positions.get("ETHUSDT")
+
+    def tp_levels(self):
+        return sorted(float(s["stopPrice"]) for s in self.stops if s["type"] == "TAKE_PROFIT_MARKET")
+
+    def sent(self):
+        return [c.kwargs for c in self.client.set_position_stops.await_args_list]
+
+    async def test_timeout_adoption_reuses_native_protection_never_atr(self):
+        pos = await self._timeout_open()
+        self.assertEqual((self.sl_levels(), self.tp_levels()), ([99.5], [104.0]))
+        self.assertEqual(self.sent(), [{"sl": 99.5, "tp": 104}], "no estimate sent")
+        self.assertEqual((pos.sl, pos.tp), (99.5, 104.0))
+        self.assertAlmostEqual(pos.entry - pos.sl, 0.5)
+
+    async def test_timeout_adoption_restores_only_original_levels(self):
+        self._no_position_at_ack()
+        pos = await self._timeout_open()
+        self.assertEqual((self.sl_levels(), self.tp_levels()), ([99.5], [104.0]))
+        for call in self.sent():
+            self.assertIn(call.get("sl"), (0, 99.5))
+            self.assertIn(call.get("tp"), (0, 104))
+        self.assertEqual((pos.sl, pos.tp), (99.5, 104.0))
+        self.assertNotIn("ETHUSDT", self.engine._unprotected_symbols)
+
+    async def test_timeout_adoption_beyond_original_stop_sends_no_estimate(self):
+        self.mark = 99.4
+        self._no_position_at_ack()
+        await self._timeout_open()
+        for call in self.sent():                 # only the lineage's own trigger, never an estimate
+            self.assertIn(call.get("sl"), (0, 99.5))
+            self.assertIn(call.get("tp"), (0, 104))
+        self.assertTrue(all(level == 99.5 for level in self.sl_levels()))
+
+    async def test_timeout_adoption_adverse_fill_rechecks_budget(self):
+        pos = await self._timeout_open(fill=100.5)
+        self.assertEqual(self.sl_levels()[0], 99.5)
+        self.assertGreater(pos.sl, 99.5, "F-013 repair from the native stop, not an estimate")
+        self.assertIn(pos.sl, self.sl_levels())
+
+    async def test_unknown_orphan_with_active_stop_is_not_overridden(self):
+        self.rows.append({"symbol": "ETHUSDT", "side": "Buy", "size": 0.5, "sizeUnit": "BASE_ASSET",
+                          "entryPrice": 100.0, "markPrice": 100.0, "liquidationPrice": 0})
+        self.stops.append({"symbol": "ETHUSDT", "side": "sell", "type": "STOP_MARKET", "stopPrice": "97.0",
+                           "closeOrder": True, "isActive": True, "clientOid": "manual-1"})
+        await self.engine._reconcile_exchange_positions(only_symbol="ETHUSDT")
+        self.assertEqual(self.client.set_position_stops.await_count, 0)
+        self.assertEqual(self.engine.positions["ETHUSDT"].sl, 97.0)
+
+    async def test_unknown_orphan_without_protection_keeps_safety_stop(self):
+        self.rows.append({"symbol": "ETHUSDT", "side": "Buy", "size": 0.5, "sizeUnit": "BASE_ASSET",
+                          "entryPrice": 100.0, "markPrice": 100.0, "liquidationPrice": 0})
+        self.sized_qty = 0.5
+        await self.engine._reconcile_exchange_positions(only_symbol="ETHUSDT")
+        self.assertEqual(self.client.set_position_stops.await_count, 1, "legacy safety stop preserved")
+
 
 for _name in [n for n in dir(_Harness) if n.startswith("test_")]:
     if _name not in BinancePostfillGeometryTests.__dict__:
