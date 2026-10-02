@@ -7,6 +7,9 @@ from bot import database as db
 from bot.confirmed_rr_exit import identity, _persist
 from bot.conditional_stop_protection import _instrument_info, _to_base_size
 from bot.exit_geometry import initial_risk_per_unit, log_geometry
+from bot.stop_monotonic import (
+    EQUAL_AFTER_ROUNDING, WORSE, current_stop, decide_stop, log_decision,
+)
 from bot.logger import log
 from bot.quantity import quantity_rules, validate_base_quantity
 
@@ -94,13 +97,25 @@ async def check(engine):
             pos.qty = remaining
             log_geometry(pos, 'PARTIAL_EXIT_STATE', closed_qty=state.get('qty'), tp1_hit=True)
             if state.get('protected') is not True:
-                engine._unprotected_symbols.add(symbol)
-                if await engine.client.set_sl(symbol, pos.entry) is not True:
+                # Q-01C INV-STOP-MONOTONIC-001: break-even is a floor. A stop
+                # already at or beyond BE (e.g. trailed) is kept, no exchange call.
+                current = current_stop(pos)
+                decision = decide_stop(
+                    pos.direction, current, pos.entry,
+                    tick_size=(_instrument_info(engine.client, symbol) or {}).get('tickSize'),
+                    market_price=pos.current_price)
+                log_decision(symbol, pos.direction, current, pos.entry, decision, 'partial_break_even')
+                if decision.replace:
+                    engine._unprotected_symbols.add(symbol)
+                    if await engine.client.set_sl(symbol, pos.entry) is not True:
+                        continue
+                    pos.sl = pos.entry
+                    pos.trailing_sl = pos.entry
+                elif decision.reason not in (WORSE, EQUAL_AFTER_ROUNDING):
+                    engine._unprotected_symbols.add(symbol)   # BE not provable yet: retry
                     continue
                 state['protected'] = True
                 await _persist(key, state)
-                pos.sl = pos.entry
-                pos.trailing_sl = pos.entry
                 engine._unprotected_symbols.discard(symbol)
             engine._pending_partial_symbols.discard(symbol)
         except Exception as exc:

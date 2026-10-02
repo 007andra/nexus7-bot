@@ -1894,8 +1894,16 @@ class TradingEngine:
                 # Mover SL para breakeven — verificado.
                 # Sem confirmação, a posição restante ficaria com o stop
                 # original enquanto o bot a trataria como protegida.
-                _be = await self.client.set_sl(sym, pos.entry)
-                if not _be:
+                # Q-01C: BE é piso, nunca afrouxa um stop melhor (trailing).
+                from bot.stop_monotonic import current_stop, decide_stop, log_decision
+                _cur_sl = current_stop(pos)
+                _dec = decide_stop(
+                    pos.direction, _cur_sl, pos.entry,
+                    tick_size=(self.instruments or {}).get(sym, {}).get("tickSize"),
+                    market_price=cur)
+                log_decision(sym, pos.direction, _cur_sl, pos.entry, _dec, "core_partial_break_even")
+                _be = await self.client.set_sl(sym, pos.entry) if _dec.replace else False
+                if _dec.replace and not _be:
                     log.error(
                         f"🚨 {sym}: TP parcial executado mas SL NÃO moveu "
                         f"para break-even (${pos.entry:.4f}) — restante "
@@ -1908,8 +1916,9 @@ class TradingEngine:
                 pnl_net = pnl_partial - fee_p
 
                 pos.tp1_hit     = True
-                pos.sl          = pos.entry   # SL no breakeven
-                pos.trailing_sl = pos.entry
+                if _be:                       # SL no breakeven só se aplicado
+                    pos.sl          = pos.entry
+                    pos.trailing_sl = pos.entry
                 pos.qty         = pos.qty - partial_qty   # atualiza qty restante
 
                 log.info(
@@ -1949,12 +1958,16 @@ class TradingEngine:
                 if new_sl is None:
                     continue
 
-                # Só move se o SL melhorou (LONG: sobe, SHORT: desce)
-                improved = (
-                    (pos.direction == "LONG"  and new_sl > pos.trailing_sl) or
-                    (pos.direction == "SHORT" and new_sl < pos.trailing_sl)
-                )
-                if not improved:
+                # Só move se o SL melhorou (LONG: sobe, SHORT: desce), após
+                # quantização por tick (Q-01C: sem regressão e sem churn).
+                from bot.stop_monotonic import current_stop, decide_stop, log_decision
+                _cur_sl = current_stop(pos)
+                _dec = decide_stop(
+                    pos.direction, _cur_sl, new_sl,
+                    tick_size=(getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize"),
+                    market_price=cur)
+                log_decision(sym, pos.direction, _cur_sl, new_sl, _dec, "trailing", quiet_skip=True)
+                if not _dec.replace:
                     continue
 
                 old_sl = pos.trailing_sl

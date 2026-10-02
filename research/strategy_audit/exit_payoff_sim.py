@@ -53,7 +53,8 @@ def _legacy_trailing(pos, giveback):
     return max(pos.entry + pos.peak_pnl / pos.qty * (1.0 - giveback), pos.sl)
 
 
-def simulate(R, path_r, entry=100.0, risk=1.0, step=0.01, mode="after"):
+def simulate(R, path_r, entry=100.0, risk=1.0, step=0.01, mode="after", monotonic_be=None,
+             gap_segment=None, trail_next_cycle=False):
     """LONG trade, 1R = ``risk`` price units; path_r = list of R waypoints.
 
     mode="before": pre-Q-01 rules (trailing from peak_pnl/qty, partial and 2R
@@ -61,24 +62,33 @@ def simulate(R, path_r, entry=100.0, risk=1.0, step=0.01, mode="after"):
     (Position.calc_trailing_sl overlay + exit_geometry initial risk).
     """
     from bot.exit_geometry import initial_risk_per_unit
+    if monotonic_be is None:          # pre-Q-01 code also had the unconditional BE
+        monotonic_be = mode == "after"
     sig = Signal("SIM", "LONG", entry, entry - risk, entry + R * risk, 0.8)
     pos = Pos(sig, 1.0)
     exchange_sl = entry - risk
     fills = []                       # (price, qty)
     events = []
-    stats = {"invalid_trigger": 0, "trailing_moves": 0, "rr_exit": False, "partial": False}
+    stats = {"invalid_trigger": 0, "trailing_moves": 0, "rr_exit": False, "partial": False,
+             "stop_replacements": 0, "be_loosened_r": 0.0, "be_skipped": 0}
     prices = []
     giveback = max(0.0, min(1.0, float(cfg.TRAILING_LOCK)))
-    for a, b in zip(path_r, path_r[1:]):
-        n = max(1, int(abs(b - a) / step))
-        prices += [entry + risk * (a + (b - a) * i / n) for i in range(1, n + 1)]
+    gap_prices = set()
+    for idx, (a, b) in enumerate(zip(path_r, path_r[1:])):
+        # gap_segment: that segment is a single jump (gap / fast reversal);
+        # a stop crossed by a gap fills at the gap price, not at its trigger.
+        n = 1 if idx == gap_segment else max(1, int(abs(b - a) / step))
+        seg = [entry + risk * (a + (b - a) * i / n) for i in range(1, n + 1)]
+        if idx == gap_segment:
+            gap_prices.update(seg)
+        prices += seg
     for px in prices:
         remaining = pos.qty
         if remaining <= 0:
             break
         # Exchange-native protection first (it lives on the exchange).
         if px <= exchange_sl:
-            fills.append((exchange_sl, remaining)); events.append(f"STOP@{(exchange_sl-entry)/risk:+.2f}R")
+            fills.append((px if px in gap_prices else exchange_sl, remaining)); events.append(f"STOP@{(exchange_sl-entry)/risk:+.2f}R")
             pos.qty = 0; break
         if px >= pos.tp:
             fills.append((pos.tp, remaining)); events.append(f"TP@{(pos.tp-entry)/risk:+.2f}R")
@@ -92,8 +102,21 @@ def simulate(R, path_r, entry=100.0, risk=1.0, step=0.01, mode="after"):
             fills.append((px, half)); events.append(f"PARTIAL50@{profit/risk:+.2f}R")
             pos.qty -= half; pos.tp1_hit = True
             stats["partial"] = True
-            pos.sl = pos.trailing_sl = exchange_sl = entry
-        # trailing
+            # Q-01C: monotonic_be=True keeps a better (trailed) stop; False is
+            # the pre-Q-01C unconditional set_sl(entry).
+            if monotonic_be and exchange_sl >= entry:
+                stats["be_skipped"] += 1
+            else:
+                if exchange_sl > entry:
+                    stats["be_loosened_r"] = (exchange_sl - entry) / risk
+                if exchange_sl != entry:
+                    stats["stop_replacements"] += 1
+                pos.sl = pos.trailing_sl = exchange_sl = entry
+        # trailing (trail_next_cycle: not in the partial's own cycle, i.e. the
+        # BE stop is what protects until the next loop iteration)
+        if trail_next_cycle and stats["partial"] and pos.tp1_hit and not stats.get("_trailed_after"):
+            stats["_trailed_after"] = True
+            continue
         pos.update_pnl(px)
         new_sl = _legacy_trailing(pos, giveback) if mode == "before" else pos.calc_trailing_sl()
         if new_sl is not None and new_sl > pos.trailing_sl:
@@ -104,6 +127,7 @@ def simulate(R, path_r, entry=100.0, risk=1.0, step=0.01, mode="after"):
             else:
                 pos.sl = pos.trailing_sl = exchange_sl = new_sl
                 stats["trailing_moves"] += 1
+                stats["stop_replacements"] += 1
                 events.append(f"TRAIL->{(new_sl-entry)/risk:+.2f}R") if not any(
                     e.startswith("TRAIL->") for e in events[-1:]) else None
         # confirmed_rr_exit
@@ -130,6 +154,17 @@ PATHS = {
 }
 
 
+# Path A: trailing already at ~+0.75R, partial at +1.03R, then a fast reversal
+# before the next trailing cycle. Path B: stop still below BE at the partial.
+Q01C_CASES = (
+    (2.0, "A: trail+0.75R, partial, gap +0.3R", [0, 1.031, 0.3, -1.2], True),
+    (2.0, "+1R then back to entry", PATHS["+1R then back to entry"], False),
+    (2.0, "+1.4R then reverse", PATHS["+1.4R then reverse"], False),
+    (3.0, "B: stop<BE, partial, gap +0.3R", [0, 1.031, 0.3, -1.2], True),
+    (3.0, "+1.8R then reverse", PATHS["+1.8R then reverse"], False),
+)
+
+
 def main():
     print(f"cfg TRAILING_TRIGGER={cfg.TRAILING_TRIGGER} TRAILING_LOCK={cfg.TRAILING_LOCK}; "
           f"costs per fill {FEE+SLIP:.4f} (fee+slip), stop distance = 1% of price\n")
@@ -142,6 +177,14 @@ def main():
                       f"trail_moves={st['trailing_moves']} invalid={st['invalid_trigger']} "
                       f"rr_exit={st['rr_exit']}  " + " ".join(e for e in ev if e))
         print()
+    print("== Q-01C break-even monotonicity (exit geometry fixed in both) ==")
+    for R, name, path, gap in Q01C_CASES:
+        for mono in (False, True):
+            g, _, ev, st = simulate(R, path, mode="after", monotonic_be=mono,
+                                    gap_segment=1 if gap else None, trail_next_cycle=gap)
+            print(f"  R={R} {name:34s} {'AFTER ' if mono else 'BEFORE'} gross={g:+.2f}R "
+                  f"be_loosened={st['be_loosened_r']:.2f}R be_skipped={st['be_skipped']} "
+                  f"stop_replacements={st['stop_replacements']}  " + " ".join(e for e in ev if e))
 
 
 if __name__ == "__main__":
