@@ -499,6 +499,12 @@ def shadow_microstructure_context(
     )
 
     available = bool(depth_ok or metrics_ok)
+    quarantine_reason = None
+    if (
+        snapshot is not None
+        and snapshot.quality != "OK"
+    ):
+        quarantine_reason = snapshot.quality
     return {
         "available": available,
         "side": direction,
@@ -519,9 +525,13 @@ def shadow_microstructure_context(
         "composite_pressure": composite,
         "directional_alignment": directional_alignment,
         "quality": (
-            "OK"
-            if available
-            else "INSUFFICIENT_PRETRADE_MICROSTRUCTURE"
+            quarantine_reason
+            if quarantine_reason is not None
+            else (
+                "OK"
+                if available
+                else "INSUFFICIENT_PRETRADE_MICROSTRUCTURE"
+            )
         ),
         "execution_effect": "NONE",
         "score_effect": "NONE",
