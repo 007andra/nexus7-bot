@@ -17,6 +17,8 @@ from pathlib import Path
 from bot.binance_oos_replay import month_range, replay_symbol
 from bot.nexus_oos_edge_gate import build_edge_report, edge_promotion_decision
 from bot.nexus_oos_robustness import analyze_robustness
+from bot.oos_model_validation import ValidationRow
+from bot.probability_calibration import walk_forward_platt_report
 from bot.research_manifest import ResearchManifest
 
 
@@ -100,6 +102,32 @@ def build_robustness_report(symbol_reports: list[dict]) -> dict:
     }
 
 
+def build_calibration_report(symbol_reports: list[dict]) -> dict:
+    rows = []
+    for symbol_report in symbol_reports:
+        for candidate in symbol_report.get("candidates", []) or []:
+            if not candidate.baseline_eligible or not candidate.outcome_known:
+                continue
+            r_value = float(candidate.r_multiple)
+            rows.append(ValidationRow(
+                timestamp=float(candidate.timestamp),
+                confidence=float(candidate.confidence),
+                outcome=1 if r_value > 0.0 else 0,
+                r_multiple=r_value,
+            ))
+    rows.sort(key=lambda row: row.timestamp)
+    # Deliberately fixed evidence requirements. Small samples return blockers
+    # instead of shrinking windows until a flattering result appears.
+    return walk_forward_platt_report(
+        rows,
+        train_size=200,
+        test_size=75,
+        purge_size=4,
+        minimum_folds=4,
+        bins=10,
+    )
+
+
 def assert_population_parity(primary: dict, robustness: dict) -> None:
     primary_symbols = {
         item["symbol"]: int(item.get("candidate_count", 0))
@@ -152,6 +180,7 @@ async def run(
     )
     primary = build_primary_report(reports)
     robustness = build_robustness_report(reports)
+    calibration = build_calibration_report(reports)
     assert_population_parity(primary, robustness)
 
     manifest = ResearchManifest(
@@ -164,6 +193,7 @@ async def run(
     return {
         "primary": primary,
         "robustness": robustness,
+        "calibration": calibration,
         "manifest": manifest.canonical_dict(),
         "manifest_hash": manifest.fingerprint,
         "methodology": {
@@ -178,6 +208,8 @@ async def run(
             "fees_included": True,
             "slippage_included": True,
             "funding_included": True,
+            "platt_calibration_train_only": True,
+            "platt_calibration_live_effect": "NONE",
             "authenticated_api": False,
             "exchange_mutations": False,
             "runtime_policy_mutations": False,
