@@ -1,59 +1,116 @@
 # NEXUS Intelligence Core v1
 
-This branch is a clean-room implementation of capabilities benchmarked from
-mature open-source trading engines. It does not import, call, depend on, or
-connect NEXUS to NautilusTrader, Freqtrade, Hummingbot, Jesse or LEAN.
+This branch is a clean-room, native NEXUS implementation of capabilities
+benchmarked from mature open-source trading engines. It does not import, call,
+depend on, or connect the runtime to NautilusTrader, Freqtrade, Hummingbot,
+Jesse, LEAN, or Kronos.
 
-## Sources of architectural ideas
+## Architectural ideas absorbed
 
-- NautilusTrader: deterministic event/state thinking and reconciliation-first design.
-- Freqtrade: anti-lookahead research discipline, feature contracts, hyperparameter/OOS separation.
-- Hummingbot: self-contained position executor lifecycle and triple-barrier-style protection plan.
+- NautilusTrader: deterministic state/event thinking and reconciliation-first
+  execution.
+- Freqtrade: anti-lookahead research discipline, feature contracts and OOS
+  separation.
+- Hummingbot: self-contained position-executor lifecycle.
 - Jesse: deterministic research ergonomics and performance analysis.
-- LEAN: strict separation between alpha, portfolio/risk and execution concerns.
+- LEAN: separation between alpha, portfolio/risk and execution concerns.
+- Kronos research ideas live in separate native NEXUS work; no external model
+  dependency is introduced by this branch.
 
 No upstream source code is vendored here.
 
-## New native NEXUS capabilities
+## Implemented on this branch
 
-- Purged/embargoed walk-forward: bot.research_walk_forward. Runtime authority: NONE.
-- Temporal anti-lookahead contract: bot.research_walk_forward. Runtime authority: NONE.
-- Bootstrap confidence intervals: bot.research_statistics. Runtime authority: NONE.
-- Monte Carlo trade-path stress: bot.research_statistics. Runtime authority: NONE.
-- Feature schema/version/fingerprint: bot.feature_contract. Runtime authority: NONE.
-- Numeric/categorical drift metrics: bot.feature_contract. Runtime authority: NONE.
-- Champion/challenger evidence gate: bot.champion_challenger. Explicit operator approval required.
-- Post-trade attribution: bot.trade_attribution. Runtime authority: NONE.
-- Position-executor lifecycle: bot.execution_plan. It cannot call an exchange.
-- Cross-symbol opportunity ranking: bot.opportunity_ranker. SHADOW/RESEARCH only.
+### Research integrity
 
-## Safety boundary
+- Purged/embargoed chronological walk-forward splits.
+- Explicit temporal anti-lookahead contracts.
+- Bootstrap confidence intervals.
+- Monte Carlo trade-path stress.
+- Max drawdown, time under water, CVaR, effective sample size, expectancy,
+  win rate, payoff, profit factor, Sharpe, Sortino and Calmar.
+- Symbol, side, regime and volatility-tercile segmentation.
+- Fee/slippage/funding, turnover and exposure attribution.
+- Parameter and execution-cost sensitivity surfaces.
+- Minimum four-fold OOS evidence contract.
+- Train-only Platt and isotonic probability calibration evaluated OOS only.
 
-These modules deliberately have no import of bot.binance, bot.exchange,
-bot.engine, risk/sizing authorities or order transport. The executor lifecycle
-is pure state and exposes new_risk_allowed=False. The first tranche therefore
-adds research and architecture capabilities without changing LIVE policy.
+### Binance USD-M research parity
 
-## Next integration tranches
+- Checksum-verified Binance Vision archives.
+- Native 15m/1h/4h kline and funding ingestion.
+- Daily USD-M metrics ingestion for open interest and long/short context.
+- Post-2026-06-25 metrics label normalization to information-availability time
+  so start-labeled rows cannot leak the following five-minute interval.
+- Daily bookDepth parsing and SHADOW-only imbalance diagnostics.
+- Known-problem bookDepth periods can be quarantined rather than silently
+  entering evidence.
+- Conservative Binance execution proxy with taker fees, adverse slippage,
+  funding settlements and stop-first same-bar ambiguity.
+- Immutable research manifests with archive SHA-256 fingerprints.
+- Primary edge and robustness reports derived from the exact same candidate
+  population.
 
-1. Binance-native historical dataset adapter: klines 15m/1h/4h, funding,
-   exchangeInfo filter snapshots and deterministic local caching.
-2. Research orchestrator: purged walk-forward across at least four OOS windows,
-   regime/symbol/side/volatility segmentation, bootstrap CI and Monte Carlo.
-3. Feature snapshot persistence: attach schema version, fingerprint and
-   candidate_id to NEXUS decisions for bit-exact replay.
-4. Drift telemetry: feature/score/regime/spread/slippage/funding distribution
-   monitoring in SHADOW only.
-5. Champion/challenger persistence and operator-reviewed promotion workflow.
-6. Execution-plan adapter behind the existing durable execution, ownership,
-   fencing, sizing, CROSS stress and protection authorities.
-7. Attribution wiring after final accounting so every closed trade separates
-   market edge from entry slippage, exit slippage, fees and funding.
+### Reproducibility and model governance
 
-## Definition of done for this tranche
+- Versioned feature schema and deterministic feature fingerprints.
+- Numeric PSI and categorical distribution-shift diagnostics.
+- Decision evidence bundles with canonical timestamps/hash verification.
+- Champion/challenger registry with durable persistence.
+- Promotion is fail-closed unless CI, OOS, SHADOW and explicit operator
+  approval are all present.
+- Post-trade attribution separates market edge, entry/exit execution effects,
+  fees and funding.
+- Stable candidate identity spans signal -> NEXUS -> execution-cost snapshot ->
+  RiskManagerV3 sizing -> clientOid/durable ManagedOrder.
+- Candidate idempotency is setup-scoped rather than minute-scoped.
 
-- No trading policy or threshold changes.
-- No external repository dependency.
-- New modules have direct tests.
-- No module in this tranche can submit an order.
-- Promotion remains fail-closed without explicit operator approval.
+### Execution architecture foundations
+
+- Pure exchange-agnostic position-executor lifecycle and protection plan.
+- Lifecycle has no exchange method and cannot authorize new risk.
+- Shadow opportunity ranker has no sizing/dispatch authority.
+
+## Runtime authority boundary
+
+Research, calibration, drift, sensitivity, opportunity ranking and governance
+modules do not grant LIVE permission. Existing ownership, fencing, durable
+state, sizing, drawdown, Binance CROSS stress, protection readiness, final loss
+budget and exchange dispatch authorities remain downstream.
+
+The new position-executor lifecycle is intentionally not wired around those
+authorities. Any future integration must sit behind them and prove it cannot
+bypass them.
+
+## Book depth policy
+
+The current production NEXUS score still treats MICROSTRUCTURE as unavailable
+and renormalizes its weight. Historical bookDepth is therefore collected only
+as SHADOW research and is not required for exact parity of the currently active
+score. It must not gain production weight without OOS + SHADOW evidence and
+explicit operator approval.
+
+## Evidence still required before any strategy promotion
+
+The framework exists, but the branch does not claim a profitable edge. Before
+any calibration/threshold/model can affect LIVE decisions:
+
+1. Execute a sufficiently long Binance USD-M OOS evidence bundle over multiple
+   market regimes and symbols.
+2. Require the immutable manifest and checksum-verification report.
+3. Require >=4 chronological purged/embargoed OOS folds.
+4. Review primary uplift, bootstrap intervals, robustness by symbol/time,
+   cost sensitivity and calibration metrics.
+5. Accumulate SHADOW evidence and drift telemetry.
+6. Require explicit operator approval through the champion/challenger gate.
+
+A passing unit/CI suite proves engineering invariants, not trading profitability.
+
+## Intentionally not changed
+
+- No automatic strategy/model promotion.
+- No threshold or leverage change.
+- No weakening of risk or drawdown gates.
+- No connection to external trading frameworks.
+- No merge or Railway deploy performed by this branch.
+- No branch-protection or Railway governance changes.
