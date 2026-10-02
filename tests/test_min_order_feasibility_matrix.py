@@ -50,7 +50,7 @@ def test_min_qty_binding_derives_stop_envelope():
 
 def test_cost_block_when_cost_alone_exceeds_budget():
     row = matrix.audit_symbol(
-        info=_info(step="1", min_qty="1", min_notional="5"),
+        info=_info(step="0.1", min_qty="0.1", min_notional="0"),
         price=100,
         equity=1,
         available=1,
