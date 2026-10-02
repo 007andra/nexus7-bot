@@ -3596,30 +3596,44 @@ class TradingEngine:
             # Prioridade: avgDealPrice/dealValue-dealSize (dado real da
             # ordem) > ticker em cache (aproximação de mercado).
             # ══════════════════════════════════════════════════════
-            try:
-                _fill = 0.0
-                _st = _fill_check.get("status", {}) or {}
-                _deal_size  = float(_st.get("dealSize", 0)  or 0)
-                _deal_value = float(_st.get("dealValue", 0) or 0)
-                if _deal_size > 0 and _deal_value > 0:
-                    _fill = _deal_value / _deal_size   # preço médio real
-                if _fill <= 0:
-                    _tk = self.client.get_cached_ticker(sig.symbol) or {}
-                    _fill = float(_tk.get("lastPrice", 0) or 0)
-                if _fill > 0:
-                    _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
-                    if _slip_pct > 0.05:
-                        log.warning(
-                            f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
-                            f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
-                        )
-                    # Desloca SL/TP na mesma proporção para preservar o R:R
-                    _delta = _fill - sig.entry
-                    sig.entry += _delta
-                    sig.sl    += _delta
-                    sig.tp    += _delta
-            except Exception as e:
-                log.debug(f"fill price {sig.symbol}: {e}")
+            if not self.paper_trade:
+                # ══════════════════════════════════════════════════
+                # F-013 (Binance) — GEOMETRIA PÓS-FILL ÚNICA
+                #
+                # A proteção nativa já foi instalada na Binance nos níveis
+                # planejados. Deslocar SL/TP localmente pelo delta do fill
+                # (ou pelo ticker) criava duas geometrias. Agora: fill só do
+                # status da ordem; SL/TP locais = proteção na exchange; aperto
+                # (se o orçamento V3 exigir) é feito NA EXCHANGE com readback.
+                # ══════════════════════════════════════════════════
+                from bot import postfill_risk_recheck as _pfg
+                _geo = await _pfg.reconcile(self, sig, qty, _fill_check.get("status") or {}, log)
+                sig.entry, sig.sl, sig.tp = _geo.entry, _geo.sl, _geo.tp
+            else:
+                try:
+                    _fill = 0.0
+                    _st = _fill_check.get("status", {}) or {}
+                    _deal_size  = float(_st.get("dealSize", 0)  or 0)
+                    _deal_value = float(_st.get("dealValue", 0) or 0)
+                    if _deal_size > 0 and _deal_value > 0:
+                        _fill = _deal_value / _deal_size   # preço médio real
+                    if _fill <= 0:
+                        _tk = self.client.get_cached_ticker(sig.symbol) or {}
+                        _fill = float(_tk.get("lastPrice", 0) or 0)
+                    if _fill > 0:
+                        _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
+                        if _slip_pct > 0.05:
+                            log.warning(
+                                f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
+                                f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
+                            )
+                        # Desloca SL/TP na mesma proporção para preservar o R:R
+                        _delta = _fill - sig.entry
+                        sig.entry += _delta
+                        sig.sl    += _delta
+                        sig.tp    += _delta
+                except Exception as e:
+                    log.debug(f"fill price {sig.symbol}: {e}")
 
             # EXEC-01: `qty` aqui vem de RiskManager.size() e JÁ está em
             # UNIDADE BASE — NÃO converter. Este é o caminho de origem
