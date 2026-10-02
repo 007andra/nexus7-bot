@@ -112,10 +112,11 @@ class BinanceHistoricalContextTests(unittest.TestCase):
             metrics[-2],
             decision_ts_ms=snapshot.timestamp_ms,
             side="LONG",
+            oi_delta_override=0.05,
         )
         self.assertTrue(result["available"])
         self.assertGreater(result["depth_imbalance"], 0)
-        self.assertGreater(result["oi_delta"], 0)
+        self.assertAlmostEqual(result["oi_delta"], 0.05)
         self.assertGreater(result["directional_alignment"], 0)
         self.assertEqual(result["score_effect"], "NONE")
         self.assertFalse(result["promotion_authority"])
