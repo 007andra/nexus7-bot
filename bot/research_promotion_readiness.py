@@ -40,9 +40,13 @@ def _strict_true(value: object) -> bool:
 
 def _manifest_valid(bundle: Mapping[str, object]) -> bool:
     digest = str(bundle.get("manifest_hash", "") or "").lower()
+    dataset_digest = str(
+        bundle.get("dataset_fingerprint", "") or ""
+    ).lower()
     manifest = bundle.get("manifest")
     return bool(
         _SHA256_RE.fullmatch(digest)
+        and _SHA256_RE.fullmatch(dataset_digest)
         and isinstance(manifest, Mapping)
         and manifest.get("artifacts")
     )
