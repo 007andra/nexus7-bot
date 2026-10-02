@@ -1108,6 +1108,20 @@ class TradingEngine:
             price_map = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
             buying_power = self.risk.balance * cfg.LEVERAGE
 
+            # Observability only: expose the minimum-order feasibility envelope
+            # for the full configured universe using the same exchange metadata
+            # already loaded by the runtime. This never changes viable_symbols,
+            # scores, risk, leverage, sizing, or dispatch.
+            try:
+                from bot import min_order_feasibility_matrix as _feasibility_matrix
+                _feasibility_matrix.log_once(self, price_map, log)
+            except Exception as _matrix_exc:
+                log.warning(
+                    "[MIN_ORDER_FEASIBILITY_MATRIX] result=DEFER reason=%s "
+                    "observability_only=true decision_effect=NONE execution_effect=NONE",
+                    type(_matrix_exc).__name__,
+                )
+
             if buying_power <= 0:
                 log.warning(
                     f"⛔ INSUFFICIENT_BUYING_POWER: poder de compra "
