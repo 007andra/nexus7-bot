@@ -7,6 +7,7 @@ from bot.binance_research_data import AggTradeObservation
 from bot.binance_historical_context import (
     AggTradeTimeline,
     BookDepthTimeline,
+    MetricsObservation,
     MetricsTimeline,
     parse_book_depth_archive,
     parse_metrics_archive,
