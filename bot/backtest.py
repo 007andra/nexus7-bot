@@ -31,6 +31,7 @@ from bot.kucoin_execution_model import (
     funding_return_fraction,
     slippage_rate_for_symbol,
 )
+from bot.execution_cost import LEGACY_CONSERVATIVE_TAKER_FEE, static_slippage_rate
 from bot.logger import log
 
 
@@ -132,10 +133,121 @@ async def _kucoin_page(client, symbol: str, interval: str, start_ms: int, end_ms
     return out
 
 
+async def _binance_page(
+    client,
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    limit: int,
+) -> list:
+    from bot.binance import INTERVAL_MAP, to_binance
+
+    mapped = INTERVAL_MAP.get(str(interval))
+    if not mapped:
+        raise ValueError(f"unsupported Binance interval: {interval}")
+    data = await client._get(
+        "/fapi/v1/klines",
+        {
+            "symbol": to_binance(symbol),
+            "interval": mapped,
+            "startTime": int(start_ms),
+            "endTime": int(end_ms),
+            "limit": min(1500, max(1, int(limit))),
+        },
+        auth=False,
+    )
+    raw = data if isinstance(data, list) else []
+    out = []
+    for item in raw:
+        candle = _normalize_kline(item)
+        if candle is not None:
+            out.append(candle)
+    out.sort(key=lambda candle: candle["ts"])
+    return out
+
+
+def _client_exchange_name(client) -> str:
+    explicit = str(getattr(client, "exchange_name", "") or "").strip().lower()
+    if explicit:
+        return explicit
+    name = type(client).__name__.lower()
+    if "binance" in name:
+        return "binance"
+    if "kucoin" in name:
+        return "kucoin"
+    return "unknown"
+
+
+def _binance_research_taker_fee() -> float:
+    from bot.binance import TAKER_FEE as BINANCE_TAKER_FEE
+
+    try:
+        configured = float(BINANCE_TAKER_FEE)
+    except (TypeError, ValueError, OverflowError):
+        configured = LEGACY_CONSERVATIVE_TAKER_FEE
+    if configured < 0 or configured >= 0.02:
+        configured = LEGACY_CONSERVATIVE_TAKER_FEE
+    return max(configured, LEGACY_CONSERVATIVE_TAKER_FEE)
+
+
+async def _fetch_binance_funding_history(
+    client,
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+) -> list[dict]:
+    """Fetch public Binance USD-M settlement history in canonical event shape."""
+    if not hasattr(client, "_get") or int(end_ms) <= int(start_ms):
+        return []
+    from bot.binance import to_binance
+
+    by_ts: dict[int, dict] = {}
+    cursor = int(start_ms)
+    final = int(end_ms)
+    previous_cursor = -1
+    while cursor <= final:
+        data = await client._get(
+            "/fapi/v1/fundingRate",
+            {
+                "symbol": to_binance(symbol),
+                "startTime": cursor,
+                "endTime": final,
+                "limit": 1000,
+            },
+            auth=False,
+        )
+        rows = data if isinstance(data, list) else []
+        if not rows:
+            break
+        max_ts = cursor
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                ts = int(row.get("fundingTime", 0) or 0)
+                rate = float(row.get("fundingRate", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if ts > 0 and np.isfinite(rate):
+                by_ts[ts] = {"timepoint": ts, "fundingRate": rate}
+                max_ts = max(max_ts, ts)
+        next_cursor = max_ts + 1
+        if next_cursor <= cursor or next_cursor == previous_cursor:
+            raise RuntimeError("Binance funding pagination made no progress")
+        previous_cursor = cursor
+        cursor = next_cursor
+        if len(rows) < 1000:
+            break
+        await asyncio.sleep(0.05)
+    return [by_ts[key] for key in sorted(by_ts)]
+
+
 async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -> list:
     if limit <= 0:
         return []
     try:
+        venue = _client_exchange_name(client)
         if not hasattr(client, "_get"):
             rows = await client.get_klines(symbol, interval, limit)
             unique = {int(c["ts"]): c for c in rows if c and c.get("ts")}
@@ -146,7 +258,7 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
             return result
 
         interval_ms = _interval_minutes(interval) * 60 * 1000
-        page_size = 500
+        page_size = 1500 if venue == "binance" else 500
         cursor_end = int(time.time() * 1000)
         by_ts: dict[int, dict] = {}
         previous_oldest: int | None = None
@@ -159,7 +271,16 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
             requested = min(page_size, remaining)
             span = interval_ms * (requested + 1)
             cursor_start = max(0, cursor_end - span)
-            page = await _kucoin_page(client, symbol, interval, cursor_start, cursor_end)
+            if venue == "binance":
+                page = await _binance_page(
+                    client, symbol, interval, cursor_start, cursor_end, requested
+                )
+            elif venue in {"kucoin", "unknown"}:
+                page = await _kucoin_page(
+                    client, symbol, interval, cursor_start, cursor_end
+                )
+            else:
+                raise RuntimeError(f"unsupported historical venue: {venue}")
             if not page:
                 break
             for candle in page:
@@ -211,7 +332,7 @@ def _run_strategy(
     symbol: str = "",
     execution_context: dict | None = None,
 ) -> List[dict]:
-    """Replay production MTF logic with a KuCoin-like market execution proxy.
+    """Replay production MTF logic with a venue-neutral market execution proxy.
 
     ``pnl_pct`` remains a return fraction on initial notional (historical API
     compatibility); leverage is intentionally NOT multiplied into this metric.
@@ -412,7 +533,7 @@ def _run_strategy(
                 "funding_events_charged": funding_count,
                 "taker_fee_rate": fee_rate,
                 "fee_source": ctx.get("fee_source", "unknown"),
-                "execution_model": "KUCOIN_MARKET_PROXY_V1",
+                "execution_model": execution_model,
             }
         )
 
@@ -591,13 +712,27 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
 
     start_ms = _ts_ms(k15[0])
     end_ms = _ts_ms(k15[-1]) + 15 * 60 * 1000
-    taker_fee, fee_source = await fetch_actual_taker_fee(client, symbol)
-    funding_events = await fetch_public_funding_history(client, symbol, start_ms, end_ms)
+    venue = _client_exchange_name(client)
+    if venue == "binance":
+        taker_fee = _binance_research_taker_fee()
+        fee_source = "binance_config_conservative_floor"
+        funding_events = await _fetch_binance_funding_history(
+            client, symbol, start_ms, end_ms
+        )
+        slippage_rate = static_slippage_rate(symbol)
+        execution_model = "BINANCE_USDM_MARKET_PROXY_V1"
+    else:
+        taker_fee, fee_source = await fetch_actual_taker_fee(client, symbol)
+        funding_events = await fetch_public_funding_history(
+            client, symbol, start_ms, end_ms
+        )
+        slippage_rate = slippage_rate_for_symbol(symbol)
+        execution_model = "KUCOIN_MARKET_PROXY_V1"
     funding_required = (end_ms - start_ms) > 8 * 60 * 60 * 1000
     execution_context = {
         "taker_fee_rate": taker_fee,
         "fee_source": fee_source,
-        "slippage_rate": slippage_rate_for_symbol(symbol),
+        "slippage_rate": slippage_rate,
         "funding_events": funding_events,
     }
 
