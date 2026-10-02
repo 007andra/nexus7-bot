@@ -1,9 +1,21 @@
+import hashlib
+import json
 import unittest
 
 from bot.research_promotion_readiness import (
     evaluate_readiness,
     evidence_gate_flags,
 )
+
+
+def _required_symbols():
+    return ["BTCUSDT", "ETHUSDT"]
+
+
+def _universe_hash():
+    panel = sorted(_required_symbols())
+    raw = json.dumps(panel, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _bundle():
@@ -42,6 +54,10 @@ def _bundle():
         "methodology": {
             "venue": "BINANCE_USDM",
             "source": "data.binance.vision",
+            "universe_selection": "PREDECLARED_FIXED_PANEL",
+            "claim_scope": "SYMBOL_PANEL_ONLY",
+            "symbol_universe": _required_symbols(),
+            "symbol_universe_hash": _universe_hash(),
             "archive_checksums_verified": True,
             "shared_candidate_population": True,
             "closed_candles_only": True,
@@ -88,6 +104,7 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
             _bundle(),
             ci_green=True,
             shadow_drift=_drift(),
+            required_symbols=_required_symbols(),
             sensitivity=_sensitivity(),
         )
         self.assertTrue(result.ready_for_operator_review)
@@ -108,16 +125,29 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
             bundle,
             ci_green=True,
             shadow_drift=_drift(),
+            required_symbols=_required_symbols(),
             sensitivity=_sensitivity(),
         )
         self.assertFalse(result.ready_for_operator_review)
         self.assertIn("MANIFEST_VALID", result.blockers)
+
+    def test_research_panel_must_cover_requested_promotion_scope(self):
+        result = evaluate_readiness(
+            _bundle(),
+            ci_green=True,
+            shadow_drift=_drift(),
+            required_symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+            sensitivity=_sensitivity(),
+        )
+        self.assertFalse(result.ready_for_operator_review)
+        self.assertIn("UNIVERSE_GREEN", result.blockers)
 
     def test_ci_false_fails_closed(self):
         result = evaluate_readiness(
             _bundle(),
             ci_green=False,
             shadow_drift=_drift(),
+            required_symbols=_required_symbols(),
             sensitivity=_sensitivity(),
         )
         self.assertFalse(result.ready_for_operator_review)
@@ -130,6 +160,7 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
             bundle,
             ci_green=True,
             shadow_drift=_drift(),
+            required_symbols=_required_symbols(),
             sensitivity=_sensitivity(),
         )
         self.assertFalse(result.ready_for_operator_review)
@@ -141,7 +172,8 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
                 _bundle(),
                 ci_green=True,
                 shadow_drift=_drift(status),
-                sensitivity=_sensitivity(),
+                required_symbols=_required_symbols(),
+            sensitivity=_sensitivity(),
             )
             self.assertFalse(result.ready_for_operator_review)
             self.assertIn("SHADOW_DRIFT_GREEN", result.blockers)
@@ -151,6 +183,7 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
             _bundle(),
             ci_green=True,
             shadow_drift=_drift(),
+            required_symbols=_required_symbols(),
             sensitivity=None,
         )
         self.assertFalse(result.ready_for_operator_review)
@@ -163,6 +196,7 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
             bundle,
             ci_green=True,
             shadow_drift=_drift(),
+            required_symbols=_required_symbols(),
             sensitivity=_sensitivity(),
         )
         self.assertFalse(result.ready_for_operator_review)
@@ -175,6 +209,7 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
             bundle,
             ci_green=True,
             shadow_drift=_drift(),
+            required_symbols=_required_symbols(),
             sensitivity=_sensitivity(),
         )
         self.assertFalse(result.ready_for_operator_review)
@@ -187,6 +222,7 @@ class ResearchPromotionReadinessTests(unittest.TestCase):
             bundle,
             ci_green=True,
             shadow_drift=_drift(),
+            required_symbols=_required_symbols(),
             sensitivity=_sensitivity(),
         )
         self.assertFalse(result.ready_for_operator_review)
