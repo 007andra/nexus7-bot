@@ -141,14 +141,18 @@ def label_aware_purged_embargo_walk_forward(
                 eligible.append(row)
 
         train = tuple(eligible[-train_size:])
-        if len(train) == train_size:
-            folds.append(
-                WalkForwardFold(
-                    train=train,
-                    test=tuple(test),
-                )
-            )
+        if len(train) < train_size:
+            # Move one observation at a time until enough labels are actually
+            # known. A non-emitted fold must not create an embargo region.
+            test_start += 1
+            continue
 
+        folds.append(
+            WalkForwardFold(
+                train=train,
+                test=tuple(test),
+            )
+        )
         embargo_end = min(len(ordered), test_end + embargo_size)
         embargoed_indices.update(range(test_end, embargo_end))
         test_start += step
