@@ -149,6 +149,25 @@ async def record_reduction(position, residual_qty, bgx_order_qty, reason):
     return True
 
 
+async def record_entry_fill(opening_order_id, cumulative_qty, reason):
+    """F-013A: raise opening_qty to the exchange-proven cumulative fill of the
+    SAME opening order (late fills). Monotonic, OPEN lineages only; never
+    used for exposure that the opening order does not explain."""
+    record = await load(opening_order_id)
+    qty = _qty(cumulative_qty)
+    if record is None or record["status"] != OPEN or qty is None or \
+            qty <= record["opening_qty"] * (1 + 1e-9):
+        return False
+    previous = record["opening_qty"]
+    record["opening_qty"] = qty
+    await _save(record)
+    log.warning(
+        "[TRADE_LINEAGE_ENTRY_FILL] symbol=%s side=%s opening_order_id=%s opening_qty=%s->%s "
+        "confirmed_reduced_qty=%s reason=%s", record["symbol"], record["direction"],
+        str(opening_order_id)[:16], previous, qty, record["confirmed_reduced_qty"], reason)
+    return True
+
+
 async def close(opening_order_id, reason):
     """Monotonic OPEN -> CLOSED; CLOSED never returns to OPEN."""
     record = await load(opening_order_id)

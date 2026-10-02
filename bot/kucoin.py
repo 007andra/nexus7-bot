@@ -1958,6 +1958,11 @@ class KuCoinClient:
         persist_callback = getattr(registry, "persist_callback", None)
         if callable(persist_callback):
             await persist_callback(mo)
+        if mo.order_id and mo.state in (OrderState.PARTIALLY_FILLED, OrderState.FILLED):
+            # F-013A: WS is only a TRIGGER for the post-fill recheck of the
+            # position opened by this order; its matchPrice is never the VWAP.
+            from bot import postfill_geometry
+            postfill_geometry.request_revalidation(getattr(self, "_engine", None), mo.order_id)
 
     async def _ws_loop(self, symbols: list, intervals: list):
         """Loop principal de reconexão WebSocket com backoff exponencial."""

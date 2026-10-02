@@ -1346,6 +1346,15 @@ class TradingEngine:
                         continue
 
                     _qty_local = float(getattr(_pos_local, "qty", 0) or 0)
+                    if _qty_ex > _qty_local * (1 + 1e-9) + 1e-12 and not self.paper_trade:
+                        # F-013A — an exposure INCREASE is never absorbed silently
+                        # while the geometry stays CONFIRMED: it is BGX only when
+                        # the same opening order's cumulative fills explain it, and
+                        # then VWAP/stop/risk are re-proven (postfill_geometry).
+                        from bot import postfill_geometry
+                        if await postfill_geometry.on_exposure_increase(self, _pos_local, _qty_ex) \
+                                != postfill_geometry.UNCONFIRMED:
+                            continue
                     if _qty_local > 0 and _qty_ex > 0:
                         _div = abs(_qty_local - _qty_ex) / max(_qty_local, _qty_ex)
                         if _div > 0.02:      # mesma tolerância do IntegrityGuard
@@ -1953,54 +1962,62 @@ class TradingEngine:
                     continue
                 pos.update_pnl(cur)
 
-                # Calcula novo SL via método da Position
-                new_sl = pos.calc_trailing_sl()
-                if new_sl is None:
+                # F-013A — trailing and the post-fill recheck mutate the same
+                # geometry (stop / qty / VWAP): serialized per position, and a
+                # recheck in progress is never raced (skip this cycle).
+                from bot import postfill_geometry
+                _glock = postfill_geometry.geometry_lock(pos)
+                if _glock.locked():
                     continue
+                async with _glock:
+                    # Calcula novo SL via método da Position
+                    new_sl = pos.calc_trailing_sl()
+                    if new_sl is None:
+                        continue
 
-                # Só move se o SL melhorou (LONG: sobe, SHORT: desce), após
-                # quantização por tick (Q-01C: sem regressão e sem churn).
-                from bot.stop_monotonic import current_stop, decide_stop, log_decision
-                _cur_sl = current_stop(pos)
-                _dec = decide_stop(
-                    pos.direction, _cur_sl, new_sl,
-                    tick_size=(getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize"),
-                    market_price=cur)
-                log_decision(sym, pos.direction, _cur_sl, new_sl, _dec, "trailing", quiet_skip=True)
-                if not _dec.replace:
-                    continue
+                    # Só move se o SL melhorou (LONG: sobe, SHORT: desce), após
+                    # quantização por tick (Q-01C: sem regressão e sem churn).
+                    from bot.stop_monotonic import current_stop, decide_stop, log_decision
+                    _cur_sl = current_stop(pos)
+                    _dec = decide_stop(
+                        pos.direction, _cur_sl, new_sl,
+                        tick_size=(getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize"),
+                        market_price=cur)
+                    log_decision(sym, pos.direction, _cur_sl, new_sl, _dec, "trailing", quiet_skip=True)
+                    if not _dec.replace:
+                        continue
 
-                old_sl = pos.trailing_sl
+                    old_sl = pos.trailing_sl
 
-                # RISCO CORRIGIDO: o estado interno era atualizado SEM
-                # verificar se a exchange aceitou o novo stop.
-                #
-                # Se set_sl falhasse, o bot passava a acreditar que o stop
-                # estava mais apertado do que realmente estava — calculando
-                # risco, break-even e trailing sobre um valor fictício.
-                # Numa reversão, a perda real seria maior que a esperada.
-                _ok = await self.client.set_sl(sym, new_sl)
-                if not _ok:
-                    log.error(
-                        f"🚨 [{sym}] Trailing FALHOU: exchange não aceitou "
-                        f"SL {new_sl:.6f} — mantendo estado em {old_sl:.6f}. "
-                        f"O stop real continua no valor anterior."
+                    # RISCO CORRIGIDO: o estado interno era atualizado SEM
+                    # verificar se a exchange aceitou o novo stop.
+                    #
+                    # Se set_sl falhasse, o bot passava a acreditar que o stop
+                    # estava mais apertado do que realmente estava — calculando
+                    # risco, break-even e trailing sobre um valor fictício.
+                    # Numa reversão, a perda real seria maior que a esperada.
+                    _ok = await self.client.set_sl(sym, new_sl)
+                    if not _ok:
+                        log.error(
+                            f"🚨 [{sym}] Trailing FALHOU: exchange não aceitou "
+                            f"SL {new_sl:.6f} — mantendo estado em {old_sl:.6f}. "
+                            f"O stop real continua no valor anterior."
+                        )
+                        continue
+
+                    pos.trailing_sl = new_sl
+                    pos.sl          = new_sl   # mantém sl e trailing_sl sincronizados
+
+                    if self.paper_trade and self._durable_state_enforced:
+                        await durable.persist_paper_runtime(
+                            self, f"trailing_sl:{sym}", strict=True
+                        )
+
+                    log.info(
+                        f"🔒 [{sym}] Trailing SL: {old_sl:.6f} → {new_sl:.6f} "
+                        f"| preço={cur:.6f} pnl=${pos.pnl:.2f} "
+                        f"(ativo={pos.trailing_active})"
                     )
-                    continue
-
-                pos.trailing_sl = new_sl
-                pos.sl          = new_sl   # mantém sl e trailing_sl sincronizados
-
-                if self.paper_trade and self._durable_state_enforced:
-                    await durable.persist_paper_runtime(
-                        self, f"trailing_sl:{sym}", strict=True
-                    )
-
-                log.info(
-                    f"🔒 [{sym}] Trailing SL: {old_sl:.6f} → {new_sl:.6f} "
-                    f"| preço={cur:.6f} pnl=${pos.pnl:.2f} "
-                    f"(ativo={pos.trailing_active})"
-                )
             except Exception as e:
                 log.error(f"_apply_trailing_stops {sym}: {e}")
 
@@ -3343,6 +3360,19 @@ class TradingEngine:
                             _ainda_desprotegidos = await self._reconcile_exchange_positions(
                                 only_symbol=sig.symbol
                             )
+                            if sig.symbol in self.positions and not self.paper_trade:
+                                # F-013A — the position adopted after a fill timeout
+                                # IS this opening order (partial so far): it enters
+                                # the post-fill pipeline (cumulative VWAP, active
+                                # stop, F-003 budget) instead of living with an
+                                # orphan geometry and initial_sl=None forever.
+                                from bot import postfill_geometry
+                                await postfill_geometry.adopt_after_timeout(
+                                    self, self.positions[sig.symbol],
+                                    fill_status=(_fill_check.get("status") or {}),
+                                    order_id=_oid_real, planned_entry=sig.entry,
+                                    planned_sl=sig.sl, planned_tp=sig.tp,
+                                )
                             if sig.symbol in self.positions:
                                 try:
                                     _managed.transition(

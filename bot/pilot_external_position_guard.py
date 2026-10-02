@@ -79,6 +79,17 @@ def install(TradingEngine, log):
                 if (base_size > 0 and local_size > 0 and same_direction
                         and base_size <= local_size + max(1e-12, local_size * 1e-9)):
                     continue
+                # F-013A: an increase is still BGX when the SAME opening order's
+                # cumulative fills explain it (late fill), re-proven right now
+                # with VWAP/stop/risk revalidated. Anything else is EXTERNAL.
+                if base_size > local_size and local_size > 0 and same_direction:
+                    from bot import postfill_geometry
+                    try:
+                        explained = await postfill_geometry.late_fill_explains(engine, sym, base_size)
+                    except Exception:
+                        explained = False
+                    if explained:
+                        continue
                 explicit_external.add(sym)
                 engine._external_position_symbols = explicit_external
                 engine.positions.pop(sym, None)

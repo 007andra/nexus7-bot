@@ -65,6 +65,13 @@ def build_record(position):
         "tp1_hit": bool(getattr(position, "tp1_hit", False)),
         "last_known_qty": float(position.qty),
     }
+    version = getattr(position, "_postfill_version", None)
+    if isinstance(version, dict):
+        # F-013A: the geometry is confirmed for exactly this entry (qty, VWAP, stop).
+        record.update(confirmed_entry_qty=float(version["entry_qty"]),
+                      confirmed_fill_vwap=float(version["vwap"]),
+                      geometry_version=int(version["n"]),
+                      entry_order_terminal=bool(version["terminal"]))
     reason = validate(record)
     if reason:
         raise ValueError(reason)
@@ -139,7 +146,8 @@ async def persist(position, reason, *, tick_size=None):
 def _material_change(previous, record, tick_size):
     if any(previous.get(k) != record.get(k) for k in
            ("opening_order_id", "direction", "entry", "initial_sl", "initial_tp",
-            "initial_qty", "tp1_hit", "last_known_qty")):
+            "initial_qty", "tp1_hit", "last_known_qty", "confirmed_entry_qty",
+            "confirmed_fill_vwap", "geometry_version", "entry_order_terminal")):
         return True
     tick = _positive(tick_size) or 0.0
     old, new = float(previous.get("peak_price") or 0.0), record["peak_price"]
@@ -186,6 +194,14 @@ async def _exchange_stop(client, symbol, direction):
     return max(triggers) if direction == "LONG" else min(triggers)
 
 
+def _entry_grew(position, record, lifecycle):
+    """Current entry qty (exchange exposure + BGX-proven reductions) above the
+    entry qty the stored geometry was confirmed for."""
+    confirmed = _positive(record.get("confirmed_entry_qty")) or _positive(record.get("initial_qty"))
+    current = float(position.qty) + float(lifecycle.get("confirmed_reduced_qty") or 0.0)
+    return confirmed is None or current > confirmed * (1 + 1e-9) + 1e-12
+
+
 def apply_record(position, record):
     """Apply a VALIDATED record: history from durable state, exposure untouched.
 
@@ -227,19 +243,32 @@ async def restore(engine, symbol):
             raw = await db.load_key_value(_key(oid), strict=True)
             record = json.loads(raw) if raw else None
             reason = "exit_geometry_unavailable" if record is None else validate(
-                record, symbol=symbol, direction=position.direction,
-                opening_order_id=oid, entry=position.entry)
+                record, symbol=symbol, direction=position.direction, opening_order_id=oid)
             if reason is None:
                 # NOVO-02: historical geometry never revives a terminal lineage.
                 from bot import trade_lifecycle
                 lifecycle = await trade_lifecycle.load(oid)
                 if lifecycle is None or lifecycle["status"] != trade_lifecycle.OPEN:
                     reason = "trade_lifecycle_not_open"
+                elif _entry_grew(position, record, lifecycle):
+                    reason = "entry_qty_grew_after_confirmation"
+                else:
+                    reason = validate(record, entry=position.entry)
         except Exception as exc:
             reason = f"read_failed:{type(exc).__name__}"
     if reason:
         position.initial_sl = None
-        if reason == "exit_geometry_unavailable":
+        if reason == "entry_qty_grew_after_confirmation":
+            # F-013A / INV-LATE-FILL-BUDGET-001: the stored geometry was confirmed
+            # for a SMALLER entry. Never restored as CONFIRMED; VWAP/stop/risk are
+            # re-proven from the exact order's ledger by the post-fill pipeline.
+            from bot import postfill_geometry
+            postfill_geometry.mark_unconfirmed(
+                position, planned_entry=record["entry"], planned_sl=record["initial_sl"],
+                planned_tp=record["initial_tp"], order_id=oid, reason="restart_after_late_entry_fill",
+                opened_ms=lifecycle.get("opened_at_ms"), reduced_qty=lifecycle["confirmed_reduced_qty"])
+            position.tp1_hit = bool(getattr(position, "tp1_hit", False) or record["tp1_hit"])
+        elif reason == "exit_geometry_unavailable":
             # F-013: crash between fill and geometry confirmation. The entry was
             # proven by the restart ownership proof; the stop is read from the
             # exchange by the post-fill reconciliation — never fabricated.

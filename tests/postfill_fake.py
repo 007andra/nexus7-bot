@@ -33,12 +33,13 @@ class PostfillExchange:
     closed = False
 
     def __init__(self, kc_symbol, multiplier, *, fills, mark=None, partial_of=None,
-                 fail_stop_create=False):
+                 fail_stop_create=False, keep_active=False):
         self.kc, self.mult = kc_symbol, multiplier
         self.fill_plan = list(fills)            # [(contracts, price), ...]
         self.partial_of = partial_of             # requested size when partial
         self.mark = mark
         self.fail_stop_create = fail_stop_create
+        self.keep_active = keep_active           # F-013A: entry order still working after fills
         self.position = None                     # {"qty": signed contracts, "entry": avg}
         self.stops, self.orders, self.fills = [], {}, []
         self.calls = []
@@ -142,8 +143,10 @@ class PostfillExchange:
         self.position = {"qty": sign * filled, "entry": value / (filled * self.mult)}
         self.orders[oid] = {"id": oid, "clientOid": body.get("clientOid"), "symbol": self.kc,
                             "side": body["side"], "size": requested, "filledSize": filled,
-                            "dealSize": filled, "dealValue": value, "isActive": False,
-                            "cancelExist": filled < requested, "status": "done",
+                            "dealSize": filled, "dealValue": value,
+                            "isActive": bool(self.keep_active),
+                            "cancelExist": filled < requested and not self.keep_active,
+                            "status": "open" if self.keep_active else "done",
                             "reduceOnly": False,
                             **{k: body[k] for k in ("triggerStopUpPrice", "triggerStopDownPrice")
                                if k in body}}
@@ -155,3 +158,42 @@ class PostfillExchange:
                                    "stopPriceType": "TP", "closeOrder": True, "reduceOnly": True,
                                    "type": "market", "status": "active", "isActive": True})
         return _ok({"orderId": oid})
+
+    # -- F-013A scenario helpers ----------------------------------------------
+    def entry_order(self):
+        return next(o for o in self.orders.values() if str(o["id"]).startswith("entry"))
+
+    def late_fill(self, contracts, price, *, complete=True, trade_id=None):
+        """More fills of the SAME opening order (exchange truth everywhere)."""
+        order = self.entry_order()
+        sign = 1 if order["side"] == "buy" else -1
+        tid = trade_id or f"{order['id']}-late{len(self.fills)}"
+        if any(f["tradeId"] == tid for f in self.fills):
+            return                                   # duplicate event: idempotent
+        self.fills.append({"tradeId": tid, "orderId": order["id"], "symbol": self.kc,
+                           "side": order["side"], "size": contracts, "price": price, "fee": 0,
+                           "feeCurrency": "USDT", "tradeTime": time.time_ns(), "tradeType": "trade"})
+        old = abs(self.position["qty"])
+        new = old + contracts
+        self.position = {"qty": sign * new,
+                         "entry": (self.position["entry"] * old + price * contracts) / new}
+        order["dealSize"] = order["filledSize"] = order["dealSize"] + contracts
+        order["dealValue"] = order["dealValue"] + contracts * price * self.mult
+        if complete:
+            order.update(isActive=False, status="done",
+                         cancelExist=order["dealSize"] < order["size"])
+
+    def manual_add(self, contracts, price):
+        """Exposure added OUTSIDE BGX (other order id) — not a fill of ours."""
+        sign = 1 if self.position["qty"] > 0 else -1
+        old = abs(self.position["qty"])
+        self.fills.append({"tradeId": f"manual-{len(self.fills)}", "orderId": "manual-order",
+                           "symbol": self.kc, "side": "buy" if sign > 0 else "sell",
+                           "size": contracts, "price": price, "fee": 0, "feeCurrency": "USDT",
+                           "tradeTime": time.time_ns(), "tradeType": "trade"})
+        self.position = {"qty": sign * (old + contracts),
+                         "entry": (self.position["entry"] * old + price * contracts) / (old + contracts)}
+
+    def partial_exit(self, contracts):
+        sign = 1 if self.position["qty"] > 0 else -1
+        self.position["qty"] = sign * (abs(self.position["qty"]) - contracts)
