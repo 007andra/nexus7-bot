@@ -108,3 +108,57 @@ def candidate_from_mapping(data: Mapping[str, object]) -> StrategyCandidate:
         code_sha=str(data.get("code_sha", "")),
         evidence=evidence,
     )
+
+
+
+_REGISTRY_KEY = "nexus:champion_challenger:v1"
+
+
+async def persist_registry(
+    registry: ChampionChallengerRegistry,
+    *,
+    strict: bool = False,
+) -> bool:
+    """Persist governance state through the existing durable key-value store."""
+    import json
+    from bot import database
+
+    payload = json.dumps(
+        registry.snapshot(),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return bool(await database.save_key_value(
+        _REGISTRY_KEY, payload, strict=strict
+    ))
+
+
+async def restore_registry(*, strict: bool = False) -> ChampionChallengerRegistry:
+    """Restore governance state; malformed evidence fails closed."""
+    import json
+    from bot import database
+
+    raw = await database.load_key_value(_REGISTRY_KEY, strict=strict)
+    if not raw:
+        return ChampionChallengerRegistry()
+    try:
+        data = json.loads(raw)
+        champion_raw = data.get("champion")
+        champion = (
+            candidate_from_mapping(champion_raw)
+            if isinstance(champion_raw, Mapping) else None
+        )
+        registry = ChampionChallengerRegistry(champion)
+        challengers = data.get("challengers", {})
+        if not isinstance(challengers, Mapping):
+            raise ValueError("challengers must be a mapping")
+        for item in challengers.values():
+            if not isinstance(item, Mapping):
+                raise ValueError("challenger entry must be a mapping")
+            registry.register(candidate_from_mapping(item))
+        return registry
+    except Exception:
+        if strict:
+            raise
+        return ChampionChallengerRegistry()
