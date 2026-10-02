@@ -343,3 +343,74 @@ def evaluate_microstructure_ranking(
         "score_effect": "NONE",
         "promotion_authority": False,
     }
+
+
+
+def microstructure_review_gate(
+    report: Mapping[str, object],
+    *,
+    min_comparable_batches: int = 75,
+    min_microstructure_coverage: float = 0.95,
+    min_temporal_folds: int = 4,
+) -> dict:
+    """Fail-closed evidence gate for considering a SHADOW feature for review.
+
+    Thresholds mirror the existing NEXUS OOS evidence posture: a substantial
+    sample, high counterfactual-style coverage, positive bootstrap lower bound
+    and temporal stability. Passing this gate still has no LIVE authority.
+    """
+    if min_comparable_batches <= 0:
+        raise ValueError("min_comparable_batches must be positive")
+    if not 0.0 < min_microstructure_coverage <= 1.0:
+        raise ValueError("min_microstructure_coverage must be in (0,1]")
+    if min_temporal_folds <= 0:
+        raise ValueError("min_temporal_folds must be positive")
+
+    blockers: list[str] = []
+    if report.get("status") != "EVIDENCE_AVAILABLE":
+        blockers.append("MICROSTRUCTURE_EVIDENCE_UNAVAILABLE")
+    if int(report.get("comparable_batches", 0) or 0) < min_comparable_batches:
+        blockers.append("INSUFFICIENT_COMPARABLE_BATCHES")
+    if float(report.get("microstructure_coverage", 0.0) or 0.0) < min_microstructure_coverage:
+        blockers.append("INSUFFICIENT_MICROSTRUCTURE_COVERAGE")
+
+    ci = report.get("top_pick_uplift_ci95")
+    ci_low = None
+    if isinstance(ci, Mapping):
+        try:
+            ci_low = float(ci.get("low"))
+        except (TypeError, ValueError, OverflowError):
+            ci_low = None
+    if ci_low is None or not math.isfinite(ci_low) or ci_low <= 0.0:
+        blockers.append("INCREMENTAL_UPLIFT_CI_NOT_POSITIVE")
+
+    folds = int(report.get("temporal_folds_evaluated", 0) or 0)
+    positive_folds = int(report.get("positive_uplift_folds", 0) or 0)
+    if folds < min_temporal_folds:
+        blockers.append("INSUFFICIENT_TEMPORAL_FOLDS")
+    elif positive_folds != folds:
+        blockers.append("TEMPORAL_UPLIFT_NOT_STABLE")
+
+    if report.get("outcome_used_in_rank") is not False:
+        blockers.append("OUTCOME_LEAKAGE_NOT_EXCLUDED")
+    if report.get("execution_effect") != "NONE":
+        blockers.append("MICROSTRUCTURE_EXECUTION_EFFECT_NOT_NONE")
+    if report.get("score_effect") != "NONE":
+        blockers.append("MICROSTRUCTURE_SCORE_EFFECT_NOT_NONE")
+    if bool(report.get("promotion_authority", False)):
+        blockers.append("MICROSTRUCTURE_HAS_PROMOTION_AUTHORITY")
+
+    return {
+        "ready_for_operator_review": not blockers,
+        "blockers": tuple(blockers),
+        "requirements": {
+            "min_comparable_batches": int(min_comparable_batches),
+            "min_microstructure_coverage": float(min_microstructure_coverage),
+            "min_temporal_folds": int(min_temporal_folds),
+            "bootstrap_ci_low_gt_zero": True,
+            "all_temporal_folds_positive": True,
+        },
+        "execution_effect": "NONE",
+        "score_effect": "NONE",
+        "promotion_authority": False,
+    }
