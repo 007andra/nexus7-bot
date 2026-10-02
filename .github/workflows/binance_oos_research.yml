@@ -105,8 +105,13 @@ jobs:
 
           payload = json.loads(path.read_text(encoding="utf-8"))
           manifest_hash = str(payload.get("manifest_hash", ""))
+          dataset_fingerprint = str(
+              payload.get("dataset_fingerprint", "")
+          )
           if len(manifest_hash) != 64:
               raise SystemExit("invalid manifest hash")
+          if len(dataset_fingerprint) != 64:
+              raise SystemExit("invalid dataset fingerprint")
 
           methodology = payload.get("methodology") or {}
           required = {
@@ -153,6 +158,7 @@ jobs:
                   (sensitivity.get("execution_cost") or {}).get("points") or []
               ),
               "manifest_hash": manifest_hash,
+              "dataset_fingerprint": dataset_fingerprint,
           }, indent=2, sort_keys=True))
           PY
 
