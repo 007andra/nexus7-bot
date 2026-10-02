@@ -199,7 +199,10 @@ def evaluate_microstructure_ranking(
         enriched = [row[1] for row in rows]
         realized = {row[0].candidate_id: row[2] for row in rows}
 
-        if all(item.depth_notional_1pct is not None for item in enriched):
+        depth_complete = all(
+            item.depth_notional_1pct is not None for item in enriched
+        )
+        if depth_complete:
             enriched = apply_cross_sectional_liquidity(enriched)
             depth_complete_batches += 1
 
@@ -240,11 +243,7 @@ def evaluate_microstructure_ranking(
             "base_rank_outcome_spearman": base_spear,
             "enriched_rank_outcome_spearman": enriched_spear,
             "rank_spearman_delta": spear_delta,
-            "depth_cross_section_complete": all(
-                item.depth_notional_1pct is not None for item in rows[1::3]
-            ) if False else all(
-                item.depth_notional_1pct is not None for item in enriched
-            ),
+            "depth_cross_section_complete": depth_complete,
         })
 
     ci = (
