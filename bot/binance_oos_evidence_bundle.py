@@ -252,8 +252,13 @@ def build_sensitivity_report(symbol_reports: list[dict]) -> dict:
 
 
 def build_opportunity_ranking_report(symbol_reports: list[dict]) -> dict:
-    """Canonical SHADOW microstructure ranking evidence, no local duplicate."""
-    return evaluate_microstructure_ranking(symbol_reports)
+    """Canonical SHADOW ranking evidence with legacy wrapper error contract."""
+    try:
+        return evaluate_microstructure_ranking(symbol_reports)
+    except ValueError as exc:
+        if "duplicate candidate_id" in str(exc):
+            raise RuntimeError(str(exc)) from exc
+        raise
 
 
 def assert_population_parity(primary: dict, robustness: dict) -> None:
