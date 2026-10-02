@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import calendar
 import json
 import os
 import time
@@ -21,11 +22,17 @@ from bot import nexus_ai
 from bot.backtest import _closed_window_by_ts, _timestamp_index
 from bot.binance_research_data import (
     FundingObservation,
+    daily_metrics_url,
     download_archive_verified,
     monthly_funding_url,
     monthly_kline_url,
     parse_funding_archive,
     parse_kline_archive,
+)
+from bot.binance_historical_context import (
+    MetricsObservation,
+    MetricsTimeline,
+    parse_metrics_archive,
 )
 from bot.config import cfg
 from bot.execution_cost import fallback_taker_fee, static_slippage_rate
@@ -60,6 +67,18 @@ def month_range(start: str, end: str) -> tuple[tuple[int, int], ...]:
         if month == 13:
             year += 1
             month = 1
+    return tuple(out)
+
+
+def dates_for_months(months: Sequence[tuple[int, int]]) -> tuple[str, ...]:
+    """Expand complete research months to ISO dates."""
+    out = []
+    for year, month in months:
+        last_day = calendar.monthrange(int(year), int(month))[1]
+        out.extend(
+            f"{int(year):04d}-{int(month):02d}-{day:02d}"
+            for day in range(1, last_day + 1)
+        )
     return tuple(out)
 
 
@@ -141,6 +160,76 @@ async def load_verified_funding(
         [by_ts[key] for key in sorted(by_ts)],
         tuple(artifacts),
     )
+
+
+async def load_verified_metrics(
+    symbol: str,
+    dates: Sequence[str],
+    *,
+    cache_dir: str | Path | None = None,
+) -> tuple[list[MetricsObservation], tuple[ResearchArtifact, ...]]:
+    """Load checksum-verified daily 5m positioning/flow metrics."""
+    by_ts: dict[int, MetricsObservation] = {}
+    artifacts = []
+    for source_date in dates:
+        url = daily_metrics_url(symbol, source_date)
+        archive = await download_archive_verified(
+            url, cache_path=_archive_cache_path(cache_dir, url)
+        )
+        rows = parse_metrics_archive(
+            archive.payload, source_date=source_date
+        )
+        for row in rows:
+            key = int(row.effective_ts_ms)
+            if key in by_ts and by_ts[key] != row:
+                raise ValueError(
+                    "conflicting Binance metrics effective timestamp"
+                )
+            by_ts[key] = row
+        artifacts.append(ResearchArtifact(
+            source=url,
+            dataset="metrics",
+            symbol=str(symbol).upper(),
+            interval="5m",
+            sha256=archive.sha256,
+            rows=len(rows),
+            first_ts=rows[0].effective_ts_ms if rows else None,
+            last_ts=rows[-1].effective_ts_ms if rows else None,
+        ))
+    return [by_ts[key] for key in sorted(by_ts)], tuple(artifacts)
+
+
+def derivatives_context_at(
+    timeline: MetricsTimeline,
+    decision_ts_ms: int,
+    *,
+    max_age_ms: int = 15 * 60 * 1000,
+) -> tuple[dict, bool]:
+    """Return causal NEXUS derivative inputs plus exact-parity flag."""
+    current, previous = timeline.asof(decision_ts_ms)
+    if current is None:
+        return {
+            "oi": None,
+            "oi_delta": None,
+            "ls_ratio": None,
+            "metrics_age_ms": None,
+        }, False
+    age = int(decision_ts_ms) - int(current.effective_ts_ms)
+    if age < 0 or age > int(max_age_ms):
+        return {
+            "oi": None,
+            "oi_delta": None,
+            "ls_ratio": None,
+            "metrics_age_ms": age,
+        }, False
+    inputs = current.as_nexus_inputs(previous)
+    complete = (
+        inputs["oi"] is not None
+        and inputs["oi_delta"] is not None
+        and inputs["ls_ratio"] is not None
+    )
+    inputs["metrics_age_ms"] = age
+    return inputs, bool(complete)
 
 
 def adverse_fill(
@@ -425,7 +514,11 @@ async def replay_symbol(
     funding, af = await load_verified_funding(
         symbol, months, cache_dir=cache_dir
     )
-    artifacts = a15 + a1h + a4h + af
+    metric_rows, am = await load_verified_metrics(
+        symbol, dates_for_months(months), cache_dir=cache_dir
+    )
+    metrics_timeline = MetricsTimeline(metric_rows)
+    artifacts = a15 + a1h + a4h + af + am
     if len(k15) < 200 or len(k1h) < 60 or len(k4h) < 30:
         return (
             {"symbol": symbol, "error": "insufficient_history", "candidates": []},
@@ -441,6 +534,8 @@ async def replay_symbol(
     rows: list[CandidateOutcome] = []
     diagnostics = []
     approved = rejected = 0
+    derivative_context_complete = 0
+    derivative_context_missing = 0
 
     for i in range(80, len(k15) - 40):
         decision_ts = ts15[i]
@@ -484,6 +579,11 @@ async def replay_symbol(
         r_multiple, diag = outcome
         ticker = {"lastPrice": str(float(k15[i]["o"]))}
         funding_now = latest_funding(funding, decision_ts)
+        derivatives, context_complete = derivatives_context_at(
+            metrics_timeline, decision_ts
+        )
+        derivative_context_complete += int(context_complete)
+        derivative_context_missing += int(not context_complete)
         with _freeze_full_clock(decision_ts):
             nx = nexus_ai.decide(
                 symbol,
@@ -495,8 +595,10 @@ async def replay_symbol(
                 tp=float(sig.tp),
                 ticker=ticker,
                 funding=funding_now,
-                oi=None,
+                oi=derivatives["oi"],
+                oi_delta=derivatives["oi_delta"],
                 orderbook=None,
+                ls_ratio=derivatives["ls_ratio"],
                 min_score=float(getattr(cfg, "NEXUS_MIN_SCORE", 55)),
             )
         is_approved = getattr(nx, "execution_allowed", False) is True
@@ -517,6 +619,8 @@ async def replay_symbol(
         diagnostics.append({
             "timestamp": decision_ts,
             "direction": direction,
+            "derivatives_context_complete": context_complete,
+            "metrics_age_ms": derivatives["metrics_age_ms"],
             **diag,
         })
 
@@ -527,6 +631,9 @@ async def replay_symbol(
             "candles_1h": len(k1h),
             "candles_4h": len(k4h),
             "funding_events": len(funding),
+            "metrics_rows": len(metric_rows),
+            "derivative_context_complete": derivative_context_complete,
+            "derivative_context_missing": derivative_context_missing,
             "approved": approved,
             "rejected": rejected,
             "candidates": rows,
@@ -539,10 +646,17 @@ async def replay_symbol(
                 "candles": True,
                 "ticker_proxy": True,
                 "funding_history": bool(funding),
-                "historical_open_interest": False,
+                "historical_open_interest": bool(metric_rows),
+                "historical_long_short_ratio": bool(metric_rows),
+                "metrics_label_shift_normalized": True,
                 "historical_orderbook": False,
+                "orderbook_affects_current_score": False,
                 "checksums_verified": True,
-                "parity_complete": False,
+                "parity_complete": (
+                    derivative_context_missing == 0
+                    and derivative_context_complete > 0
+                    and bool(funding)
+                ),
             },
         },
         artifacts,
