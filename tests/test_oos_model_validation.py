@@ -5,8 +5,10 @@ from bot.oos_model_validation import (
     aggregate_oos_report,
     brier_score,
     expected_calibration_error,
+    log_loss,
     promotion_decision,
     purged_walk_forward,
+    reliability_bins,
     report,
 )
 
@@ -44,6 +46,14 @@ class OOSModelValidationTests(unittest.TestCase):
         rep = report(_rows(100))
         self.assertGreater(rep.expectancy_r, 0.0)
         self.assertAlmostEqual(rep.win_rate, 0.5)
+        self.assertGreaterEqual(rep.log_loss, 0.0)
+
+    def test_log_loss_and_reliability_bins_are_auditable(self):
+        vals = _rows(100)
+        self.assertGreaterEqual(log_loss(vals), 0.0)
+        bins = reliability_bins(vals, bins=5)
+        self.assertTrue(bins)
+        self.assertEqual(sum(bucket["n"] for bucket in bins), len(vals))
 
     def test_aggregate_uses_only_test_rows(self):
         folds = purged_walk_forward(_rows(220), train_size=80, test_size=20, purge_size=5)
