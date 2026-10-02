@@ -79,10 +79,15 @@ def _attach_cost_context(decision, ctx: NexusCostContext, log) -> bool:
         if ctx.snapshot is not None:
             existing = str(getattr(decision, "_bgx_candidate_id", "") or "")
             if existing and existing != ctx.snapshot.candidate_id:
-                raise ValueError(
-                    "NEXUS candidate lineage conflict: "
-                    f"{existing} != {ctx.snapshot.candidate_id}"
-                )
+                warn = getattr(log, "warning", None)
+                if callable(warn):
+                    warn(
+                        "[CANDIDATE_TRACE] candidate_id_conflict decision=%s "
+                        "cost_snapshot=%s decision_effect=NONE execution_effect=NONE",
+                        existing,
+                        ctx.snapshot.candidate_id,
+                    )
+                return False
             setattr(decision, "_bgx_candidate_id", ctx.snapshot.candidate_id)
         return True
     except (AttributeError, TypeError):
