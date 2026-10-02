@@ -715,6 +715,7 @@ async def replay_symbol(
     *,
     months: Sequence[tuple[int, int]],
     cache_dir: str | Path | None = None,
+    include_agg_trades: bool = False,
 ) -> tuple[dict, tuple[ResearchArtifact, ...]]:
     """Replay one symbol from verified Binance Vision monthly archives."""
     from bot.strategy import Analyzer
@@ -897,7 +898,7 @@ async def replay_symbol(
     agg_trade_artifacts: tuple[ResearchArtifact, ...] = ()
     agg_trade_missing_dates: tuple[str, ...] = ()
     agg_trade_gap_reports = {}
-    if candidate_dates:
+    if include_agg_trades and candidate_dates:
         (
             agg_trade_rows,
             agg_trade_artifacts,
@@ -975,7 +976,13 @@ async def replay_symbol(
             "book_depth_candidate_dates": len(candidate_dates),
             "book_depth_missing_dates": list(book_depth_missing_dates),
             "agg_trade_rows": len(agg_trade_rows),
-            "agg_trade_candidate_dates": len(candidate_dates),
+            "agg_trade_mode": (
+                "CANDIDATE_DAY_REAL"
+                if include_agg_trades else "DISABLED"
+            ),
+            "agg_trade_candidate_dates": (
+                len(candidate_dates) if include_agg_trades else 0
+            ),
             "agg_trade_missing_dates": list(agg_trade_missing_dates),
             "agg_trade_gap_reports": agg_trade_gap_reports,
             "agg_trade_pressure_available": agg_pressure_available,
@@ -1002,7 +1009,11 @@ async def replay_symbol(
                 "oi_delta_semantics": "PREVIOUS_NEXUS_CANDIDATE",
                 "historical_orderbook": bool(book_depth_rows),
                 "historical_agg_trades": bool(agg_trade_rows),
-                "agg_trade_candidate_day_sampling": True,
+                "agg_trade_mode": (
+                    "CANDIDATE_DAY_REAL"
+                    if include_agg_trades else "DISABLED"
+                ),
+                "agg_trade_candidate_day_sampling": bool(include_agg_trades),
                 "agg_trade_missing_dates": list(agg_trade_missing_dates),
                 "agg_trade_interpolation_applied": False,
                 "book_depth_candidate_day_sampling": True,
@@ -1036,6 +1047,7 @@ async def run(
     end_month: str,
     cache_dir: str | Path | None = None,
     code_sha: str = "UNSPECIFIED",
+    include_agg_trades: bool = False,
 ) -> dict:
     """Generate Binance-native primary edge evidence plus immutable manifest."""
     from bot.runtime_bootstrap import install as install_runtime
@@ -1047,7 +1059,10 @@ async def run(
     artifacts = []
     for symbol in symbols:
         report, symbol_artifacts = await replay_symbol(
-            str(symbol).upper(), months=months, cache_dir=cache_dir
+            str(symbol).upper(),
+            months=months,
+            cache_dir=cache_dir,
+            include_agg_trades=include_agg_trades,
         )
         reports.append(report)
         artifacts.extend(symbol_artifacts)
@@ -1117,6 +1132,11 @@ def main() -> int:
     parser.add_argument("--end-month", required=True)
     parser.add_argument("--cache-dir", default="artifacts/binance_research_cache")
     parser.add_argument(
+        "--include-agg-trades",
+        action="store_true",
+        help="Download candidate-day USD-M aggTrades for microstructure OOS.",
+    )
+    parser.add_argument(
         "--code-sha",
         default=os.environ.get("RAILWAY_GIT_COMMIT_SHA", "UNSPECIFIED"),
     )
@@ -1130,6 +1150,7 @@ def main() -> int:
         end_month=args.end_month,
         cache_dir=args.cache_dir,
         code_sha=args.code_sha,
+        include_agg_trades=args.include_agg_trades,
     ))
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
