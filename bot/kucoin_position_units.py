@@ -33,10 +33,25 @@ class KuCoinPositionUnitAdapter:
         self._client.entries_paused = value
 
     async def get_positions(self) -> list:
-        rows = await self._client.get_positions()
+        from bot.position_snapshot import PositionSnapshotUnconfirmed
+        try:
+            rows = await self._client.get_positions()
+        except PositionSnapshotUnconfirmed as exc:
+            # F-014: keep the non-authoritative contract; convert the valid rows
+            # (informational only) to base units when possible.
+            try:
+                valid = self._normalize(exc.valid_rows)
+            except Exception:
+                valid = []
+            raise PositionSnapshotUnconfirmed(
+                exc.state, valid_rows=valid, unknown_symbols=exc.unknown_symbols,
+                unidentified_rows=exc.unidentified_rows, rejected=exc.rejected,
+            ) from exc
         if not isinstance(rows, list):
             raise RuntimeError("KuCoin positions payload is not a list")
+        return self._normalize(rows)
 
+    def _normalize(self, rows) -> list:
         instruments = getattr(self._client, "_instruments", None)
         if not isinstance(instruments, dict) or not instruments:
             raise RuntimeError("KuCoin instrument metadata unavailable for position normalization")

@@ -1578,6 +1578,16 @@ class TradingEngine:
                         log.info(f"📥 Posição externa carregada: {sym} {direction}")
 
         except Exception as e:
+            # F-014: no snapshot authority -> no close inference; local
+            # positions stay managed with their last known quantity.
+            from bot.position_snapshot import PositionSnapshotUnconfirmed
+            _unconfirmed = isinstance(e, PositionSnapshotUnconfirmed)
+            for _sym, _pos in (list(self.positions.items()) if _unconfirmed else []):
+                log.critical(
+                    "[POSITION_CLOSE_INFERENCE_BLOCKED] symbol=%s source=_sync_positions "
+                    "reason=%s state=UNKNOWN last_known_qty=%s action=KEEP_MANAGED",
+                    _sym, type(e).__name__, getattr(_pos, "qty", "?"),
+                )
             log.error(f"_sync_positions: {e}")
 
     # ── Trailing stop DESATIVADO ────────────────────────────────

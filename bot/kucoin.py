@@ -1593,49 +1593,14 @@ class KuCoinClient:
         elif isinstance(data, dict) and isinstance(data.get("data"), list):
             raw = data["data"]
         else:
-            raise RuntimeError(
-                "POSITIONS_UNCONFIRMED: KuCoin positions payload unavailable "
-                "or malformed"
-            )
+            from bot.position_snapshot import READ_FAILED, PositionSnapshotUnconfirmed
+            raise PositionSnapshotUnconfirmed(READ_FAILED)
 
-        positions = []
-
-        for p in raw:
-            try:
-                qty = float(p.get("currentQty", 0))
-                if qty == 0:
-                    continue
-                kc_sym = p.get("symbol", "")
-                _entry = float(p.get("avgEntryPrice", 0))
-                positions.append({
-                    "symbol":           to_standard(kc_sym),
-                    "side":             "Buy" if qty > 0 else "Sell",
-                    "size":             abs(qty),
-                    "entryPrice":       _entry,
-                    # Alias para compatibilidade com código que esperava o
-                    # formato Bybit (auditoria #2)
-                    "avgPrice":         _entry,
-                    "markPrice":        float(p.get("markPrice", 0)),
-                    "unrealisedPnl":    float(p.get("unrealisedPnl", 0)),
-                    "leverage":         float(p.get("realLeverage", 1)),
-                    # ADICIONADO (auditoria #2): liquidationPrice não era
-                    # exposto, fazendo o engine calcular SL com liq=0.
-                    "liquidationPrice": float(p.get("liquidationPrice", 0)),
-                    "liqPrice":         float(p.get("liquidationPrice", 0)),
-                    # Stops efetivamente aplicados na exchange — permitem
-                    # auditar se a posição está protegida de fato.
-                    "stopLoss":         float(p.get("stopLoss",   0) or 0),
-                    "takeProfit":       float(p.get("takeProfit", 0) or 0),
-                    "posMargin":        float(p.get("posMargin", 0)),
-                })
-            except (ValueError, TypeError) as _e:
-                # auditoria #10: posição com campos inválidos agora é logada
-                log.warning(
-                    f"posição descartada por campo inválido: {_e} | "
-                    f"dados: {str(p)[:150]}"
-                )
-                continue
-        return positions
+        # F-014: every row is validated; a row that cannot be interpreted makes
+        # the whole read non-authoritative (raises) instead of disappearing
+        # and later being read as a remote close. Valid zero rows = flat.
+        from bot.position_snapshot import normalize_kucoin_positions
+        return normalize_kucoin_positions(raw, to_standard)
 
     # ── WebSocket ─────────────────────────────────────────────────
     async def _seed_kline_cache(self, symbols: list, intervals: list):
