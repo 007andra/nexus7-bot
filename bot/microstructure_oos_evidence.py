@@ -160,6 +160,7 @@ def evaluate_microstructure_ranking(
     by_ts: dict[int, list[tuple[Opportunity, Opportunity, float]]] = defaultdict(list)
     total_diagnostics = 0
     micro_available = 0
+    agg_trades_pressure_candidates = 0
     seen_candidates: set[str] = set()
 
     for report in symbol_reports:
@@ -175,6 +176,12 @@ def evaluate_microstructure_ranking(
             if enriched is None:
                 continue
             micro_available += 1
+            micro = row.get("shadow_microstructure") or {}
+            if (
+                isinstance(micro, Mapping)
+                and micro.get("taker_pressure_source") == "AGG_TRADES"
+            ):
+                agg_trades_pressure_candidates += 1
             base = base_opportunity(symbol, row)
             if base.candidate_id in seen_candidates:
                 raise ValueError("duplicate candidate_id in microstructure evidence")
@@ -308,6 +315,11 @@ def evaluate_microstructure_ranking(
             micro_available / total_diagnostics
             if total_diagnostics else 0.0
         ),
+        "agg_trades_pressure_candidates": agg_trades_pressure_candidates,
+        "agg_trades_coverage": (
+            agg_trades_pressure_candidates / total_diagnostics
+            if total_diagnostics else 0.0
+        ),
         "comparable_batches": len(batch_rows),
         "comparable_candidates": comparable_candidates,
         "depth_complete_batches": depth_complete_batches,
@@ -351,6 +363,7 @@ def microstructure_review_gate(
     *,
     min_comparable_batches: int = 75,
     min_microstructure_coverage: float = 0.95,
+    min_agg_trades_coverage: float = 0.95,
     min_temporal_folds: int = 4,
 ) -> dict:
     """Fail-closed evidence gate for considering a SHADOW feature for review.
@@ -363,6 +376,8 @@ def microstructure_review_gate(
         raise ValueError("min_comparable_batches must be positive")
     if not 0.0 < min_microstructure_coverage <= 1.0:
         raise ValueError("min_microstructure_coverage must be in (0,1]")
+    if not 0.0 < min_agg_trades_coverage <= 1.0:
+        raise ValueError("min_agg_trades_coverage must be in (0,1]")
     if min_temporal_folds <= 0:
         raise ValueError("min_temporal_folds must be positive")
 
@@ -373,6 +388,8 @@ def microstructure_review_gate(
         blockers.append("INSUFFICIENT_COMPARABLE_BATCHES")
     if float(report.get("microstructure_coverage", 0.0) or 0.0) < min_microstructure_coverage:
         blockers.append("INSUFFICIENT_MICROSTRUCTURE_COVERAGE")
+    if float(report.get("agg_trades_coverage", 0.0) or 0.0) < min_agg_trades_coverage:
+        blockers.append("INSUFFICIENT_AGG_TRADES_COVERAGE")
 
     ci = report.get("top_pick_uplift_ci95")
     ci_low = None
@@ -406,6 +423,7 @@ def microstructure_review_gate(
         "requirements": {
             "min_comparable_batches": int(min_comparable_batches),
             "min_microstructure_coverage": float(min_microstructure_coverage),
+            "min_agg_trades_coverage": float(min_agg_trades_coverage),
             "min_temporal_folds": int(min_temporal_folds),
             "bootstrap_ci_low_gt_zero": True,
             "all_temporal_folds_positive": True,
