@@ -110,7 +110,7 @@ class BinanceHistoricalContextTests(unittest.TestCase):
             snapshot,
             metrics[-1],
             metrics[-2],
-            decision_ts_ms=snapshot.timestamp_ms,
+            decision_ts_ms=snapshot.timestamp_ms + 5 * 60 * 1000,
             side="LONG",
             oi_delta_override=0.05,
         )
