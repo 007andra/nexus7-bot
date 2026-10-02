@@ -42,10 +42,10 @@ def available_collateral(engine, equity: Decimal) -> Decimal:
     value = getattr(engine, "_pilot_available_balance", None)
     try:
         candidate = _d(value)
-        if candidate > 0:
-            return min(candidate, equity)
-    except Exception:
-        pass
+    except (TypeError, ValueError, ArithmeticError):
+        candidate = None
+    if candidate is not None and candidate > 0:
+        return min(candidate, equity)
     return equity
 
 
