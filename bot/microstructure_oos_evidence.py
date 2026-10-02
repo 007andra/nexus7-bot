@@ -233,9 +233,11 @@ def evaluate_microstructure_ranking(
         comparable_candidates += len(rows)
         batch_rows.append({
             "decision_ts": int(decision_ts),
+            "timestamp": int(decision_ts),
             "candidates": len(rows),
             "base_top_candidate_id": base_top,
             "enriched_top_candidate_id": enriched_top,
+            "top_candidate_id": enriched_top,
             "top_pick_changed": base_top != enriched_top,
             "base_top_r": base_top_r,
             "enriched_top_r": enriched_top_r,
@@ -270,7 +272,36 @@ def evaluate_microstructure_ranking(
         if spearman_deltas else None
     )
 
+    rest_returns = []
+    for batch in batch_rows:
+        timestamp = int(batch["decision_ts"])
+        entries = by_ts[timestamp]
+        enriched_items = [row[1] for row in entries]
+        if all(item.depth_notional_1pct is not None for item in enriched_items):
+            enriched_items = apply_cross_sectional_liquidity(enriched_items)
+        ranked = rank_opportunities(enriched_items)
+        realized = {row[0].candidate_id: row[2] for row in entries}
+        rest_returns.extend(
+            float(realized[item.candidate_id])
+            for item, _score in ranked[1:]
+        )
+    rest_mean = (
+        sum(rest_returns) / len(rest_returns)
+        if rest_returns else None
+    )
+    enriched_vs_rest = (
+        enriched_mean - rest_mean
+        if enriched_mean is not None and rest_mean is not None
+        else None
+    )
+
     return {
+        "status": (
+            "EVIDENCE_AVAILABLE"
+            if batch_rows else "INSUFFICIENT_CROSS_SECTIONAL_SAMPLE"
+        ),
+        "cross_sections": len(batch_rows),
+        "ranked_candidates": comparable_candidates,
         "total_candidate_diagnostics": total_diagnostics,
         "microstructure_available_candidates": micro_available,
         "microstructure_coverage": (
@@ -286,7 +317,15 @@ def evaluate_microstructure_ranking(
         ),
         "base_top_pick_expectancy_r": base_mean,
         "enriched_top_pick_expectancy_r": enriched_mean,
+        "top1_expectancy_r": enriched_mean,
+        "rest_expectancy_r": rest_mean,
+        "top1_uplift_r": enriched_vs_rest,
         "top_pick_expectancy_uplift_r": (
+            enriched_mean - base_mean
+            if base_mean is not None and enriched_mean is not None
+            else None
+        ),
+        "incremental_top_pick_uplift_r": (
             enriched_mean - base_mean
             if base_mean is not None and enriched_mean is not None
             else None
@@ -297,7 +336,10 @@ def evaluate_microstructure_ranking(
         "temporal_folds_evaluated": len(fold_uplift),
         "positive_uplift_folds": sum(1 for value in fold_uplift if value > 0),
         "batches": batch_rows,
+        "details": batch_rows,
+        "outcome_used_in_rank": False,
         "execution_effect": "NONE",
         "nexus_score_effect": "NONE",
+        "score_effect": "NONE",
         "promotion_authority": False,
     }
