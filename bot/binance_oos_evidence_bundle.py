@@ -53,6 +53,7 @@ async def collect(
     start_month: str,
     end_month: str,
     cache_dir: str | Path | None,
+    include_agg_trades: bool = False,
 ) -> tuple[list[dict], tuple]:
     months = month_range(start_month, end_month)
     reports = []
@@ -62,6 +63,7 @@ async def collect(
             str(symbol).upper(),
             months=months,
             cache_dir=cache_dir,
+            include_agg_trades=include_agg_trades,
         )
         reports.append(report)
         artifacts.extend(symbol_artifacts)
@@ -301,6 +303,7 @@ async def run(
     end_month: str,
     cache_dir: str | Path | None = None,
     code_sha: str = "UNSPECIFIED",
+    include_agg_trades: bool = False,
 ) -> dict:
     from bot.runtime_bootstrap import install as install_runtime
 
@@ -311,6 +314,7 @@ async def run(
         start_month=start_month,
         end_month=end_month,
         cache_dir=cache_dir,
+        include_agg_trades=include_agg_trades,
     )
     primary = build_primary_report(reports)
     robustness = build_robustness_report(reports)
@@ -362,6 +366,12 @@ async def run(
             "shadow_microstructure_ranked": True,
             "microstructure_incremental_comparison": True,
             "microstructure_same_population": True,
+            "agg_trades_mode": (
+                "CANDIDATE_DAY_REAL"
+                if include_agg_trades else "DISABLED"
+            ),
+            "agg_trades_interpolation_applied": False,
+            "microstructure_review_requires_real_agg_trades": True,
             "opportunity_rank_outcome_leakage": False,
             "platt_calibration_train_only": True,
             "platt_calibration_live_effect": "NONE",
@@ -386,6 +396,11 @@ def main() -> int:
         "--cache-dir", default="artifacts/binance_research_cache"
     )
     parser.add_argument(
+        "--include-agg-trades",
+        action="store_true",
+        help="Enable heavy candidate-day aggTrades microstructure evidence.",
+    )
+    parser.add_argument(
         "--code-sha",
         default=os.environ.get("RAILWAY_GIT_COMMIT_SHA", "UNSPECIFIED"),
     )
@@ -401,6 +416,7 @@ def main() -> int:
         end_month=args.end_month,
         cache_dir=args.cache_dir,
         code_sha=args.code_sha,
+        include_agg_trades=args.include_agg_trades,
     ))
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
