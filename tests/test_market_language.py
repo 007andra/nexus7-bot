@@ -131,6 +131,7 @@ class MarketLanguageTests(unittest.TestCase):
         self.assertNotIn("ExchangeClient", source)
 
     def test_production_runtime_has_no_market_language_reference(self):
+        repo_root = Path(__file__).resolve().parents[1]
         protected = (
             "bot/runtime_overlays.py",
             "bot/nexus_ai.py",
@@ -138,7 +139,7 @@ class MarketLanguageTests(unittest.TestCase):
             "bot/engine.py",
         )
         for path in protected:
-            source = Path(path).read_text(encoding="utf-8").lower()
+            source = (repo_root / path).read_text(encoding="utf-8").lower()
             self.assertNotIn(
                 "market_language",
                 source,
