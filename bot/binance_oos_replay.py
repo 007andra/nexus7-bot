@@ -27,15 +27,19 @@ from bot.backtest import (
 )
 from bot.binance_research_data import (
     FundingObservation,
+    agg_trade_gap_diagnostics,
+    daily_agg_trades_url,
     daily_book_depth_url,
     daily_metrics_url,
     download_archive_verified,
     monthly_funding_url,
     monthly_kline_url,
+    parse_agg_trades_archive,
     parse_funding_archive,
     parse_kline_archive,
 )
 from bot.binance_historical_context import (
+    AggTradeTimeline,
     BookDepthSnapshot,
     BookDepthTimeline,
     MetricsObservation,
@@ -304,6 +308,79 @@ async def load_verified_book_depth(
         [by_ts[key] for key in sorted(by_ts)],
         tuple(artifacts),
         tuple(sorted(missing)),
+    )
+
+
+async def load_verified_agg_trades(
+    symbol: str,
+    dates: Sequence[str],
+    *,
+    cache_dir: str | Path | None = None,
+    concurrency: int = 3,
+):
+    """Load checksum-verified candidate-day USD-M aggTrades.
+
+    Daily aggTrades can be large, so concurrency is deliberately lower than
+    metrics/bookDepth. HTTP 404 is an observational gap; checksum/schema errors
+    remain fatal. Missing ids are measured but never interpolated.
+    """
+    limit = int(concurrency)
+    if limit < 1 or limit > 8:
+        raise ValueError("aggTrades concurrency must be in [1,8]")
+    semaphore = asyncio.Semaphore(limit)
+
+    async def load_one(source_date: str):
+        async with semaphore:
+            url = daily_agg_trades_url(symbol, source_date)
+            try:
+                archive = await download_archive_verified(
+                    url, cache_path=_archive_cache_path(cache_dir, url)
+                )
+            except RuntimeError as exc:
+                if "HTTP 404" in str(exc):
+                    return source_date, None, None, None
+                raise
+            rows = parse_agg_trades_archive(archive.payload)
+            gaps = agg_trade_gap_diagnostics(rows)
+            artifact = ResearchArtifact(
+                source=url,
+                dataset="aggTrades",
+                symbol=str(symbol).upper(),
+                interval="tick",
+                sha256=archive.sha256,
+                rows=len(rows),
+                first_ts=rows[0].timestamp if rows else None,
+                last_ts=rows[-1].timestamp if rows else None,
+            )
+            return source_date, rows, artifact, gaps
+
+    loaded = await asyncio.gather(
+        *(load_one(source_date) for source_date in dates)
+    )
+    rows = []
+    artifacts = []
+    missing = []
+    gap_reports = {}
+    for source_date, day_rows, artifact, gaps in loaded:
+        if day_rows is None or artifact is None or gaps is None:
+            missing.append(source_date)
+            continue
+        rows.extend(day_rows)
+        artifacts.append(artifact)
+        gap_reports[source_date] = gaps
+
+    rows.sort(key=lambda row: (int(row.timestamp), int(row.aggregate_trade_id)))
+    seen = set()
+    for row in rows:
+        key = int(row.aggregate_trade_id)
+        if key in seen:
+            raise ValueError("duplicate aggregate trade id across daily archives")
+        seen.add(key)
+    return (
+        rows,
+        tuple(artifacts),
+        tuple(sorted(missing)),
+        gap_reports,
     )
 
 
@@ -816,14 +893,41 @@ async def replay_symbol(
         )
         artifacts = artifacts + book_depth_artifacts
 
+    agg_trade_rows = []
+    agg_trade_artifacts: tuple[ResearchArtifact, ...] = ()
+    agg_trade_missing_dates: tuple[str, ...] = ()
+    agg_trade_gap_reports = {}
+    if candidate_dates:
+        (
+            agg_trade_rows,
+            agg_trade_artifacts,
+            agg_trade_missing_dates,
+            agg_trade_gap_reports,
+        ) = await load_verified_agg_trades(
+            symbol,
+            candidate_dates,
+            cache_dir=cache_dir,
+        )
+        artifacts = artifacts + agg_trade_artifacts
+
     depth_timeline = BookDepthTimeline(book_depth_rows)
+    agg_timeline = AggTradeTimeline(agg_trade_rows)
     micro_available = 0
     micro_missing = 0
     micro_quarantined = 0
+    agg_pressure_available = 0
     for item in diagnostics:
         ts = int(item["timestamp"])
         current_metrics, previous_metrics = metrics_timeline.asof(ts)
         depth_snapshot = depth_timeline.asof(ts)
+        agg_pressure = agg_timeline.pressure(ts)
+        agg_override = (
+            agg_pressure.get("taker_pressure")
+            if agg_pressure.get("available") is True
+            else None
+        )
+        if agg_override is not None:
+            agg_pressure_available += 1
         micro = shadow_microstructure_context(
             depth_snapshot,
             current_metrics,
@@ -831,7 +935,9 @@ async def replay_symbol(
             decision_ts_ms=ts,
             side=str(item["direction"]),
             oi_delta_override=item.get("oi_delta"),
+            agg_trade_pressure_override=agg_override,
         )
+        item["agg_trade_pressure"] = agg_pressure
         item["shadow_microstructure"] = micro
         if depth_snapshot is not None:
             summary = depth_snapshot.summary()
@@ -868,6 +974,11 @@ async def replay_symbol(
             "book_depth_rows": len(book_depth_rows),
             "book_depth_candidate_dates": len(candidate_dates),
             "book_depth_missing_dates": list(book_depth_missing_dates),
+            "agg_trade_rows": len(agg_trade_rows),
+            "agg_trade_candidate_dates": len(candidate_dates),
+            "agg_trade_missing_dates": list(agg_trade_missing_dates),
+            "agg_trade_gap_reports": agg_trade_gap_reports,
+            "agg_trade_pressure_available": agg_pressure_available,
             "shadow_microstructure_available": micro_available,
             "shadow_microstructure_missing": micro_missing,
             "shadow_microstructure_quarantined": micro_quarantined,
@@ -890,6 +1001,10 @@ async def replay_symbol(
                 "metrics_label_shift_normalized": True,
                 "oi_delta_semantics": "PREVIOUS_NEXUS_CANDIDATE",
                 "historical_orderbook": bool(book_depth_rows),
+                "historical_agg_trades": bool(agg_trade_rows),
+                "agg_trade_candidate_day_sampling": True,
+                "agg_trade_missing_dates": list(agg_trade_missing_dates),
+                "agg_trade_interpolation_applied": False,
                 "book_depth_candidate_day_sampling": True,
                 "book_depth_missing_dates": list(book_depth_missing_dates),
                 "book_depth_score_effect": "NONE",
