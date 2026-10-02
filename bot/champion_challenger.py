@@ -79,8 +79,16 @@ class ChampionChallengerRegistry:
     def snapshot(self) -> dict:
         return {
             "champion": asdict(self._champion) if self._champion else None,
-            "challengers": {key: asdict(value) for key, value in sorted(self._challengers.items())},
+            "challengers": {
+                key: asdict(value)
+                for key, value in sorted(self._challengers.items())
+            },
         }
+
+
+def _strict_true(value: object) -> bool:
+    """Only the boolean True is approval; truthy strings/numbers fail closed."""
+    return value is True
 
 
 def candidate_from_mapping(data: Mapping[str, object]) -> StrategyCandidate:
@@ -88,10 +96,10 @@ def candidate_from_mapping(data: Mapping[str, object]) -> StrategyCandidate:
     if not isinstance(evidence_raw, Mapping):
         raise ValueError("candidate evidence must be a mapping")
     evidence = EvidenceGate(
-        ci_green=bool(evidence_raw.get("ci_green", False)),
-        oos_green=bool(evidence_raw.get("oos_green", False)),
-        shadow_green=bool(evidence_raw.get("shadow_green", False)),
-        operator_approved=bool(evidence_raw.get("operator_approved", False)),
+        ci_green=_strict_true(evidence_raw.get("ci_green", False)),
+        oos_green=_strict_true(evidence_raw.get("oos_green", False)),
+        shadow_green=_strict_true(evidence_raw.get("shadow_green", False)),
+        operator_approved=_strict_true(evidence_raw.get("operator_approved", False)),
     )
     return StrategyCandidate(
         candidate_id=str(data.get("candidate_id", "")),
