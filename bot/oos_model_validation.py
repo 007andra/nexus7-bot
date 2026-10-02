@@ -44,6 +44,8 @@ class CalibrationReport:
     win_rate: float
     expectancy_r: float
     calibration_slope: float
+    log_loss: float = 0.0
+    calibration_intercept: float = 0.0
 
 
 def purged_walk_forward(
@@ -107,31 +109,84 @@ def expected_calibration_error(rows: Iterable[ValidationRow], bins: int = 10) ->
     return err
 
 
-def calibration_slope(rows: Iterable[ValidationRow]) -> float:
-    """Simple OLS slope of outcome on confidence; 1 is ideal, 0 uninformative."""
+def log_loss(rows: Iterable[ValidationRow], epsilon: float = 1e-12) -> float:
+    """Binary cross-entropy with probability clipping for numerical stability."""
+    import math
+    vals = [r.validate() for r in rows]
+    if not vals:
+        raise ValueError("empty validation sample")
+    if not 0.0 < epsilon < 0.5:
+        raise ValueError("epsilon must be in (0,0.5)")
+    total = 0.0
+    for row in vals:
+        p = min(1.0 - epsilon, max(epsilon, row.confidence))
+        total += -(row.outcome * math.log(p) + (1 - row.outcome) * math.log(1.0 - p))
+    return total / len(vals)
+
+
+def calibration_linear_fit(rows: Iterable[ValidationRow]) -> tuple[float, float]:
+    """OLS intercept/slope diagnostic of outcome on confidence."""
     vals = [r.validate() for r in rows]
     if len(vals) < 2:
-        return 0.0
+        return 0.0, 0.0
     mx = sum(r.confidence for r in vals) / len(vals)
     my = sum(r.outcome for r in vals) / len(vals)
     var = sum((r.confidence - mx) ** 2 for r in vals)
     if var <= 0:
-        return 0.0
+        return my, 0.0
     cov = sum((r.confidence - mx) * (r.outcome - my) for r in vals)
-    return cov / var
+    slope = cov / var
+    return my - slope * mx, slope
+
+
+def calibration_slope(rows: Iterable[ValidationRow]) -> float:
+    """Simple OLS slope of outcome on confidence; 1 is ideal, 0 uninformative."""
+    return calibration_linear_fit(rows)[1]
+
+
+def reliability_bins(rows: Iterable[ValidationRow], bins: int = 10) -> tuple[dict, ...]:
+    """Return auditable reliability-curve buckets without interpolation."""
+    vals = [r.validate() for r in rows]
+    if not vals:
+        raise ValueError("empty validation sample")
+    if bins <= 0:
+        raise ValueError("bins must be positive")
+    result = []
+    for i in range(bins):
+        lo = i / bins
+        hi = (i + 1) / bins
+        bucket = [
+            r for r in vals
+            if (lo <= r.confidence < hi)
+            or (i == bins - 1 and r.confidence == 1.0)
+        ]
+        if not bucket:
+            continue
+        result.append({
+            "bin": i,
+            "low": lo,
+            "high": hi,
+            "n": len(bucket),
+            "mean_confidence": sum(r.confidence for r in bucket) / len(bucket),
+            "observed_rate": sum(r.outcome for r in bucket) / len(bucket),
+        })
+    return tuple(result)
 
 
 def report(rows: Iterable[ValidationRow], bins: int = 10) -> CalibrationReport:
     vals = [r.validate() for r in rows]
     if not vals:
         raise ValueError("empty validation sample")
+    intercept, slope = calibration_linear_fit(vals)
     return CalibrationReport(
         n=len(vals),
         brier=brier_score(vals),
         ece=expected_calibration_error(vals, bins=bins),
         win_rate=sum(r.outcome for r in vals) / len(vals),
         expectancy_r=sum(r.r_multiple for r in vals) / len(vals),
-        calibration_slope=calibration_slope(vals),
+        calibration_slope=slope,
+        log_loss=log_loss(vals),
+        calibration_intercept=intercept,
     )
 
 
