@@ -1,0 +1,138 @@
+name: NEXUS Binance USD-M OOS Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_month:
+        description: "First complete research month (YYYY-MM)"
+        required: true
+        default: "2025-01"
+      end_month:
+        description: "Last complete research month (YYYY-MM)"
+        required: true
+        default: "2026-08"
+      symbols:
+        description: "Space-separated Binance USD-M symbols"
+        required: true
+        default: "BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT"
+
+jobs:
+  research:
+    name: Binance-native OOS evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+      PYTHONHASHSEED: "0"
+
+    steps:
+      - name: Checkout exact research SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Attest checked-out SHA
+        run: |
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          echo "requested_sha=${{ github.sha }}"
+          echo "checked_out_sha=$CHECKED_OUT_SHA"
+          test "$CHECKED_OUT_SHA" = "${{ github.sha }}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m pip check
+
+      - name: Research integrity tests
+        run: |
+          python -m unittest -v             tests.test_binance_research_data             tests.test_binance_historical_context             tests.test_binance_oos_replay             tests.test_binance_oos_evidence_bundle             tests.test_nexus_oos_calibration             tests.test_research_walk_forward             tests.test_research_statistics             tests.test_research_manifest             tests.test_research_sensitivity             tests.test_research_promotion_readiness
+
+      - name: Restore Binance public-data cache
+        uses: actions/cache@v4
+        with:
+          path: artifacts/binance_research_cache
+          key: binance-usdm-oos-${{ inputs.start_month }}-${{ inputs.end_month }}-${{ hashFiles('bot/binance_research_data.py', 'bot/binance_historical_context.py') }}
+          restore-keys: |
+            binance-usdm-oos-${{ inputs.start_month }}-${{ inputs.end_month }}-
+
+      - name: Run checksum-verified Binance USD-M evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m bot.binance_oos_evidence_bundle             --symbols ${{ inputs.symbols }}             --start-month "${{ inputs.start_month }}"             --end-month "${{ inputs.end_month }}"             --cache-dir artifacts/binance_research_cache             --code-sha "${{ github.sha }}"             --output artifacts/nexus_oos_binance_usdm_bundle.json
+
+      - name: Validate evidence artifact
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/nexus_oos_binance_usdm_bundle.json")
+          if not path.exists():
+              raise SystemExit("evidence bundle missing")
+
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          manifest_hash = str(payload.get("manifest_hash", ""))
+          if len(manifest_hash) != 64:
+              raise SystemExit("invalid manifest hash")
+
+          methodology = payload.get("methodology") or {}
+          required = {
+              "venue": "BINANCE_USDM",
+              "source": "data.binance.vision",
+              "archive_checksums_verified": True,
+              "shared_candidate_population": True,
+              "closed_candles_only": True,
+              "historical_clock_frozen": True,
+              "exchange_mutations": False,
+              "runtime_policy_mutations": False,
+              "promotion_authority": False,
+          }
+          for key, expected in required.items():
+              if methodology.get(key) != expected:
+                  raise SystemExit(
+                      f"methodology mismatch {key}: "
+                      f"{methodology.get(key)!r} != {expected!r}"
+                  )
+
+          primary = payload.get("primary") or {}
+          robustness = payload.get("robustness") or {}
+          calibration = payload.get("calibration") or {}
+          print(json.dumps({
+              "primary_status": primary.get("status"),
+              "primary_blockers": primary.get("blockers"),
+              "baseline_candidates": (primary.get("report") or {}).get(
+                  "baseline_candidates"
+              ),
+              "approved_candidates": (primary.get("report") or {}).get(
+                  "approved_candidates"
+              ),
+              "robustness_summary": (
+                  (robustness.get("robustness") or {}).get("summary")
+              ),
+              "calibration_fold_count": calibration.get("fold_count"),
+              "calibration_complete": calibration.get("evidence_complete"),
+              "manifest_hash": manifest_hash,
+          }, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload immutable research evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-binance-usdm-oos-${{ github.run_id }}
+          path: artifacts/nexus_oos_binance_usdm_bundle.json
+          if-no-files-found: error
+          retention-days: 30
