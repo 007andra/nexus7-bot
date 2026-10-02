@@ -318,6 +318,33 @@ class DurableRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reason, "durable_reauthorization_reason_not_eligible")
         cas.assert_not_awaited()
 
+    async def test_explicit_reauthorization_rejects_non_disarmed_source_status(self):
+        old_policy = drawdown_recovery.RecoveryPolicy(
+            True,
+            "episode-expired-loss",
+            datetime.now(timezone.utc) - timedelta(minutes=5),
+            0.17,
+            0.005,
+            "configured",
+        )
+        raw = drawdown_recovery._state_payload(
+            policy=old_policy, status="UNKNOWN", armed_drawdown=0.1583,
+            worst_drawdown=0.6158, reason="recovery_trade_net_loss",
+            realized_net_pnl=-11.23983497,
+        )
+        os.environ[drawdown_recovery.EPISODE_ENV] = "episode-durable-002"
+        os.environ[drawdown_recovery.MAX_DD_ENV] = "0.62"
+        os.environ[drawdown_recovery.RISK_ENV] = "0.005"
+        self._authorize_disarmed_rollover()
+        with patch.object(cfg, "MAX_DRAWDOWN", 0.17), patch.object(cfg, "MAX_RISK_PCT", 0.01), \
+             patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
+             patch.object(drawdown_recovery, "save_key_values_atomic_cas", AsyncMock()) as cas:
+            ok, reason = await drawdown_recovery.ensure_durable_episode(0.6158)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "durable_reauthorization_source_status_invalid")
+        cas.assert_not_awaited()
+
     async def test_explicit_reauthorization_requires_previous_episode_expired(self):
         old_policy = drawdown_recovery.RecoveryPolicy(
             True,
