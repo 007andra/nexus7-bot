@@ -10,10 +10,12 @@ from bot.binance_oos_replay import (
     derivatives_context_at,
     fee_return_fraction,
     funding_return_fraction,
+    load_verified_book_depth,
     load_verified_metrics,
     month_range,
 )
 from bot.binance_research_data import FundingObservation
+from bot.binance_historical_context import BookDepthSnapshot
 
 
 class BinanceOOSReplayTests(unittest.TestCase):
@@ -220,6 +222,35 @@ class BinanceOOSReplayTests(unittest.TestCase):
             [artifact.source.split("-metrics-")[-1].removesuffix(".zip") for artifact in artifacts],
             list(dates),
         )
+
+    def test_book_depth_loader_treats_404_as_observational_gap(self):
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+            raise RuntimeError("Binance research archive HTTP 404")
+
+        with patch(
+            "bot.binance_oos_replay.download_archive_verified",
+            side_effect=fake_download,
+        ):
+            rows, artifacts, missing = asyncio.run(
+                load_verified_book_depth(
+                    "BTCUSDT",
+                    ("2026-08-31",),
+                )
+            )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(artifacts, ())
+        self.assertEqual(missing, ("2026-08-31",))
+
+    def test_book_depth_loader_rejects_bad_concurrency(self):
+        with self.assertRaises(ValueError):
+            asyncio.run(
+                load_verified_book_depth(
+                    "BTCUSDT",
+                    ("2026-08-31",),
+                    concurrency=0,
+                )
+            )
 
     def test_adverse_fill_is_directionally_conservative(self):
         self.assertGreater(
