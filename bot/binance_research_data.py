@@ -88,6 +88,14 @@ def daily_book_depth_url(symbol: str, date: str) -> str:
     return f"{_DAILY}/bookDepth/{sym}/{name}"
 
 
+def daily_agg_trades_url(symbol: str, date: str) -> str:
+    sym = _symbol(symbol)
+    y, m, d = _date_parts(date)
+    stamp = f"{y:04d}-{m:02d}-{d:02d}"
+    name = f"{sym}-aggTrades-{stamp}.zip"
+    return f"{_DAILY}/aggTrades/{sym}/{name}"
+
+
 @dataclass(frozen=True)
 class ResearchKline:
     open_time: int
@@ -137,6 +145,38 @@ class FundingObservation:
             raise ValueError("invalid funding interval")
         if not math.isfinite(float(self.funding_rate)):
             raise ValueError("non-finite funding rate")
+
+
+@dataclass(frozen=True)
+class AggTradeObservation:
+    aggregate_trade_id: int
+    price: float
+    quantity: float
+    first_trade_id: int
+    last_trade_id: int
+    timestamp: int
+    buyer_is_maker: bool
+
+    def __post_init__(self) -> None:
+        if self.aggregate_trade_id < 0:
+            raise ValueError("invalid aggregate trade id")
+        if self.first_trade_id < 0 or self.last_trade_id < self.first_trade_id:
+            raise ValueError("invalid underlying trade id range")
+        if self.timestamp <= 0:
+            raise ValueError("invalid aggregate trade timestamp")
+        if not math.isfinite(float(self.price)) or self.price <= 0:
+            raise ValueError("invalid aggregate trade price")
+        if not math.isfinite(float(self.quantity)) or self.quantity < 0:
+            raise ValueError("invalid aggregate trade quantity")
+
+    @property
+    def notional(self) -> float:
+        return float(self.price) * float(self.quantity)
+
+    @property
+    def aggressor_side(self) -> str:
+        # Binance m=True => buyer was maker => seller was aggressor.
+        return "SELL" if self.buyer_is_maker else "BUY"
 
 
 @dataclass(frozen=True)
@@ -217,6 +257,74 @@ def parse_funding_archive(payload: bytes) -> tuple[FundingObservation, ...]:
         previous = item.timestamp
         out.append(item)
     return tuple(out)
+
+
+def parse_agg_trades_archive(payload: bytes) -> tuple[AggTradeObservation, ...]:
+    """Parse USD-M aggTrades without interpolating missing trade ids.
+
+    Futures public-data rows follow /fapi/v1/aggTrades:
+    aggId, price, qty, firstTradeId, lastTradeId, timestamp, buyerIsMaker.
+    Gaps are allowed and are measured separately as a data-quality diagnostic.
+    """
+    rows = _csv_rows_from_zip(payload)
+    if rows and _looks_header(rows[0]):
+        rows = rows[1:]
+    out: list[AggTradeObservation] = []
+    previous_agg_id = -1
+    previous_ts = -1
+    for row in rows:
+        if len(row) < 7:
+            raise ValueError("short Binance aggTrades row")
+        maker_raw = str(row[6]).strip().lower()
+        if maker_raw not in {"true", "false"}:
+            raise ValueError("invalid Binance aggTrades maker flag")
+        item = AggTradeObservation(
+            aggregate_trade_id=int(float(row[0])),
+            price=float(row[1]),
+            quantity=float(row[2]),
+            first_trade_id=int(float(row[3])),
+            last_trade_id=int(float(row[4])),
+            timestamp=int(float(row[5])),
+            buyer_is_maker=maker_raw == "true",
+        )
+        if item.aggregate_trade_id <= previous_agg_id:
+            raise ValueError("non-monotonic or duplicate aggregate trade id")
+        if item.timestamp < previous_ts:
+            raise ValueError("non-monotonic aggregate trade timestamp")
+        previous_agg_id = item.aggregate_trade_id
+        previous_ts = item.timestamp
+        out.append(item)
+    return tuple(out)
+
+
+def agg_trade_gap_diagnostics(
+    rows: tuple[AggTradeObservation, ...] | list[AggTradeObservation],
+) -> dict:
+    """Measure archive gaps without filling or fabricating missing trades."""
+    aggregate_id_gaps = 0
+    underlying_id_gaps = 0
+    missing_aggregate_ids = 0
+    missing_underlying_ids = 0
+    previous: AggTradeObservation | None = None
+    for item in rows:
+        if previous is not None:
+            agg_gap = item.aggregate_trade_id - previous.aggregate_trade_id - 1
+            if agg_gap > 0:
+                aggregate_id_gaps += 1
+                missing_aggregate_ids += agg_gap
+            trade_gap = item.first_trade_id - previous.last_trade_id - 1
+            if trade_gap > 0:
+                underlying_id_gaps += 1
+                missing_underlying_ids += trade_gap
+        previous = item
+    return {
+        "rows": len(rows),
+        "aggregate_id_gap_events": aggregate_id_gaps,
+        "underlying_id_gap_events": underlying_id_gaps,
+        "missing_aggregate_ids": missing_aggregate_ids,
+        "missing_underlying_ids": missing_underlying_ids,
+        "interpolation_applied": False,
+    }
 
 
 def archive_sha256(payload: bytes) -> str:
