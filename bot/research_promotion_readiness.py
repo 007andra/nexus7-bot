@@ -198,6 +198,48 @@ def _sensitivity_present(sensitivity: Mapping[str, object] | None) -> bool:
     )
 
 
+def microstructure_evidence(
+    report: Mapping[str, object] | None,
+) -> dict:
+    """Report microstructure challenger evidence without changing core readiness."""
+    if not isinstance(report, Mapping):
+        return {
+            "status": "NOT_EVALUATED",
+            "evidence_complete": False,
+            "execution_effect": "NONE",
+            "promotion_authority": False,
+        }
+    population = int(report.get("population_n", 0) or 0)
+    complete = int(report.get("microstructure_complete_n", 0) or 0)
+    observed = int(report.get("observed_n", 0) or 0)
+    spread_delta = report.get("spread_delta_r")
+    spearman_delta = report.get("spearman_delta")
+    complete_population = bool(
+        population > 0
+        and complete == population
+        and observed == population
+    )
+    comparable = bool(
+        spread_delta is not None
+        and spearman_delta is not None
+    )
+    return {
+        "status": (
+            "EVIDENCE_AVAILABLE"
+            if complete_population and comparable
+            else "INSUFFICIENT_EVIDENCE"
+        ),
+        "evidence_complete": complete_population and comparable,
+        "population_n": population,
+        "spread_delta_r": spread_delta,
+        "spearman_delta": spearman_delta,
+        # No threshold is invented here. Statistical/operational acceptance
+        # remains a separate research decision with explicit operator review.
+        "execution_effect": "NONE",
+        "promotion_authority": False,
+    }
+
+
 def evaluate_readiness(
     bundle: Mapping[str, object],
     *,
