@@ -26,6 +26,19 @@ def observe_nexus_validation(method):
     async def wrapped(self, sig, *args, **kwargs):
         decision = await method(self, sig, *args, **kwargs)
 
+        # Attach lineage before any post-decision persistence. The outer live
+        # cost wrapper may attach the same id again later; this operation is
+        # deterministic and observational.
+        try:
+            from bot.candidate_trace import attach_decision
+            attach_decision(decision, sig)
+        except Exception as exc:
+            log.debug(
+                "[CANDIDATE_TRACE] decision_attach_failed symbol=%s error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                getattr(sig, "symbol", "UNKNOWN"), type(exc).__name__,
+            )
+
         nexus_zero_observability.observe(decision, log)
 
         try:
