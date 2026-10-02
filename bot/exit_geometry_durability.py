@@ -223,6 +223,12 @@ async def restore(engine, symbol):
             reason = "exit_geometry_unavailable" if record is None else validate(
                 record, symbol=symbol, direction=position.direction,
                 opening_order_id=oid, entry=position.entry)
+            if reason is None:
+                # NOVO-02: historical geometry never revives a terminal lineage.
+                from bot import trade_lifecycle
+                lifecycle = await trade_lifecycle.load(oid)
+                if lifecycle is None or lifecycle["status"] != trade_lifecycle.OPEN:
+                    reason = "trade_lifecycle_not_open"
         except Exception as exc:
             reason = f"read_failed:{type(exc).__name__}"
     if reason:
@@ -244,27 +250,6 @@ async def restore(engine, symbol):
         position.tp1_hit, position.qty, position.sl, SCHEMA_VERSION,
     )
     return True
-
-
-async def reduce_evidence(symbol, opening_order_id):
-    """Durable proof that BGX itself reduced this exact trade lineage."""
-    from types import SimpleNamespace
-
-    from bot import database as db
-    from bot.confirmed_rr_exit import identity
-    stub = SimpleNamespace(_forensic_lineage={"opening_order_id": opening_order_id})
-    key, idem = identity(symbol, stub)
-    key = key.replace("rr_exit_v1:", "partial_exit_v1:")
-    idem = idem.replace("rr-", "partial-", 1)
-    raw = await db.load_key_value(key, strict=True)
-    state = json.loads(raw) if raw else None
-    if isinstance(state, dict) and state.get("idem") == idem and (
-            state.get("filled") is True or str(state.get("order_id") or "")):
-        return True
-    raw = await db.load_key_value(_key(opening_order_id), strict=True)
-    record = json.loads(raw) if raw else None
-    return bool(isinstance(record, dict) and validate(record, symbol=symbol,
-                opening_order_id=opening_order_id) is None and record.get("tp1_hit") is True)
 
 
 def install(TradingEngine, log_obj=log) -> None:

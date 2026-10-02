@@ -16,6 +16,7 @@ os.environ.setdefault("PAPER_TRADE", "true")
 from bot import database as db  # noqa: E402
 from bot import engine as core  # noqa: E402
 from bot import exit_geometry_durability as g  # noqa: E402
+from bot import trade_lifecycle  # noqa: E402
 from bot import trailing_safety_hardening as ts  # noqa: E402
 from bot.config import cfg  # noqa: E402
 from bot.exit_geometry import initial_risk_per_unit, r_multiple  # noqa: E402
@@ -91,6 +92,7 @@ class RestoreTests(unittest.IsolatedAsyncioTestCase):
             if partial:
                 pos.qty, pos.tp1_hit = 0.5, True
                 pos.sl = pos.trailing_sl = 100 + 2.25 * s
+            await trade_lifecycle.open_trade(pos, pos.qty)   # still-OPEN lineage
             await g.persist(pos, "test")
             mark = live_mark if live_mark is not None else 100 + 2.6 * s
             pos.update_pnl(mark)
@@ -156,6 +158,7 @@ class RestoreTests(unittest.IsolatedAsyncioTestCase):
         with p1, p2:
             pos = _live("LONG")
             pos.update_pnl(103.0)
+            await trade_lifecycle.open_trade(pos, pos.qty)   # still-OPEN lineage
             await g.persist(pos, "test")
             cases = [
                 _rebuilt("LONG", 1.0, 102.0, oid="open-2"),       # new trade B
@@ -215,6 +218,7 @@ class RestoreTests(unittest.IsolatedAsyncioTestCase):
         with p1, p2:
             pos = _live("LONG")
             pos.update_pnl(103.0)
+            await trade_lifecycle.open_trade(pos, pos.qty)   # still-OPEN lineage
             await g.persist(pos, "test")
             fresh = _rebuilt("LONG", 0.5, 102.6)
             client = _client("LONG", 50, 102.25, mark=102.6)
@@ -243,6 +247,7 @@ class RestoreTests(unittest.IsolatedAsyncioTestCase):
         with p1, p2:
             pos = _live("LONG")
             pos.update_pnl(102.2)
+            await trade_lifecycle.open_trade(pos, pos.qty)   # still-OPEN lineage
             await g.persist(pos, "entry")
             current, peaks = pos, []
             for mark in (102.0, 103.1, 102.7):
@@ -305,59 +310,6 @@ class RestoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(math.isclose(r_multiple(fresh, price), r_multiple(pos, price), rel_tol=1e-12))
 
 
-class OwnershipAfterReduceTests(unittest.IsolatedAsyncioTestCase):
-    def _engine(self, side="Buy"):
-        from tests.test_restart_ownership_recovery import _Client, _Engine, _filled_order
-        client = _Client(status={"orderId": "oid-1", "clientOid": "bgx7-owned", "symbol": "ETHUSDTM",
-                                 "side": side.lower(), "isActive": False, "cancelExist": False,
-                                 "filledSize": "21"})
-        client.stops[0]["size"] = "10"
-        engine = _Engine(client)
-        _filled_order(engine, side=side)
-        return engine
-
-    def _residual(self, size=0.10):
-        from tests.test_restart_ownership_recovery import POSITION
-        return dict(POSITION, size=size, sizeContracts=round(size * 100))
-
-    async def _evidence(self, store, filled=True, order_id="p-1"):
-        from bot.confirmed_rr_exit import identity
-        stub = SimpleNamespace(_forensic_lineage={"opening_order_id": "oid-1"})
-        key, idem = identity("ETHUSDT", stub)
-        store.data[key.replace("rr_exit_v1:", "partial_exit_v1:")] = json.dumps(
-            {"idem": idem.replace("rr-", "partial-", 1), "order_id": order_id, "filled": filled})
-
-    async def test_reduced_position_with_bgx_evidence_is_recovered(self):
-        from bot import restart_ownership_recovery as recovery
-        store = _Store()
-        await self._evidence(store)
-        p1, p2 = store.patch()
-        with p1, p2:
-            proof = await recovery.prove_restart_ownership(self._engine(), self._residual())
-        self.assertTrue(proof.recovered)
-        self.assertEqual((proof.reason, proof.base_qty, proof.order_id),
-                         ("exact_durable_exchange_proof_after_reduce", 0.10, "oid-1"))
-
-    async def test_reduced_position_without_evidence_stays_external(self):
-        from bot import restart_ownership_recovery as recovery
-        store = _Store()
-        await self._evidence(store, filled=False, order_id="")
-        p1, p2 = store.patch()
-        with p1, p2:
-            proof = await recovery.prove_restart_ownership(self._engine(), self._residual())
-        self.assertFalse(proof.recovered)
-        self.assertEqual(proof.reason, "no_exact_durable_fill")
-
-    async def test_increased_position_never_adopted(self):
-        from bot import restart_ownership_recovery as recovery
-        store = _Store()
-        await self._evidence(store)
-        p1, p2 = store.patch()
-        with p1, p2:
-            proof = await recovery.prove_restart_ownership(self._engine(), self._residual(0.30))
-        self.assertFalse(proof.recovered)
-
-
 class EntryHookTests(unittest.IsolatedAsyncioTestCase):
     async def test_entry_confirmed_persists_geometry_with_lineage(self):
         from bot import post_trade_forensics
@@ -388,6 +340,9 @@ class EntryHookTests(unittest.IsolatedAsyncioTestCase):
             engine = Engine()
             await engine._open(Signal("ETHUSDT", "LONG", 100.0, 98.0, 104.0, 0.8, "t", 80))
         record = json.loads(store.data[g._key("e-1")])
+        lifecycle = json.loads(store.data[trade_lifecycle._key("e-1")])
+        self.assertEqual((lifecycle["status"], lifecycle["opening_qty"], lifecycle["confirmed_reduced_qty"]),
+                         ("OPEN", 1.0, 0.0))
         self.assertEqual((record["initial_sl"], record["initial_tp"], record["opening_order_id"],
                           record["initial_qty"]), (98.0, 104.0, "e-1", 1.0))
 

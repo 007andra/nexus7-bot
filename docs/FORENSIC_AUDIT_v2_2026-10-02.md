@@ -143,6 +143,18 @@ Composition failure refuses startup. **No new-risk bypass found** (re-verified t
   `residual == opening_fill − proven reduce fills` (exchange-confirmed partial order fill) within one lot.
   Tests: closed-lineage adoption (both variants), reduced-with-mismatched-residual.
 * **Fix risk:** low; tightening only (worst case: a genuine BGX position stays EXTERNAL = pre-branch behaviour).
+* **FIXED (2026-10-02):** `bot/trade_lifecycle.py` keeps one durable lifecycle per opening order id
+  (`OPEN`→`CLOSED`, monotonic; opening qty, BGX-proven reductions capped by the BGX order size).
+  `prove_restart_ownership` now requires: lifecycle OPEN (missing/corrupt/CLOSED ⇒ EXTERNAL),
+  exchange qty == opening − proven reductions, average entry within 0.1 % and no newer exchange
+  `openingTimestamp` (rejection-only evidence), and an authoritative fill-ledger replay
+  (`/api/v1/fills`): only the opening order may add exposure, the balance never reaches zero, the
+  final balance equals the position. Lineages become terminal only from authoritative flat
+  evidence: sync with a validated snapshot (deferred retry), confirmed 2R flat, emergency flatten
+  verification, and a boot reconcile that runs BEFORE adoption. Historical geometry/partial records
+  can no longer revive a terminal lineage. The Q-01B `reduce_evidence` widening was removed.
+  Migration: positions opened before this change have no lifecycle ⇒ EXTERNAL after a restart.
+  Tests: `tests/test_trade_lifecycle_ownership*.py`.
 
 ### HIGH
 

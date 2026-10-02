@@ -86,6 +86,12 @@ async def check(engine):
             if any(abs(v) > 0 for v in sizes):
                 log.warning('[RR_EXIT_PENDING] symbol=%s residual_position=true local_position_retained=true', symbol)
                 continue
+            # NOVO-02: fill confirmed + exchange flat => lineage terminal now.
+            try:
+                from bot import trade_lifecycle
+                await trade_lifecycle.terminalize_positions({symbol: position}, positions, 'rr_exit_flat')
+            except Exception as exc:
+                log.error('[TRADE_LINEAGE_TERMINAL_FAILED] symbol=%s stage=rr_exit error=%s', symbol, type(exc).__name__)
             # One accounting owner handles exchange-flat positions and attaches
             # opening lineage. Do not manufacture a trade from the trigger mark.
             await engine._sync_positions()

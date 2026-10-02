@@ -42,6 +42,18 @@ class _Exchange:
         self.side = "Buy" if direction == "LONG" else "Sell"
         self.contracts, self.stop, self.mark = 100, 98.0 if direction == "LONG" else 102.0, 100.0
         self.set_sl_calls, self.reduce_orders = [], []
+        # Exchange fill ledger (contracts), the authority used by the restart
+        # ownership continuity proof (NOVO-02).
+        import time as _time
+        self._t = int(_time.time() * 1000) - 60_000
+        self.fills = []
+        self.add_fill("open-1", self.side.lower(), 100)
+
+    def add_fill(self, order_id, side, contracts):
+        self._t += 1000
+        self.fills.append({"tradeId": f"t{len(self.fills)}", "orderId": order_id, "symbol": "ETHUSDTM",
+                           "side": side, "size": str(contracts), "price": "100", "fee": "0",
+                           "feeCurrency": "USDT", "tradeTime": self._t * 1_000_000, "tradeType": "trade"})
 
     def client(self):
         raw = kucoin.KuCoinClient()
@@ -69,7 +81,17 @@ class _Exchange:
         async def place_order(**kw):
             ex.reduce_orders.append(kw)
             ex.contracts -= round(kw["qty"] * 100)
-            return {"orderId": f"r-{len(ex.reduce_orders)}"}
+            oid = f"r-{len(ex.reduce_orders)}"
+            ex.add_fill(oid, "sell" if ex.side == "Buy" else "buy", round(kw["qty"] * 100))
+            return {"orderId": oid}
+
+        async def private_get(endpoint, params=None, auth=False):
+            if endpoint == "/api/v1/fills":
+                lo, hi = params["startAt"] * 1_000_000, params["endAt"] * 1_000_000
+                items = [f for f in ex.fills if lo <= f["tradeTime"] <= hi]
+                return {"currentPage": 1, "totalPage": 1, "totalNum": len(items), "items": items}
+            return {}
+        raw._get = private_get
         raw.get_positions = get_positions
         raw.get_stop_orders = stop_orders
         raw.set_sl = set_sl
@@ -110,7 +132,9 @@ class ComposedRestartGeometryTests(unittest.IsolatedAsyncioTestCase):
             pos = core.Position(Signal("ETHUSDT", direction, 100.0, 100 - 2 * s, 100 + 4 * s, .8, "t", 80), 1.0)
             pos._forensic_lineage = {"order_id": "open-1", "client_oid": "bgx7-open-1", "version": 2}
             engine.positions["ETHUSDT"] = pos
-            await g.persist(pos, "entry_confirmed")          # the post_trade_forensics hook
+            from bot import trade_lifecycle
+            await trade_lifecycle.open_trade(pos, pos.qty)   # the post_trade_forensics hook
+            await g.persist(pos, "entry_confirmed")
 
             async def step(price, *, exits=True):
                 ex.mark = price

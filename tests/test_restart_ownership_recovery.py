@@ -1,6 +1,9 @@
 import ast
 import inspect
+import json
+import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import bot.restart_ownership_recovery as recovery
 from bot.order_state import OrderRegistry, OrderState
@@ -54,8 +57,15 @@ class _Client:
             "stopTriggered": False,
         }]
 
+        self.fills = []   # exchange fill ledger (NOVO-02 continuity proof)
+
     def get_instruments(self):
         return self._instruments
+
+    async def _get(self, endpoint, params=None, auth=False):
+        if endpoint != "/api/v1/fills":
+            return {}
+        return {"currentPage": 1, "totalPage": 1, "totalNum": len(self.fills), "items": list(self.fills)}
 
     async def get_order_status(self, order_id):
         return dict(self.status)
@@ -68,6 +78,26 @@ class _Engine:
     def __init__(self, client=None):
         self.client = client or _Client()
         self.orders = OrderRegistry()
+
+
+_STORE = {}
+_ENTRY = {"ETHUSDT": 2530.0, "AVAXUSDT": 27.0}
+
+
+def _open_lineage(engine, *, order_id, client_oid, symbol, side, qty):
+    """What a still-OPEN BGX trade leaves behind (NOVO-02): an OPEN durable
+    lifecycle and the opening fill in the exchange ledger."""
+    from bot import trade_lifecycle
+    _STORE[trade_lifecycle._key(order_id)] = json.dumps({
+        "version": 1, "opening_order_id": order_id, "client_oid": client_oid, "symbol": symbol,
+        "direction": "LONG" if side == "Buy" else "SHORT", "entry": _ENTRY.get(symbol, 2530.0),
+        "opening_qty": qty, "confirmed_reduced_qty": 0.0, "status": "OPEN",
+        "opened_at_ms": int(time.time() * 1000), "closed_at_ms": None, "close_reason": None})
+    multiplier = float((engine.client._instruments.get(symbol) or {}).get("multiplier", 0.01))
+    engine.client.fills.append({
+        "tradeId": f"t-{order_id}", "orderId": order_id, "symbol": symbol + "M", "side": side.lower(),
+        "size": str(round(qty / multiplier)), "price": "1", "fee": "0", "feeCurrency": "USDT",
+        "tradeTime": (int(time.time() * 1000) - 30_000) * 1_000_000, "tradeType": "trade"})
 
 
 def _filled_order(engine, *, client_oid="bgx7-owned", order_id="oid-1",
@@ -83,10 +113,20 @@ def _filled_order(engine, *, client_oid="bgx7-owned", order_id="oid-1",
         avg_price=2530.0,
     )
     engine.orders.index_order_id(order_id, client_oid)
+    _open_lineage(engine, order_id=order_id, client_oid=client_oid, symbol=symbol, side=side, qty=qty)
     return order
 
 
 class RestartOwnershipRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        _STORE.clear()
+
+        async def load(key, strict=False):
+            return _STORE.get(key)
+        p = patch("bot.database.load_key_value", AsyncMock(side_effect=load))
+        p.start()
+        self.addCleanup(p.stop)
+
     async def test_exact_durable_exchange_and_protection_proof_recovers(self):
         engine = _Engine()
         _filled_order(engine)
@@ -199,7 +239,8 @@ class RestartOwnershipRecoveryTests(unittest.IsolatedAsyncioTestCase):
         _filled_order(engine, qty=0.20, filled_qty=0.20)
         proof = await recovery.prove_restart_ownership(engine, dict(POSITION))
         self.assertFalse(proof.recovered)
-        self.assertEqual(proof.reason, "no_exact_durable_fill")
+        # NOVO-02: the quantity is now checked against the lineage residual.
+        self.assertEqual(proof.reason, "trade_residual_mismatch")
 
     async def test_missing_order_id_is_rejected(self):
         engine = _Engine()

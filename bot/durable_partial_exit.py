@@ -93,6 +93,12 @@ async def check(engine):
                 if not math.isfinite(remaining) or (raw_size > 0 and remaining <= 0):
                     raise ValueError('invalid residual')
             pos.tp1_hit = True
+            # NOVO-02: credit the BGX reduction (capped by the BGX order size).
+            try:
+                from bot import trade_lifecycle
+                await trade_lifecycle.record_reduction(pos, remaining, state.get('qty'), 'partial_fill')
+            except Exception as exc:
+                log.error('[TRADE_LINEAGE_REDUCE_FAILED] symbol=%s error=%s', symbol, type(exc).__name__)
             if remaining == 0:
                 await engine._sync_positions()
                 engine._pending_partial_symbols.discard(symbol)

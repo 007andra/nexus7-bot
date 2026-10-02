@@ -105,6 +105,15 @@ async def close_all_positions(engine, *, reason="operator_close_all",
                 pos_lock.release()
 
 
+async def _terminalize_lineages(engine, rows):
+    try:
+        from bot import trade_lifecycle
+        await trade_lifecycle.terminalize_positions(
+            getattr(engine, "positions", {}), rows, "emergency_flatten")
+    except Exception as exc:
+        log.error("[TRADE_LINEAGE_TERMINAL_FAILED] stage=emergency_flatten error=%s", type(exc).__name__)
+
+
 async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
                    verify_attempts, verify_delay_s):
     client = engine.client
@@ -117,6 +126,7 @@ async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
 
     if not rows:
         log.critical("[EMERGENCY_FLATTEN_VERIFY] status=ALREADY_FLAT remaining=0")
+        await _terminalize_lineages(engine, [])
         summary = _summary("ALREADY_FLAT", "no_open_positions", [], [])
         await _retire_stale_protections(engine, summary, set())
         return summary
@@ -197,6 +207,9 @@ async def _flatten(engine, instrument_info, close_qty, fill_timeout_s,
         remaining = {str(r["symbol"]): r.get("size") for r in after}
         if not any(s in remaining for s in requested):
             break
+
+    if remaining is not None:
+        await _terminalize_lineages(engine, after)   # NOVO-02: authoritative flat proof
 
     for entry in results:
         sym = entry["symbol"]

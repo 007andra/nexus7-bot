@@ -95,6 +95,8 @@ def _kucoin_row(raw, to_standard):
         "stopLoss": _number(raw, "stopLoss"),
         "takeProfit": _number(raw, "takeProfit"),
         "posMargin": _number(raw, "posMargin"),
+        # Position open time (ms); used only as REJECTION evidence of a reopen.
+        "openingTimestamp": _number(raw, "openingTimestamp"),
     }
 
 
