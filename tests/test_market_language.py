@@ -2,6 +2,7 @@ import ast
 import inspect
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 import bot.market_language as market_language_module
 from bot.market_language import (
@@ -11,8 +12,6 @@ from bot.market_language import (
     temporal_context,
     tokenize_candles,
 )
-from bot import market_language_overlay, nexus_ai
-from bot.nexus_models import run_ensemble as canonical_run_ensemble
 
 
 def _series(n=180, drift=0.0012):
@@ -32,14 +31,6 @@ def _series(n=180, drift=0.0012):
         })
         price = close
     return rows
-
-
-class _Log:
-    def warning(self, *args, **kwargs):
-        return None
-
-    def debug(self, *args, **kwargs):
-        return None
 
 
 class MarketLanguageTests(unittest.TestCase):
@@ -107,7 +98,7 @@ class MarketLanguageTests(unittest.TestCase):
             forecast_market_language(b_rows, sample_count=32),
         )
 
-    def test_model_h_has_no_execution_authority(self):
+    def test_candidate_model_has_no_execution_authority(self):
         rows = _series()
         closes = [x["c"] for x in rows]
         highs = [x["h"] for x in rows]
@@ -139,22 +130,20 @@ class MarketLanguageTests(unittest.TestCase):
         self.assertNotIn("TradingEngine", source)
         self.assertNotIn("ExchangeClient", source)
 
-    def test_ensemble_contains_model_h_once_via_overlay(self):
-        rows = _series()
-        closes = [x["c"] for x in rows]
-        highs = [x["h"] for x in rows]
-        lows = [x["l"] for x in rows]
-        volumes = [x["v"] for x in rows]
-
-        canonical = canonical_run_ensemble(closes, highs, lows, volumes)
-        self.assertEqual(len(canonical), 7)
-        self.assertNotIn("MARKET_LANGUAGE", [m.name for m in canonical])
-
-        market_language_overlay.install(nexus_ai, _Log())
-        models = nexus_ai.run_ensemble(closes, highs, lows, volumes)
-        names = [m.name for m in models]
-        self.assertEqual(names.count("MARKET_LANGUAGE"), 1)
-        self.assertEqual(len(models), 8)
+    def test_production_runtime_has_no_market_language_reference(self):
+        protected = (
+            "bot/runtime_overlays.py",
+            "bot/nexus_ai.py",
+            "bot/nexus_models.py",
+            "bot/engine.py",
+        )
+        for path in protected:
+            source = Path(path).read_text(encoding="utf-8").lower()
+            self.assertNotIn(
+                "market_language",
+                source,
+                msg=f"{path} must not activate the research-only market-language candidate",
+            )
 
 
 if __name__ == "__main__":
