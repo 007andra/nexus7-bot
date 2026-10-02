@@ -177,10 +177,9 @@ def rr_breakdown(entry: float, sl: float, tp: float, cost_fraction: float) -> di
 
 
 def candidate_id(sig) -> str:
-    setup = getattr(sig, "_bgx_setup_id", None)
-    if setup:
-        return str(setup)
-    return f"{getattr(sig, 'symbol', 'UNKNOWN')}:{getattr(sig, 'direction', '?')}:{_finite(getattr(sig, 'entry', 0.0)):.10g}"
+    from bot.candidate_trace import ensure_candidate_id
+
+    return ensure_candidate_id(sig)
 
 
 async def fetch_taker_fee(client, symbol: str) -> tuple[float, float | None, str]:
