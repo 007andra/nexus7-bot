@@ -17,6 +17,26 @@ _MAX_BUNDLE_BYTES = 2_000_000
 _KEY_PREFIX = "nexus:decision_evidence:v1:"
 
 
+def _timestamp_ms(value: object) -> int:
+    """Normalize epoch seconds/ms/us/ns to integer milliseconds."""
+    try:
+        ts = int(float(value))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid timestamp") from exc
+    if ts <= 0:
+        raise ValueError("timestamp must be positive")
+    # Plausible modern epoch seconds.
+    if ts < 100_000_000_000:
+        ts *= 1000
+    # Microseconds.
+    elif ts >= 100_000_000_000_000 and ts < 100_000_000_000_000_000:
+        ts //= 1000
+    # Nanoseconds.
+    elif ts >= 100_000_000_000_000_000:
+        ts //= 1_000_000
+    return ts
+
+
 @dataclass(frozen=True)
 class CandleEvidence:
     timeframe: str
@@ -28,8 +48,9 @@ class CandleEvidence:
     volume: float
 
     def __post_init__(self) -> None:
-        if not self.timeframe or self.ts <= 0:
+        if not self.timeframe:
             raise ValueError("invalid candle identity")
+        object.__setattr__(self, "ts", _timestamp_ms(self.ts))
         vals = (self.open, self.high, self.low, self.close, self.volume)
         if not all(isfinite(float(v)) for v in vals):
             raise ValueError("non-finite candle")
@@ -63,8 +84,7 @@ class DecisionEvidenceBundle:
             raise ValueError("missing evidence identity")
         if self.side.upper() not in {"LONG", "SHORT"}:
             raise ValueError("invalid evidence side")
-        if self.decision_ts <= 0:
-            raise ValueError("invalid decision timestamp")
+        object.__setattr__(self, "decision_ts", _timestamp_ms(self.decision_ts))
         counts: dict[str, int] = {}
         previous: dict[str, int] = {}
         for candle in self.candles:
@@ -116,12 +136,9 @@ def normalize_candles(
 ) -> tuple[CandleEvidence, ...]:
     out = []
     for row in rows:
-        ts = int(row.get("ts", row.get("timestamp", 0)) or 0)
-        if ts and ts < 100_000_000_000:
-            ts *= 1000
         out.append(CandleEvidence(
             timeframe=str(timeframe),
-            ts=ts,
+            ts=_timestamp_ms(row.get("ts", row.get("timestamp", 0))),
             open=float(row.get("o", row.get("open", 0)) or 0),
             high=float(row.get("h", row.get("high", 0)) or 0),
             low=float(row.get("l", row.get("low", 0)) or 0),
