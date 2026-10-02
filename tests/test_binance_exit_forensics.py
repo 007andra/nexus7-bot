@@ -180,6 +180,78 @@ def test_force_orders_proves_liquidation_without_guessing_from_price():
     assert receipt["cause_authority"] is True
 
 
+def _engine_with_opening_plan(plan, candidate_id="nx7-test"):
+    order = SimpleNamespace(
+        candidate_id=candidate_id,
+        protection_plan=plan,
+    )
+    registry = SimpleNamespace(
+        get_by_order_id=lambda order_id: order if str(order_id) == "11" else None
+    )
+    return SimpleNamespace(orders=registry)
+
+
+def test_execution_attribution_reconciles_single_stop_exit():
+    engine = _engine_with_opening_plan({
+        "direction": "LONG",
+        "entry": 100.0,
+        "sl": 98.0,
+        "tp": 104.0,
+    })
+    receipt = {
+        "status": "RECONCILED",
+        "pnl_fill_authority": True,
+        "opening_qty": "2",
+        "open_vwap": "101",
+        "close_vwap": "97.5",
+        "commission": "0.5",
+        "funding": "-0.2",
+        "net_after_funding": "-7.7",
+        "cause": "BGX_ALGO_STOP_MARKET",
+        "close_order_ids": ["22"],
+    }
+    result = forensic.build_execution_attribution(
+        engine,
+        opening_order_id="11",
+        receipt=receipt,
+    )
+    assert result["status"] == "FULL_ATTRIBUTION"
+    assert result["candidate_id"] == "nx7-test"
+    assert abs(result["entry_slippage_bps"] - 100.0) < 1e-9
+    assert result["planned_exit"] == 98.0
+    assert result["reconciles_exchange_net"] is True
+    assert abs(result["components"]["net_pnl"] + 7.7) < 1e-9
+
+
+def test_execution_attribution_does_not_invent_exit_plan_for_multi_close():
+    engine = _engine_with_opening_plan({
+        "direction": "LONG",
+        "entry": 100.0,
+        "sl": 98.0,
+        "tp": 104.0,
+    })
+    receipt = {
+        "status": "RECONCILED",
+        "pnl_fill_authority": True,
+        "opening_qty": "2",
+        "open_vwap": "100.5",
+        "close_vwap": "103",
+        "commission": "0.4",
+        "funding": "0",
+        "net_after_funding": "4.6",
+        "cause": "MULTI_CAUSE:BGX_ALGO_TAKE_PROFIT_MARKET,BGX_ALGO_STOP_MARKET",
+        "close_order_ids": ["22", "23"],
+    }
+    result = forensic.build_execution_attribution(
+        engine,
+        opening_order_id="11",
+        receipt=receipt,
+    )
+    assert result["status"] == "ENTRY_ATTRIBUTED"
+    assert result["reason"] == "EXIT_PLAN_NOT_SINGLE_LEVEL_AUTHORITATIVE"
+    assert "components" not in result
+
+
 def test_confirmed_binance_exit_handoffs_exact_pnl_to_durable_ledger():
     engine = SimpleNamespace()
     receipt = {
