@@ -41,6 +41,19 @@ async def _filter_viable_symbols_fail_closed(self) -> bool:
             if symbol and price > 0:
                 price_map[symbol] = price
 
+        # Observability only. This override replaces the legacy method that
+        # hosted the minimum-order feasibility matrix, which therefore never
+        # ran in production. It never changes viable_symbols, risk or sizing.
+        try:
+            from bot import min_order_feasibility_matrix as _feasibility_matrix
+            _feasibility_matrix.log_once(self, dict(price_map), log)
+        except Exception as matrix_exc:
+            log.warning(
+                "[MIN_ORDER_FEASIBILITY_MATRIX] result=DEFER reason=%s "
+                "observability_only=true decision_effect=NONE execution_effect=NONE",
+                type(matrix_exc).__name__,
+            )
+
         balance = float(getattr(getattr(self, "risk", None), "balance", 0) or 0)
         buying_power = balance * float(cfg.LEVERAGE)
         if buying_power <= 0:

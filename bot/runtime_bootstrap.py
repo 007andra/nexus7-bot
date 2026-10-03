@@ -51,6 +51,7 @@ def install() -> None:
     from bot import nexus_decision_consistency as _nexus_decision_consistency
     from bot import nexus_live_cost_calibration as _nexus_live_cost_calibration
     from bot import min_order_feasibility as _min_order_feasibility
+    from bot import candidate_terminal_telemetry as _candidate_terminal_telemetry
     from bot import nexus_prefinal_veto_observability as _nexus_prefinal_veto_observability
     from bot import nexus_shadow_research_runtime as _nexus_shadow_research_runtime
     from bot import daily_stop_observability as _daily_stop_observability
@@ -235,6 +236,9 @@ def install() -> None:
     _runtime_truth_hooks.install_engine_and_downstream(
         TradingEngine, _exchange.ExchangeClient, _score, _nexus_ai
     )
+    # Observability only: a passive log handler (wraps no callable) that emits
+    # one [CANDIDATE_TERMINAL] record per candidate from existing gate logs.
+    _candidate_terminal_telemetry.install(_log)
 
     builtins._nexus_runtime_bootstrap_installed = True
     _log.info("[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap")
