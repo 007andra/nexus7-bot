@@ -16,6 +16,8 @@ from typing import Iterable, Mapping, Sequence
 
 
 _METRICS_SHIFT_DATE = date(2026, 6, 25)
+# Per-archive parse provenance (exact duplicate rows dropped), keyed by date.
+METRICS_ARCHIVE_PROVENANCE: dict[str, dict] = {}
 _BOOK_DEPTH_KNOWN_ISSUE_DATE = date(2026, 9, 3)
 
 
@@ -185,8 +187,8 @@ def parse_metrics_archive(
     if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
         raise ValueError("unexpected Binance metrics schema")
 
-    out = []
-    previous_effective = -1
+    by_effective: dict[int, MetricsObservation] = {}
+    duplicates = 0
     convention = (
         "START_LABEL_SHIFTED_TO_AVAILABILITY"
         if src_day >= _METRICS_SHIFT_DATE
@@ -199,9 +201,6 @@ def parse_metrics_archive(
             if src_day >= _METRICS_SHIFT_DATE
             else label_ts
         )
-        if effective_ts <= previous_effective:
-            raise ValueError("non-monotonic metrics effective timestamp")
-        previous_effective = effective_ts
 
         def optional(name: str) -> float | None:
             value = str(row.get(name, "") or "").strip()
@@ -209,7 +208,7 @@ def parse_metrics_archive(
                 return None
             return _finite(value)
 
-        out.append(MetricsObservation(
+        observation = MetricsObservation(
             label_ts_ms=label_ts,
             effective_ts_ms=effective_ts,
             symbol=str(row["symbol"]).upper(),
@@ -221,7 +220,25 @@ def parse_metrics_archive(
             taker_ls_volume_ratio=optional("sum_taker_long_short_vol_ratio"),
             source_date=src_day.isoformat(),
             convention=convention,
-        ))
+        )
+        existing = by_effective.get(effective_ts)
+        if existing is not None:
+            # Row order inside the archive carries no meaning, and an exact
+            # repeat adds no information. A repeated timestamp with DIFFERENT
+            # values is ambiguous and fails closed (never pick one silently).
+            if existing != observation:
+                raise ValueError(
+                    "conflicting metrics rows for one effective timestamp "
+                    f"source_date={src_day.isoformat()} effective_ts={effective_ts}"
+                )
+            duplicates += 1
+            continue
+        by_effective[effective_ts] = observation
+    out = [by_effective[ts] for ts in sorted(by_effective)]
+    METRICS_ARCHIVE_PROVENANCE[src_day.isoformat()] = {
+        "rows": len(out),
+        "exact_duplicates_dropped": duplicates,
+    }
     return tuple(out)
 
 

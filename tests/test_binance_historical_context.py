@@ -29,6 +29,34 @@ def _metrics_row(ts, oi="100", oi_value="10000", top_pos="1.2"):
     )
 
 
+_HEADER = (
+    "create_time,symbol,sum_open_interest,sum_open_interest_value,"
+    "count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,"
+    "count_long_short_ratio,sum_taker_long_short_vol_ratio\n"
+)
+
+
+class MetricsArchiveOrderingTests(unittest.TestCase):
+    def test_out_of_order_rows_are_sorted_by_effective_time(self):
+        payload = _zip_csv("m.csv", _HEADER + _metrics_row("2026-03-01 00:10:00", oi="102")
+                           + _metrics_row("2026-03-01 00:05:00", oi="101"))
+        rows = parse_metrics_archive(payload, source_date="2026-03-01")
+        self.assertEqual([r.sum_open_interest for r in rows], [101.0, 102.0])
+
+    def test_exact_duplicate_row_is_dropped_with_provenance(self):
+        from bot.binance_historical_context import METRICS_ARCHIVE_PROVENANCE
+        row = _metrics_row("2026-03-02 00:05:00")
+        rows = parse_metrics_archive(_zip_csv("m.csv", _HEADER + row + row), source_date="2026-03-02")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(METRICS_ARCHIVE_PROVENANCE["2026-03-02"]["exact_duplicates_dropped"], 1)
+
+    def test_conflicting_duplicate_fails_closed_with_location(self):
+        payload = _zip_csv("m.csv", _HEADER + _metrics_row("2026-03-03 00:05:00", oi="100")
+                           + _metrics_row("2026-03-03 00:05:00", oi="999"))
+        with self.assertRaisesRegex(ValueError, "conflicting metrics rows.*2026-03-03"):
+            parse_metrics_archive(payload, source_date="2026-03-03")
+
+
 class BinanceHistoricalContextTests(unittest.TestCase):
     def test_pre_change_metrics_are_end_labeled(self):
         payload = _zip_csv(

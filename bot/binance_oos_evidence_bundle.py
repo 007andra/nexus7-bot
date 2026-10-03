@@ -253,6 +253,22 @@ def build_sensitivity_report(symbol_reports: list[dict]) -> dict:
     }
 
 
+def _metrics_parse_provenance() -> dict:
+    from bot.binance_historical_context import METRICS_ARCHIVE_PROVENANCE
+    dropped = {
+        day: int(item.get("exact_duplicates_dropped", 0))
+        for day, item in sorted(METRICS_ARCHIVE_PROVENANCE.items())
+        if int(item.get("exact_duplicates_dropped", 0)) > 0
+    }
+    return {
+        "archives_parsed": len(METRICS_ARCHIVE_PROVENANCE),
+        "exact_duplicate_rows_dropped": sum(dropped.values()),
+        "dates_with_exact_duplicates": dropped,
+        "conflicting_duplicates": "FAIL_CLOSED",
+        "row_order": "SORTED_BY_EFFECTIVE_TIMESTAMP",
+    }
+
+
 def build_opportunity_ranking_report(symbol_reports: list[dict]) -> dict:
     """Canonical SHADOW ranking evidence with legacy wrapper error contract."""
     try:
@@ -340,6 +356,7 @@ async def run(
         "sensitivity": sensitivity,
         "opportunity_ranking": opportunity_ranking,
         "microstructure_review": microstructure_review,
+        "metrics_parse_provenance": _metrics_parse_provenance(),
         "manifest": manifest.canonical_dict(),
         "manifest_hash": manifest.fingerprint,
         "dataset_fingerprint": manifest.dataset_fingerprint,

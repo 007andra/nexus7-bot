@@ -20,6 +20,7 @@ on:
       - "bot/research_statistics.py"
       - "bot/binance_oos_replay.py"
       - "bot/binance_oos_evidence_bundle.py"
+      - "bot/binance_historical_context.py"
   workflow_dispatch:
 
 jobs:
@@ -120,6 +121,7 @@ jobs:
               "methodology": methodology,
               "opportunity_ranking": ranking,
               "microstructure_review": payload.get("microstructure_review"),
+              "metrics_parse_provenance": payload.get("metrics_parse_provenance"),
           }, indent=2, sort_keys=True, default=str))
           PY
 
