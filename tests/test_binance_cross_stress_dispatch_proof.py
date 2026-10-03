@@ -269,16 +269,19 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg.LEVERAGE, 50)
         await self.engine._open(self.signal)
         self.assertEqual(self.client.place_order.call_count, 1, self.events)
-        self.assertEqual(len(self.requests), 1, self.events)
+        # P1-OPEN-1: the stale-protection inventory (read-only GET) precedes
+        # the single entry POST; exactly one exchange mutation.
+        self.assertEqual([(m, e) for m, e, _ in self.requests],
+                         [("GET", "/fapi/v1/openAlgoOrders"), ("POST", "/fapi/v1/order")], self.events)
         self.assertEqual(self.evaluations, [("PRE_ORDER", self.sized_qty), ("FINAL_PREDISPATCH", self.sized_qty)])
         self.assertEqual(self.dispatch_qty, self.sized_qty)
-        self.assertEqual(float(self.requests[0][2]["quantity"]), self.sized_qty)
+        self.assertEqual(float(self.requests[-1][2]["quantity"]), self.sized_qty)
         critical = [e for e in self.events if e in {
             "FINAL_SIZING_ENTER", "FINAL_LOSS_BUDGET", "FINAL_SIZING_RETURN",
             "STRESS_PRE_ORDER", "STRESS_FINAL_PREDISPATCH", "PLACE_ORDER", "FENCE", "OWNERSHIP", "FAKE_HTTP"}]
         self.assertEqual(critical, ["FINAL_SIZING_ENTER", "FINAL_LOSS_BUDGET", "FINAL_SIZING_RETURN",
                                    "STRESS_PRE_ORDER", "FINAL_LOSS_BUDGET", "STRESS_FINAL_PREDISPATCH",
-                                   "PLACE_ORDER", "FENCE", "OWNERSHIP", "FAKE_HTTP"])
+                                   "PLACE_ORDER", "FENCE", "OWNERSHIP", "FAKE_HTTP", "FAKE_HTTP"])
         between = self.events[self.events.index("STRESS_PRE_ORDER") + 1:self.events.index("STRESS_FINAL_PREDISPATCH")]
         self.assertIn("ACCOUNT_REFRESH", between)
         self.assertNotIn("FINAL_SIZING_ENTER", self.events[self.events.index("STRESS_PRE_ORDER"):])

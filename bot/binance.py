@@ -32,7 +32,7 @@ import websockets
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from bot.execution_capability import assert_exchange_mutation_allowed
+from bot.execution_capability import ExchangeMutationBlocked, assert_exchange_mutation_allowed
 from bot.logger import log
 from bot.market_data_health import MarketDataHealth
 from bot.private_stream_health import (
@@ -313,6 +313,11 @@ class BinanceClient:
         # symbol. A BGX algo order is reusable only for its own lineage.
         self._algo_lineage: dict[str, str] = {}
         self._protection_lineage: dict[str, str] = {}
+        # P1-OPEN-1: exchange orderId of the current opening order per symbol;
+        # the durable algo -> lineage map lives in binance_protection_registry.
+        self._protection_opening_order: dict[str, str] = {}
+        self._algo_registry: dict[str, dict] = {}
+        self._algo_registry_loaded = False
         # Conditional orders moved to Binance's Algo service. Keep their
         # user-data-stream lifecycle separate from normal ManagedOrder state:
         # an ALGO_UPDATE is not itself a normal exchange order transition.
@@ -1056,6 +1061,10 @@ class BinanceClient:
                 engine, ownership, event="predispatch_validated"
             )
             assert_ready_for_new_entries(engine)
+            # P1-OPEN-1: flat proven -> owned protection of closed lineages
+            # cancelled and read back BEFORE a new opening order is sent.
+            from bot.binance_stale_protection import assert_clean_before_entry
+            await assert_clean_before_entry(self, symbol)
 
         # Durable exposure lineage must describe both risk-increasing entries
         # and risk-reducing exits. Previously this snapshot lived inside the
@@ -1152,6 +1161,7 @@ class BinanceClient:
                 # New opening lineage for this symbol: protection of any
                 # previous trade is never reusable by this one.
                 self._protection_lineage[symbol] = client_oid
+                self._protection_opening_order[symbol] = str(order_id or "")
             if not reduce_only and (sl > 0 or tp > 0):
                 await asyncio.sleep(0.15)
                 try:
@@ -1299,6 +1309,9 @@ class BinanceClient:
                 type(exc).__name__,
             )
 
+        from bot import binance_protection_registry
+        from bot.binance_stale_protection import current_lineage, owned_by
+
         def _already_active(order_type: str, trigger_text: str) -> bool:
             try:
                 wanted = _d(trigger_text)
@@ -1312,8 +1325,12 @@ class BinanceClient:
                 if not algo_oid.startswith("bgx7-"):
                     continue
                 # INV-PROTECTION-LINEAGE-001: prefix + side + type + price never
-                # prove that an existing algo order belongs to THIS trade.
+                # prove that an existing algo order belongs to THIS trade; the
+                # opening orderId does (P1-OPEN-1: a clientOid can repeat).
                 if not lineage or self._algo_lineage.get(algo_oid) != lineage:
+                    continue
+                if not owned_by(binance_protection_registry.lookup(self, algo_oid),
+                                current_lineage(self, symbol)):
                     continue
                 if row.get("closeOrder") is not True or row.get("isActive") is not True:
                     continue
@@ -1352,8 +1369,7 @@ class BinanceClient:
                         ),
                     }
                 )
-                if self._protection_lineage.get(symbol):
-                    self._algo_lineage[params["clientAlgoId"]] = self._protection_lineage[symbol]
+                await self._record_algo_lineage(symbol, params["clientAlgoId"], "SL")
                 result = await self._post(
                     "/fapi/v1/algoOrder",
                     params,
@@ -1385,8 +1401,7 @@ class BinanceClient:
                         ),
                     }
                 )
-                if self._protection_lineage.get(symbol):
-                    self._algo_lineage[params["clientAlgoId"]] = self._protection_lineage[symbol]
+                await self._record_algo_lineage(symbol, params["clientAlgoId"], "TP")
                 result = await self._post(
                     "/fapi/v1/algoOrder",
                     params,
@@ -1396,6 +1411,60 @@ class BinanceClient:
                     submitted += 1
 
         return expected > 0 and submitted == expected
+
+    async def _record_algo_lineage(self, symbol: str, client_algo_id: str, kind: str) -> None:
+        """Bind a protective algo order to its opening lineage BEFORE the POST."""
+        lineage = self._protection_lineage.get(symbol, "")
+        if not lineage:
+            return
+        self._algo_lineage[client_algo_id] = lineage
+        from bot import binance_protection_registry
+        await binance_protection_registry.record(
+            self, client_algo_id, symbol=symbol, kind=kind,
+            opening_order_id=self._protection_opening_order.get(symbol, ""),
+            opening_client_oid=lineage,
+        )
+
+    async def cancel_algo_order(
+        self, symbol: str, *, algo_id: str = "", client_algo_id: str = ""
+    ) -> str:
+        """Cancel ONE algo order (DELETE /fapi/v1/algoOrder), single attempt.
+
+        Returns the observed cancel result; it never proves the final state —
+        callers must read ``/fapi/v1/openAlgoOrders`` back. A lost ACK or a
+        5xx is AMBIGUOUS (never retried blindly: the readback converges)."""
+        params = {"algoId": str(algo_id)} if algo_id else (
+            {"clientAlgoId": str(client_algo_id)} if client_algo_id else {})
+        if not params:
+            raise ValueError("cancel_algo_order requires algo_id or client_algo_id")
+        if PAPER_TRADE:
+            return "PAPER_SKIPPED"
+        try:
+            data = await self._request(
+                "DELETE", "/fapi/v1/algoOrder", params,
+                auth=True, mutation=True, single_attempt=True,
+            )
+            data = data if isinstance(data, dict) else {}
+            echoed = (str(data.get("algoId", "")) == str(algo_id) if algo_id
+                      else str(data.get("clientAlgoId", "")) == str(client_algo_id))
+            result = ("ACK_CANCELED" if echoed and str(data.get("code", "200")) == "200"
+                      else "ACK_UNVALIDATED")
+        except BinanceAPIError as exc:
+            if exc.code in (-2011, -2013):
+                result = "REJECTED_UNKNOWN_ORDER"
+            elif (exc.status or 0) >= 500:
+                result = f"AMBIGUOUS_HTTP_{exc.status}"
+            else:
+                result = f"REJECTED_HTTP_{exc.status}"
+        except ExchangeMutationBlocked:
+            raise
+        except Exception as exc:
+            result = "AMBIGUOUS_" + type(exc).__name__
+        log.warning(
+            "[BINANCE_ALGO_CANCEL] symbol=%s algo_id=%s client_oid=%s cancel_result=%s",
+            symbol, algo_id or "-", client_algo_id or "-", result,
+        )
+        return result
 
     async def set_sl(self, symbol: str, sl: float, instruments=None):
         return await self.set_position_stops(symbol, sl=sl, tp=0)

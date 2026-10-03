@@ -431,6 +431,10 @@ class BinanceMigrationTests(unittest.TestCase):
         # lineage (partial protection retry of the same trade).
         client._protection_lineage["BTCUSDT"] = "bgx7-entry"
         client._algo_lineage["bgx7-existing-stop"] = "bgx7-entry"
+        # P1-OPEN-1: ownership is the durable algo -> opening-lineage record.
+        client._algo_registry["bgx7-existing-stop"] = {
+            "symbol": "BTCUSDT", "kind": "SL", "opening_order_id": "",
+            "opening_client_oid": "bgx7-entry"}
         with patch.object(bn, "PAPER_TRADE", False), patch.object(
             bn, "_live_migration_ready", return_value=True
         ), patch.object(
@@ -452,7 +456,9 @@ class BinanceMigrationTests(unittest.TestCase):
         self.assertEqual(params["triggerPrice"], "62000")
 
     def test_live_entry_propagates_unconfirmed_protection_to_engine(self):
-        client = FakeBinance()
+        # P1-OPEN-1: an opening order now requires authoritative flat proof and
+        # an empty stale-protection inventory before dispatch.
+        client = FakeBinance({"/fapi/v3/positionRisk": [], "/fapi/v1/openAlgoOrders": []})
         client._instruments = {
             "BTCUSDT": {
                 "multiplier": 1.0,
