@@ -16,7 +16,11 @@ class DurableRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
             drawdown_recovery.RISK_ENV, drawdown_recovery.REAUTH_ENV,
             drawdown_recovery.REAUTH_FROM_ENV, drawdown_recovery.REAUTH_TO_ENV,
             drawdown_recovery.REAUTH_REASON_ENV, drawdown_recovery.REAUTH_MAX_DD_ENV,
-            drawdown_recovery.REAUTH_RISK_ENV,
+            drawdown_recovery.REAUTH_RISK_ENV, drawdown_recovery.RELAX_ENV,
+            drawdown_recovery.RELAX_FROM_ENV, drawdown_recovery.RELAX_TO_ENV,
+            drawdown_recovery.RELAX_FROM_MAX_DD_ENV,
+            drawdown_recovery.RELAX_TO_MAX_DD_ENV,
+            drawdown_recovery.RELAX_RISK_ENV,
         )
         self.old = {k: os.environ.get(k) for k in self.keys}
         for key in (
@@ -26,6 +30,12 @@ class DurableRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
             drawdown_recovery.REAUTH_REASON_ENV,
             drawdown_recovery.REAUTH_MAX_DD_ENV,
             drawdown_recovery.REAUTH_RISK_ENV,
+            drawdown_recovery.RELAX_ENV,
+            drawdown_recovery.RELAX_FROM_ENV,
+            drawdown_recovery.RELAX_TO_ENV,
+            drawdown_recovery.RELAX_FROM_MAX_DD_ENV,
+            drawdown_recovery.RELAX_TO_MAX_DD_ENV,
+            drawdown_recovery.RELAX_RISK_ENV,
         ):
             os.environ.pop(key, None)
         os.environ[drawdown_recovery.AUTH_ENV] = "true"
@@ -58,6 +68,22 @@ class DurableRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
         os.environ[drawdown_recovery.REAUTH_REASON_ENV] = from_reason
         os.environ[drawdown_recovery.REAUTH_MAX_DD_ENV] = max_dd
         os.environ[drawdown_recovery.REAUTH_RISK_ENV] = risk_pct
+
+    def _authorize_armed_policy_relaxation(
+        self,
+        *,
+        from_episode="episode-expired-001",
+        to_episode="episode-durable-002",
+        from_max_dd="0.62",
+        to_max_dd="0.70",
+        risk_pct="0.005",
+    ):
+        os.environ[drawdown_recovery.RELAX_ENV] = "true"
+        os.environ[drawdown_recovery.RELAX_FROM_ENV] = from_episode
+        os.environ[drawdown_recovery.RELAX_TO_ENV] = to_episode
+        os.environ[drawdown_recovery.RELAX_FROM_MAX_DD_ENV] = from_max_dd
+        os.environ[drawdown_recovery.RELAX_TO_MAX_DD_ENV] = to_max_dd
+        os.environ[drawdown_recovery.RELAX_RISK_ENV] = risk_pct
 
     async def test_first_arm_is_atomic_absent_key_cas(self):
         saved = {}
@@ -184,6 +210,128 @@ class DurableRecoveryEpisodeTests(unittest.IsolatedAsyncioTestCase):
              patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
              patch.object(drawdown_recovery, "save_key_values_atomic_cas", AsyncMock()) as cas:
             ok, reason = await drawdown_recovery.ensure_durable_episode(0.1583)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "durable_rollover_policy_relaxed")
+        cas.assert_not_awaited()
+
+    async def test_expired_armed_episode_allows_exact_authorized_ceiling_relaxation(self):
+        old_policy = drawdown_recovery.RecoveryPolicy(
+            True,
+            "episode-expired-001",
+            datetime.now(timezone.utc) - timedelta(minutes=5),
+            0.62,
+            0.005,
+            "configured",
+        )
+        raw = drawdown_recovery._state_payload(
+            policy=old_policy,
+            status="ARMED",
+            armed_drawdown=0.6158,
+            worst_drawdown=0.6158,
+            reason="operator_rearmed_after_expiry",
+        )
+        os.environ[drawdown_recovery.EPISODE_ENV] = "episode-durable-002"
+        os.environ[drawdown_recovery.EXPIRES_ENV] = (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat()
+        os.environ[drawdown_recovery.MAX_DD_ENV] = "0.70"
+        os.environ[drawdown_recovery.RISK_ENV] = "0.005"
+        self._authorize_armed_policy_relaxation()
+        written = {}
+
+        async def cas(items, *, expected, strict):
+            self.assertEqual(expected, {drawdown_recovery.STATE_KEY: raw})
+            written.update(dict(items))
+            return True
+
+        with patch.object(cfg, "MAX_DRAWDOWN", 0.17), patch.object(cfg, "MAX_RISK_PCT", 0.01), \
+             patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
+             patch.object(drawdown_recovery, "save_key_values_atomic_cas", side_effect=cas):
+            ok, reason = await drawdown_recovery.ensure_durable_episode(0.6158)
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "durable_reauthorized_policy_relaxation")
+        state = json.loads(written[drawdown_recovery.STATE_KEY])
+        self.assertEqual(state["episode_id"], "episode-durable-002")
+        self.assertEqual(state["status"], "ARMED")
+        self.assertEqual(
+            state["reason"],
+            "operator_reauthorized_policy_relaxation",
+        )
+        audit = state["reauthorization"]
+        self.assertEqual(audit["from_episode_id"], "episode-expired-001")
+        self.assertEqual(audit["to_episode_id"], "episode-durable-002")
+        self.assertEqual(audit["from_status"], "ARMED")
+        self.assertEqual(audit["authorized_from_max_drawdown"], 0.62)
+        self.assertEqual(audit["authorized_to_max_drawdown"], 0.70)
+        self.assertEqual(audit["authorized_risk_pct"], 0.005)
+        self.assertTrue(audit["consumed_at"])
+
+    async def test_authorized_ceiling_relaxation_rejects_wrong_source_ceiling(self):
+        old_policy = drawdown_recovery.RecoveryPolicy(
+            True,
+            "episode-expired-001",
+            datetime.now(timezone.utc) - timedelta(minutes=5),
+            0.62,
+            0.005,
+            "configured",
+        )
+        raw = drawdown_recovery._state_payload(
+            policy=old_policy,
+            status="ARMED",
+            armed_drawdown=0.6158,
+            worst_drawdown=0.6158,
+            reason="operator_rearmed_after_expiry",
+        )
+        os.environ[drawdown_recovery.EPISODE_ENV] = "episode-durable-002"
+        os.environ[drawdown_recovery.EXPIRES_ENV] = (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat()
+        os.environ[drawdown_recovery.MAX_DD_ENV] = "0.70"
+        os.environ[drawdown_recovery.RISK_ENV] = "0.005"
+        self._authorize_armed_policy_relaxation(from_max_dd="0.61")
+
+        with patch.object(cfg, "MAX_DRAWDOWN", 0.17), patch.object(cfg, "MAX_RISK_PCT", 0.01), \
+             patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
+             patch.object(drawdown_recovery, "save_key_values_atomic_cas", AsyncMock()) as cas:
+            ok, reason = await drawdown_recovery.ensure_durable_episode(0.6158)
+
+        self.assertFalse(ok)
+        self.assertEqual(
+            reason,
+            "durable_policy_relaxation_source_ceiling_mismatch",
+        )
+        cas.assert_not_awaited()
+
+    async def test_authorized_ceiling_relaxation_still_forbids_risk_increase(self):
+        old_policy = drawdown_recovery.RecoveryPolicy(
+            True,
+            "episode-expired-001",
+            datetime.now(timezone.utc) - timedelta(minutes=5),
+            0.62,
+            0.004,
+            "configured",
+        )
+        raw = drawdown_recovery._state_payload(
+            policy=old_policy,
+            status="ARMED",
+            armed_drawdown=0.6158,
+            worst_drawdown=0.6158,
+            reason="operator_rearmed_after_expiry",
+        )
+        os.environ[drawdown_recovery.EPISODE_ENV] = "episode-durable-002"
+        os.environ[drawdown_recovery.EXPIRES_ENV] = (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat()
+        os.environ[drawdown_recovery.MAX_DD_ENV] = "0.70"
+        os.environ[drawdown_recovery.RISK_ENV] = "0.005"
+        self._authorize_armed_policy_relaxation(risk_pct="0.005")
+
+        with patch.object(cfg, "MAX_DRAWDOWN", 0.17), patch.object(cfg, "MAX_RISK_PCT", 0.01), \
+             patch.object(drawdown_recovery.db, "load_key_value", AsyncMock(return_value=raw)), \
+             patch.object(drawdown_recovery, "save_key_values_atomic_cas", AsyncMock()) as cas:
+            ok, reason = await drawdown_recovery.ensure_durable_episode(0.6158)
 
         self.assertFalse(ok)
         self.assertEqual(reason, "durable_rollover_policy_relaxed")
