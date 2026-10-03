@@ -287,6 +287,44 @@ def metrics_parse_provenance(symbol_reports: list[dict]) -> dict:
     }
 
 
+def context_and_agg_trades_provenance(symbol_reports: list[dict]) -> dict:
+    """Per-archive aggTrades provenance (symbol -> date) plus context dates.
+
+    Totals are derived from the per-archive records. Context lookback dates
+    are archives loaded only to complete causal windows of decisions near
+    the evaluation window start; they do not extend the evaluation window."""
+    archives = []
+    seen: set[tuple[str, str]] = set()
+    context = {}
+    missing = {}
+    for report in symbol_reports:
+        symbol = str(report.get("symbol", ""))
+        context[symbol] = list(report.get("context_lookback_dates") or [])
+        missing[symbol] = sorted(set(report.get("agg_trade_missing_dates") or []))
+        for record in report.get("agg_trades_archive_provenance") or ():
+            key = (str(record.get("symbol", "")), str(record.get("source_date", "")))
+            if not all(key):
+                raise RuntimeError("aggTrades provenance record without symbol/date")
+            if key in seen:
+                raise RuntimeError(f"duplicate aggTrades archive provenance {key}")
+            seen.add(key)
+            archives.append({k: record.get(k) for k in (
+                "symbol", "source_date", "source", "archive_sha256", "raw_rows",
+                "retained_rows", "first_ts", "last_ts", "aggregate_id_gap_events",
+                "underlying_id_gap_events", "missing_aggregate_ids",
+                "missing_underlying_ids", "interpolation_applied", "cache")})
+    archives.sort(key=lambda item: (item["symbol"], item["source_date"]))
+    return {
+        "agg_trades_archives": archives,
+        "agg_trades_archives_loaded": len(archives),
+        "agg_trades_raw_rows": sum(int(a.get("raw_rows") or 0) for a in archives),
+        "agg_trades_retained_rows": sum(int(a.get("retained_rows") or 0) for a in archives),
+        "agg_trades_missing_archives": {k: v for k, v in sorted(missing.items()) if v},
+        "context_lookback_dates": {k: v for k, v in sorted(context.items())},
+        "context_lookback_policy": "CAUSAL_WINDOW_CLOSURE_CONTEXT_ONLY",
+    }
+
+
 def build_opportunity_ranking_report(symbol_reports: list[dict]) -> dict:
     """Canonical SHADOW ranking evidence with legacy wrapper error contract."""
     try:
@@ -375,6 +413,8 @@ async def run(
         "opportunity_ranking": opportunity_ranking,
         "microstructure_review": microstructure_review,
         "metrics_parse_provenance": metrics_parse_provenance(reports),
+        "context_and_agg_trades_provenance": context_and_agg_trades_provenance(reports),
+        "evaluation_window": {"start_month": start_month, "end_month": end_month},
         "manifest": manifest.canonical_dict(),
         "manifest_hash": manifest.fingerprint,
         "dataset_fingerprint": manifest.dataset_fingerprint,

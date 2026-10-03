@@ -15,7 +15,7 @@ import json
 import os
 import time
 from bisect import bisect_right
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -36,6 +36,7 @@ from bot.binance_research_data import (
     monthly_funding_url,
     monthly_kline_url,
     parse_agg_trades_archive,
+    parse_agg_trades_archive_filtered,
     parse_funding_archive,
     parse_kline_archive,
 )
@@ -365,6 +366,9 @@ async def load_verified_agg_trades(
         index = bisect.bisect_left(decisions, trade_ts)
         return index < len(decisions) and decisions[index] < trade_ts + int(window_ms)
 
+    def keep(trade_ts: int) -> bool:
+        return decisions is None or in_some_window(trade_ts)
+
     async def load_one(source_date: str):
         async with semaphore:
             url = daily_agg_trades_url(symbol, source_date)
@@ -378,22 +382,31 @@ async def load_verified_agg_trades(
                 if "HTTP 404" in str(exc):
                     return source_date, None, None, None
                 raise
-            rows = parse_agg_trades_archive(archive.payload)
-            gaps = dict(agg_trade_gap_diagnostics(rows))
+            # Streaming parse: every row validated and counted in the
+            # full-file gap diagnostics; only window rows become objects.
+            rows, diagnostics = parse_agg_trades_archive_filtered(
+                archive.payload, keep=keep
+            )
             artifact = ResearchArtifact(
                 source=url,
                 dataset="aggTrades",
                 symbol=str(symbol).upper(),
                 interval="tick",
                 sha256=archive.sha256,
-                rows=len(rows),
-                first_ts=rows[0].timestamp if rows else None,
-                last_ts=rows[-1].timestamp if rows else None,
+                rows=int(diagnostics["raw_rows"]),
+                first_ts=diagnostics["first_ts"],
+                last_ts=diagnostics["last_ts"],
             )
-            gaps["rows_in_archive"] = len(rows)
-            if decisions is not None:
-                rows = tuple(row for row in rows if in_some_window(int(row.timestamp)))
-            gaps["rows_retained_for_decision_windows"] = len(rows)
+            gaps = {
+                **diagnostics,
+                "symbol": str(symbol).upper(),
+                "source_date": source_date,
+                "source": url,
+                "archive_sha256": archive.sha256,
+                "rows_in_archive": int(diagnostics["raw_rows"]),
+                "rows_retained_for_decision_windows": len(rows),
+                "cache": False,
+            }
             return source_date, rows, artifact, gaps
 
     loaded = await asyncio.gather(
@@ -431,6 +444,65 @@ def _utc_date_from_ms(timestamp_ms: int) -> str:
         int(timestamp_ms) / 1000.0,
         tz=timezone.utc,
     ).date().isoformat()
+
+
+AGG_TRADES_WINDOW_MS = 5 * 60 * 1000          # AggTradeTimeline.pressure default
+BOOK_DEPTH_MAX_AGE_MS = 15 * 60 * 1000        # shadow_microstructure_context default
+
+
+def required_archive_dates(
+    decision_timestamps: Sequence[int],
+    lookback_ms: int,
+    *,
+    lower_inclusive: bool = False,
+) -> tuple[str, ...]:
+    """UTC dates of every daily archive touched by each causal window.
+
+    Window per decision d: (d - lookback, d] (``lower_inclusive=False``, the
+    aggTrades pressure window) or [d - lookback, d] (bookDepth max-age
+    window). Only dates the windows actually touch are returned — no blanket
+    "previous day". INV-CONTEXT-DATE-CLOSURE-001.
+    """
+    lookback = int(lookback_ms)
+    if lookback <= 0:
+        raise ValueError("lookback must be positive")
+    dates: set[str] = set()
+    for value in decision_timestamps:
+        decision = int(value)
+        lower = decision - lookback + (0 if lower_inclusive else 1)
+        day = datetime.fromtimestamp(lower / 1000.0, tz=timezone.utc).date()
+        end = datetime.fromtimestamp(decision / 1000.0, tz=timezone.utc).date()
+        while day <= end:
+            dates.add(day.isoformat())
+            day += timedelta(days=1)
+    return tuple(sorted(dates))
+
+
+def plan_context_archives(
+    decision_timestamps: Sequence[int],
+    months: Sequence[tuple[int, int]],
+    *,
+    include_agg_trades: bool,
+) -> dict:
+    """Archive dates needed by the causal feature windows (context closure).
+
+    Dates outside the evaluation months are CONTEXT ONLY (lookback for
+    decisions near the window start); they never extend the evaluation."""
+    decisions = [int(ts) for ts in decision_timestamps]
+    book_depth_dates = required_archive_dates(
+        decisions, BOOK_DEPTH_MAX_AGE_MS, lower_inclusive=True)
+    agg_trade_dates = (
+        required_archive_dates(decisions, AGG_TRADES_WINDOW_MS)
+        if include_agg_trades else ()
+    )
+    evaluation_dates = set(dates_for_months(months))
+    return {
+        "book_depth_dates": book_depth_dates,
+        "agg_trade_dates": agg_trade_dates,
+        "evaluation_dates": evaluation_dates,
+        "context_lookback_dates": tuple(sorted(
+            (set(book_depth_dates) | set(agg_trade_dates)) - evaluation_dates)),
+    }
 
 
 def derivatives_context_at(
@@ -927,17 +999,26 @@ async def replay_symbol(
         _utc_date_from_ms(item["timestamp"])
         for item in diagnostics
     }))
+    decision_ts_list = [int(item["timestamp"]) for item in diagnostics]
+    # INV-CONTEXT-DATE-CLOSURE-001: load every archive each causal window
+    # touches (a window crossing UTC midnight needs the previous day). Extra
+    # dates are CONTEXT ONLY; the evaluation window (months) is unchanged.
+    context_plan = plan_context_archives(
+        decision_ts_list, months, include_agg_trades=include_agg_trades)
+    book_depth_dates = context_plan["book_depth_dates"]
+    agg_trade_dates = context_plan["agg_trade_dates"]
+    evaluation_dates = context_plan["evaluation_dates"]
     book_depth_rows: list[BookDepthSnapshot] = []
     book_depth_artifacts: tuple[ResearchArtifact, ...] = ()
     book_depth_missing_dates: tuple[str, ...] = ()
-    if candidate_dates:
+    if book_depth_dates:
         (
             book_depth_rows,
             book_depth_artifacts,
             book_depth_missing_dates,
         ) = await load_verified_book_depth(
             symbol,
-            candidate_dates,
+            book_depth_dates,
             cache_dir=cache_dir,
         )
         artifacts = artifacts + book_depth_artifacts
@@ -946,7 +1027,7 @@ async def replay_symbol(
     agg_trade_artifacts: tuple[ResearchArtifact, ...] = ()
     agg_trade_missing_dates: tuple[str, ...] = ()
     agg_trade_gap_reports = {}
-    if include_agg_trades and candidate_dates:
+    if agg_trade_dates:
         (
             agg_trade_rows,
             agg_trade_artifacts,
@@ -954,9 +1035,10 @@ async def replay_symbol(
             agg_trade_gap_reports,
         ) = await load_verified_agg_trades(
             symbol,
-            candidate_dates,
+            agg_trade_dates,
             cache_dir=cache_dir,
-            decision_timestamps=[int(item["timestamp"]) for item in diagnostics],
+            decision_timestamps=decision_ts_list,
+            window_ms=AGG_TRADES_WINDOW_MS,
         )
         artifacts = artifacts + agg_trade_artifacts
 
@@ -970,7 +1052,19 @@ async def replay_symbol(
         ts = int(item["timestamp"])
         current_metrics, previous_metrics = metrics_timeline.asof(ts)
         depth_snapshot = depth_timeline.asof(ts)
-        agg_pressure = agg_timeline.pressure(ts)
+        agg_pressure = agg_timeline.pressure(ts, window_ms=AGG_TRADES_WINDOW_MS)
+        missing_context = sorted(
+            set(required_archive_dates([ts], AGG_TRADES_WINDOW_MS))
+            & set(agg_trade_missing_dates)
+        )
+        if missing_context:
+            # A partial window is missing context, never a zero/neutral value.
+            agg_pressure = {
+                "available": False,
+                "reason": "CONTEXT_ARCHIVE_MISSING",
+                "missing_archive_dates": missing_context,
+                "window_ms": AGG_TRADES_WINDOW_MS,
+            }
         agg_override = (
             agg_pressure.get("taker_pressure")
             if agg_pressure.get("available") is True
@@ -1023,6 +1117,13 @@ async def replay_symbol(
             "funding_events": len(funding),
             "metrics_rows": len(metric_rows),
             "book_depth_rows": len(book_depth_rows),
+            "evaluation_window": {
+                "first_date": min(evaluation_dates) if evaluation_dates else None,
+                "last_date": max(evaluation_dates) if evaluation_dates else None,
+            },
+            "context_lookback_dates": list(context_plan["context_lookback_dates"]),
+            "book_depth_context_dates": list(book_depth_dates),
+            "agg_trade_context_dates": list(agg_trade_dates),
             "book_depth_candidate_dates": len(candidate_dates),
             "book_depth_missing_dates": list(book_depth_missing_dates),
             "agg_trade_rows": len(agg_trade_rows),
@@ -1035,6 +1136,12 @@ async def replay_symbol(
             ),
             "agg_trade_missing_dates": list(agg_trade_missing_dates),
             "agg_trade_gap_reports": agg_trade_gap_reports,
+            "agg_trades_archive_provenance": [
+                agg_trade_gap_reports[day] for day in sorted(agg_trade_gap_reports)
+            ],
+            "agg_trade_raw_rows": sum(
+                int(item.get("raw_rows", 0)) for item in agg_trade_gap_reports.values()),
+            "agg_trade_retained_rows": len(agg_trade_rows),
             "agg_trade_pressure_available": agg_pressure_available,
             "shadow_microstructure_available": micro_available,
             "shadow_microstructure_missing": micro_missing,

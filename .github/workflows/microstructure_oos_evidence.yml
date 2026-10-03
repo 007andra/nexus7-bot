@@ -65,7 +65,7 @@ jobs:
 
       - name: Research integrity tests
         run: |
-          python -m unittest -v tests.test_binance_research_data tests.test_binance_historical_context tests.test_binance_oos_replay tests.test_binance_oos_evidence_bundle tests.test_microstructure_shadow tests.test_microstructure_oos tests.test_microstructure_oos_evidence tests.test_research_statistics tests.test_opportunity_ranker tests.test_research_observation_identity
+          python -m unittest -v tests.test_binance_research_data tests.test_binance_historical_context tests.test_binance_oos_replay tests.test_binance_oos_evidence_bundle tests.test_microstructure_shadow tests.test_microstructure_oos tests.test_microstructure_oos_evidence tests.test_research_statistics tests.test_opportunity_ranker tests.test_research_observation_identity tests.test_binance_context_closure
 
       - name: Restore Binance public-data cache
         uses: actions/cache@v4
@@ -122,7 +122,9 @@ jobs:
               "methodology": methodology,
               "opportunity_ranking": ranking,
               "microstructure_review": payload.get("microstructure_review"),
-              "metrics_parse_provenance": payload.get("metrics_parse_provenance"),
+              "metrics_parse_provenance": {k: v for k, v in (payload.get("metrics_parse_provenance") or {}).items() if k != "archives"},
+              "evaluation_window": payload.get("evaluation_window"),
+              "context_and_agg_trades_provenance": {k: v for k, v in (payload.get("context_and_agg_trades_provenance") or {}).items() if k != "agg_trades_archives"},
           }, indent=2, sort_keys=True, default=str))
           PY
 

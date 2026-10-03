@@ -297,6 +297,116 @@ def parse_agg_trades_archive(payload: bytes) -> tuple[AggTradeObservation, ...]:
     return tuple(out)
 
 
+def parse_agg_trades_archive_filtered(
+    payload: bytes,
+    *,
+    keep,
+) -> tuple[tuple[AggTradeObservation, ...], dict]:
+    """Streaming aggTrades parser for large historical archives.
+
+    The (already checksum-verified) ZIP's single CSV is read row by row through
+    ``io.TextIOWrapper``; the full CSV is never materialized. EVERY row is
+    validated exactly like :func:`parse_agg_trades_archive` (schema, ranges,
+    monotonic aggregate ids/timestamps) and contributes to the full-file gap
+    diagnostics (O(1) state), but an ``AggTradeObservation`` is built only when
+    ``keep(timestamp_ms)`` is true. Returns (retained rows, diagnostics) where
+    diagnostics equal ``agg_trade_gap_diagnostics`` of the full parse plus
+    raw/retained counts and first/last timestamps (INV-STREAM-PARITY-001).
+    """
+    if not payload:
+        raise ValueError("empty Binance archive")
+    retained: list[AggTradeObservation] = []
+    raw_rows = 0
+    previous_agg_id = -1
+    previous_ts = -1
+    previous_last_trade_id: int | None = None
+    aggregate_id_gaps = underlying_id_gaps = 0
+    missing_aggregate_ids = missing_underlying_ids = 0
+    first_ts = last_ts = None
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            if len(names) != 1:
+                raise ValueError("archive must contain exactly one CSV")
+            with zf.open(names[0]) as raw_stream, io.TextIOWrapper(
+                raw_stream, encoding="utf-8-sig", newline=""
+            ) as text_stream:
+                first_row = True
+                for row in csv.reader(text_stream):
+                    if not row:
+                        continue
+                    if first_row:
+                        first_row = False
+                        if _looks_header(row):
+                            continue
+                    if len(row) < 7:
+                        raise ValueError("short Binance aggTrades row")
+                    maker_raw = str(row[6]).strip().lower()
+                    if maker_raw not in {"true", "false"}:
+                        raise ValueError("invalid Binance aggTrades maker flag")
+                    agg_id = int(float(row[0]))
+                    price = float(row[1])
+                    quantity = float(row[2])
+                    first_trade_id = int(float(row[3]))
+                    last_trade_id = int(float(row[4]))
+                    ts = int(float(row[5]))
+                    if agg_id < 0:
+                        raise ValueError("invalid aggregate trade id")
+                    if first_trade_id < 0 or last_trade_id < first_trade_id:
+                        raise ValueError("invalid underlying trade id range")
+                    if ts <= 0:
+                        raise ValueError("invalid aggregate trade timestamp")
+                    if not math.isfinite(price) or price <= 0:
+                        raise ValueError("invalid aggregate trade price")
+                    if not math.isfinite(quantity) or quantity < 0:
+                        raise ValueError("invalid aggregate trade quantity")
+                    if agg_id <= previous_agg_id:
+                        raise ValueError("non-monotonic or duplicate aggregate trade id")
+                    if ts < previous_ts:
+                        raise ValueError("non-monotonic aggregate trade timestamp")
+                    if previous_last_trade_id is not None:
+                        agg_gap = agg_id - previous_agg_id - 1
+                        if agg_gap > 0:
+                            aggregate_id_gaps += 1
+                            missing_aggregate_ids += agg_gap
+                        trade_gap = first_trade_id - previous_last_trade_id - 1
+                        if trade_gap > 0:
+                            underlying_id_gaps += 1
+                            missing_underlying_ids += trade_gap
+                    previous_agg_id = agg_id
+                    previous_ts = ts
+                    previous_last_trade_id = last_trade_id
+                    raw_rows += 1
+                    if first_ts is None:
+                        first_ts = ts
+                    last_ts = ts
+                    if keep(ts):
+                        retained.append(AggTradeObservation(
+                            aggregate_trade_id=agg_id,
+                            price=price,
+                            quantity=quantity,
+                            first_trade_id=first_trade_id,
+                            last_trade_id=last_trade_id,
+                            timestamp=ts,
+                            buyer_is_maker=maker_raw == "true",
+                        ))
+    except (zipfile.BadZipFile, UnicodeDecodeError, KeyError, csv.Error) as exc:
+        raise ValueError("invalid Binance archive") from exc
+    diagnostics = {
+        "rows": raw_rows,
+        "aggregate_id_gap_events": aggregate_id_gaps,
+        "underlying_id_gap_events": underlying_id_gaps,
+        "missing_aggregate_ids": missing_aggregate_ids,
+        "missing_underlying_ids": missing_underlying_ids,
+        "interpolation_applied": False,
+        "raw_rows": raw_rows,
+        "retained_rows": len(retained),
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+    }
+    return tuple(retained), diagnostics
+
+
 def agg_trade_gap_diagnostics(
     rows: tuple[AggTradeObservation, ...] | list[AggTradeObservation],
 ) -> dict:

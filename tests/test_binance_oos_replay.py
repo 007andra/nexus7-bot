@@ -18,6 +18,22 @@ from bot.binance_oos_replay import (
 from bot.binance_research_data import AggTradeObservation, FundingObservation
 
 
+
+def _filtered_fake(full_parse):
+    """Fake of parse_agg_trades_archive_filtered built on a full-parse fake:
+    keeps rows by the loader's predicate, diagnostics over ALL rows."""
+    from bot.binance_research_data import agg_trade_gap_diagnostics
+
+    def fake(payload, *, keep):
+        rows = tuple(full_parse(payload))
+        diag = dict(agg_trade_gap_diagnostics(rows))
+        retained = tuple(r for r in rows if keep(int(r.timestamp)))
+        diag.update(raw_rows=len(rows), retained_rows=len(retained),
+                    first_ts=rows[0].timestamp if rows else None,
+                    last_ts=rows[-1].timestamp if rows else None)
+        return retained, diag
+    return fake
+
 class BinanceOOSReplayTests(unittest.TestCase):
     def test_month_range_is_inclusive_across_year_boundary(self):
         self.assertEqual(
@@ -243,8 +259,8 @@ class BinanceOOSReplayTests(unittest.TestCase):
             "bot.binance_oos_replay.download_archive_verified",
             side_effect=fake_download,
         ), patch(
-            "bot.binance_oos_replay.parse_agg_trades_archive",
-            side_effect=fake_parse,
+            "bot.binance_oos_replay.parse_agg_trades_archive_filtered",
+            side_effect=_filtered_fake(fake_parse),
         ):
             rows, artifacts, missing, gaps = asyncio.run(
                 load_verified_agg_trades(
@@ -363,8 +379,8 @@ class AggTradesWindowEquivalenceTests(unittest.TestCase):
             return SimpleNamespace(payload=day.encode(), sha256="c" * 64)
 
         with patch("bot.binance_oos_replay.download_archive_verified", side_effect=fake_download), \
-                patch("bot.binance_oos_replay.parse_agg_trades_archive",
-                      side_effect=lambda payload: trades_by_day[payload.decode()]):
+                patch("bot.binance_oos_replay.parse_agg_trades_archive_filtered",
+                      side_effect=_filtered_fake(lambda payload: trades_by_day[payload.decode()])):
             filtered, _, _, gaps = asyncio.run(load_verified_agg_trades(
                 "BTCUSDT", ("2026-01-01", "2026-01-02"), decision_timestamps=decisions))
             full, _, _, _ = asyncio.run(load_verified_agg_trades(
