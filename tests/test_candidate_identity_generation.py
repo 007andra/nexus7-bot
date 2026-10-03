@@ -121,6 +121,21 @@ class CandidateIdentityGenerationTests(_Harness):
         self.assertEqual(old.client_oid, first)
         self.assertNotIn("ETHUSDT", self.engine.positions, "no position adopted for trade B")
 
+    async def test_G_observation_identity_never_reaches_dispatch(self):
+        # INV-FINANCIAL-INTENT-ID-001: sabotaging the research observation id
+        # must leave the LIVE dispatch (clientOid, qty, single POST) identical.
+        from unittest.mock import patch as _patch
+        await self.engine._open(self._signal())
+        control = (self.oids()[0], self.dispatch_qty)
+        self.engine.orders.get(control[0]).state = OrderState.SUBMITTED
+        self._reset_after_close()
+
+        def boom(*a, **k):
+            raise AssertionError("research observation id used by LIVE path")
+        with _patch("bot.research_observation_identity.build_observation_id", boom):
+            await self.engine._open(self._signal())
+        self.assertEqual((self.oids()[-1], self.dispatch_qty), control)
+
 
 for _name in [n for n in dir(_Harness) if n.startswith("test_")]:
     if _name not in CandidateIdentityGenerationTests.__dict__:

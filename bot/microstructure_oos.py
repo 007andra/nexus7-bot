@@ -14,7 +14,11 @@ from bot.microstructure_oos_evidence import (
     evaluate_microstructure_ranking,
     microstructure_review_gate,
 )
-from bot.opportunity_ranker import Opportunity, evaluate_ranked_outcomes
+from bot.opportunity_ranker import (
+    Opportunity,
+    evaluate_ranked_outcomes,
+    realized_by_observation,
+)
 
 
 def strip_microstructure(item: Opportunity) -> Opportunity:
@@ -37,9 +41,10 @@ def compare_rankers_oos(
     `evaluate_microstructure_ranking`, which adds paired batches, bootstrap
     confidence intervals, temporal folds and the fail-closed review gate.
     """
-    ids = [item.candidate_id for item in items]
+    ids = [item.observation_id for item in items]
     if len(ids) != len(set(ids)):
-        raise ValueError("duplicate candidate id")
+        raise ValueError("duplicate research observation id")
+    realized_r = realized_by_observation(items, realized_r)
     complete = [
         item for item in items
         if item.microstructure_alignment is not None
@@ -48,8 +53,8 @@ def compare_rankers_oos(
     ]
     observed = [
         item for item in complete
-        if item.candidate_id in realized_r
-        and math.isfinite(float(realized_r[item.candidate_id]))
+        if item.observation_id in realized_r
+        and math.isfinite(float(realized_r[item.observation_id]))
     ]
     base = evaluate_ranked_outcomes(
         [strip_microstructure(item) for item in observed],

@@ -190,6 +190,49 @@ def bootstrap_mean_ci(
     }
 
 
+def block_bootstrap_mean_ci(
+    values,
+    *,
+    block_length: int | None = None,
+    confidence: float = 0.95,
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> dict:
+    """Circular block bootstrap CI of the mean for a TIME-ORDERED series.
+
+    Resamples contiguous blocks (wrapping around) so serial dependence between
+    neighbouring observations is preserved; IID resampling understates the
+    variance of autocorrelated series. Default block length: ceil(n ** (1/3)).
+    """
+    arr = _returns(values)
+    n = int(arr.size)
+    if not n:
+        return {"mean": 0.0, "low": 0.0, "high": 0.0, "n": 0, "block_length": 0,
+                "method": "CIRCULAR_BLOCK"}
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be in (0, 1)")
+    if n_bootstrap <= 0:
+        raise ValueError("n_bootstrap must be positive")
+    length = int(block_length) if block_length else int(np.ceil(n ** (1.0 / 3.0)))
+    length = max(1, min(length, n))
+    blocks = int(np.ceil(n / length))
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, n, size=(int(n_bootstrap), blocks))
+    offsets = np.arange(length)
+    idx = (starts[:, :, None] + offsets[None, None, :]) % n
+    samples = arr[idx.reshape(int(n_bootstrap), -1)[:, :n]]
+    means = np.mean(samples, axis=1)
+    tail = (1.0 - confidence) / 2.0
+    return {
+        "mean": float(np.mean(arr)),
+        "low": float(np.quantile(means, tail)),
+        "high": float(np.quantile(means, 1.0 - tail)),
+        "n": n,
+        "block_length": length,
+        "method": "CIRCULAR_BLOCK",
+    }
+
+
 @dataclass(frozen=True)
 class MonteCarloSummary:
     paths: int

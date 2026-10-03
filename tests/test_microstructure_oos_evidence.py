@@ -193,11 +193,21 @@ class MicrostructureOOSEvidenceTests(unittest.TestCase):
         self.assertEqual(result["depth_complete_batches"], 0)
         self.assertEqual(result["cross_sections"], 4)
 
-    def test_duplicate_candidate_id_fails_closed(self):
+    def test_duplicate_observation_fails_closed(self):
+        # INV-RESEARCH-OBS-ID-001: the same event (setup, ts, symbol, side)
+        # twice is a duplicate observation and fails closed.
+        reports = _reports()
+        reports[0]["candidate_diagnostics"].append(
+            dict(reports[0]["candidate_diagnostics"][0]))
+        with self.assertRaisesRegex(ValueError, "duplicate research observation_id"):
+            evaluate_microstructure_ranking(reports)
+
+    def test_repeated_setup_id_on_distinct_observation_is_not_a_duplicate(self):
+        # INV-SETUP-ID-001: a setup id may repeat on a distinct observation.
         reports = _reports()
         reports[1]["candidate_diagnostics"][0]["candidate_id"] = "btc-0"
-        with self.assertRaisesRegex(ValueError, "duplicate candidate_id"):
-            evaluate_microstructure_ranking(reports)
+        report = evaluate_microstructure_ranking(reports)
+        self.assertEqual(report["comparable_candidates"], 8)
 
     def test_any_execution_or_score_authority_in_microstructure_fails(self):
         reports = _reports()

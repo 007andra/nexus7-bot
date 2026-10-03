@@ -258,7 +258,7 @@ def build_opportunity_ranking_report(symbol_reports: list[dict]) -> dict:
     try:
         return evaluate_microstructure_ranking(symbol_reports)
     except ValueError as exc:
-        if "duplicate candidate_id" in str(exc):
+        if "duplicate research observation_id" in str(exc):
             raise RuntimeError(str(exc)) from exc
         raise
 

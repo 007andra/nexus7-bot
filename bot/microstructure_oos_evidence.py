@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from dataclasses import replace
 from typing import Mapping, Sequence
 
 from bot.opportunity_ranker import (
@@ -17,7 +18,11 @@ from bot.opportunity_ranker import (
     evaluate_ranked_outcomes,
     rank_opportunities,
 )
-from bot.research_statistics import bootstrap_mean_ci
+from bot.research_statistics import (
+    block_bootstrap_mean_ci,
+    bootstrap_mean_ci,
+    effective_sample_size_lag1,
+)
 
 
 def _finite(value: object, *, name: str) -> float:
@@ -72,6 +77,7 @@ def base_opportunity(symbol: str, row: Mapping[str, object]) -> Opportunity:
         ),
         decision_ts=int(row.get("timestamp", 0) or 0),
         side=str(row.get("direction", "UNKNOWN") or "UNKNOWN").upper(),
+        observation_id=str(row.get("observation_id", "") or ""),
         confidence=max(
             0.0,
             min(
@@ -106,18 +112,8 @@ def enriched_opportunity(
         return None
 
     depth = row.get("depth_notional_1pct")
-    return Opportunity(
-        candidate_id=base.candidate_id,
-        symbol=base.symbol,
-        expected_value=base.expected_value,
-        net_rr=base.net_rr,
-        setup_score=base.setup_score,
-        liquidity_score=base.liquidity_score,
-        regime_confidence=base.regime_confidence,
-        round_trip_cost=base.round_trip_cost,
-        decision_ts=base.decision_ts,
-        side=base.side,
-        confidence=base.confidence,
+    return replace(
+        base,
         microstructure_alignment=(
             max(-1.0, min(1.0, _finite(alignment, name="alignment")))
             if alignment is not None else None
@@ -180,7 +176,7 @@ def evaluate_microstructure_ranking(
     micro_available = 0
     micro_quarantined = 0
     agg_trades_pressure_candidates = 0
-    seen_candidates: set[str] = set()
+    seen_observations: set[str] = set()
 
     for report in symbol_reports:
         symbol = str(report.get("symbol", "") or "").upper()
@@ -209,9 +205,15 @@ def evaluate_microstructure_ranking(
             ):
                 agg_trades_pressure_candidates += 1
             base = base_opportunity(symbol, row)
-            if base.candidate_id in seen_candidates:
-                raise ValueError("duplicate candidate_id in microstructure evidence")
-            seen_candidates.add(base.candidate_id)
+            # INV-RESEARCH-OBS-ID-001: a setup id may repeat across timestamps;
+            # only a repeated observation (same setup, ts, symbol, side) is a
+            # duplicate, and it fails closed instead of overwriting.
+            if base.observation_id in seen_observations:
+                raise ValueError(
+                    "duplicate research observation_id in microstructure evidence: "
+                    f"{base.observation_id}"
+                )
+            seen_observations.add(base.observation_id)
             realized = _finite(row.get("r_multiple"), name="r_multiple")
             regime = str(
                 row.get("nexus_market_regime", "UNKNOWN") or "UNKNOWN"
@@ -235,7 +237,13 @@ def evaluate_microstructure_ranking(
             continue
         bases = [row[0] for row in rows]
         enriched = [row[1] for row in rows]
-        realized = {row[0].candidate_id: row[2] for row in rows}
+        # Population parity: both rankings see exactly the same observations
+        # (same timestamp, same candidates, same outcomes); the only difference
+        # is the causally available microstructure. Missing/quarantined
+        # microstructure excludes the observation from BOTH, never imputes.
+        if [b.observation_id for b in bases] != [e.observation_id for e in enriched]:
+            raise ValueError("base/enriched population mismatch")
+        realized = {row[0].observation_id: row[2] for row in rows}
 
         depth_complete = all(
             item.depth_notional_1pct is not None for item in enriched
@@ -246,8 +254,8 @@ def evaluate_microstructure_ranking(
 
         base_ranked = rank_opportunities(bases)
         enriched_ranked = rank_opportunities(enriched)
-        base_top = base_ranked[0][0].candidate_id
-        enriched_top = enriched_ranked[0][0].candidate_id
+        base_top = base_ranked[0][0].observation_id
+        enriched_top = enriched_ranked[0][0].observation_id
         base_top_r = realized[base_top]
         enriched_top_r = realized[enriched_top]
         delta = enriched_top_r - base_top_r
@@ -270,10 +278,10 @@ def evaluate_microstructure_ranking(
         changed += int(base_top != enriched_top)
         comparable_candidates += len(rows)
         enriched_by_id = {
-            item.candidate_id: item for item in enriched
+            item.observation_id: item for item in enriched
         }
         regime_by_id = {
-            row[0].candidate_id: row[3] for row in rows
+            row[0].observation_id: row[3] for row in rows
         }
         enriched_top_item = enriched_by_id[enriched_top]
 
@@ -285,9 +293,11 @@ def evaluate_microstructure_ranking(
             "enriched_top_regime": regime_by_id.get(
                 enriched_top, "UNKNOWN"
             ),
-            "base_top_candidate_id": base_top,
-            "enriched_top_candidate_id": enriched_top,
-            "top_candidate_id": enriched_top,
+            "base_top_observation_id": base_top,
+            "enriched_top_observation_id": enriched_top,
+            "base_top_candidate_id": base_ranked[0][0].candidate_id,
+            "enriched_top_candidate_id": enriched_top_item.candidate_id,
+            "top_candidate_id": enriched_top_item.candidate_id,
             "top_pick_changed": base_top != enriched_top,
             "base_top_r": base_top_r,
             "enriched_top_r": enriched_top_r,
@@ -298,7 +308,22 @@ def evaluate_microstructure_ranking(
             "depth_cross_section_complete": depth_complete,
         })
 
+    # Each delta is one decision timestamp (the cross-sectional cluster is
+    # collapsed into one paired value); deltas are time-ordered, so the
+    # authoritative CI is a circular block bootstrap over time. The IID CI is
+    # reported for transparency only and is not used by the review gate.
     ci = (
+        block_bootstrap_mean_ci(
+            top_pick_deltas,
+            confidence=0.95,
+            n_bootstrap=bootstrap_samples,
+            seed=seed,
+        )
+        if top_pick_deltas else
+        {"mean": 0.0, "low": 0.0, "high": 0.0, "n": 0, "block_length": 0,
+         "method": "CIRCULAR_BLOCK"}
+    )
+    ci_iid = (
         bootstrap_mean_ci(
             top_pick_deltas,
             confidence=0.95,
@@ -307,6 +332,10 @@ def evaluate_microstructure_ranking(
         )
         if top_pick_deltas else
         {"mean": 0.0, "low": 0.0, "high": 0.0, "n": 0}
+    )
+    effective_n = (
+        float(effective_sample_size_lag1(top_pick_deltas))
+        if len(top_pick_deltas) >= 3 else float(len(top_pick_deltas))
     )
     fold_uplift = _fold_means(top_pick_deltas, folds=temporal_folds)
     base_mean = (
@@ -330,9 +359,9 @@ def evaluate_microstructure_ranking(
         if all(item.depth_notional_1pct is not None for item in enriched_items):
             enriched_items = apply_cross_sectional_liquidity(enriched_items)
         ranked = rank_opportunities(enriched_items)
-        realized = {row[0].candidate_id: row[2] for row in entries}
+        realized = {row[0].observation_id: row[2] for row in entries}
         rest_returns.extend(
-            float(realized[item.candidate_id])
+            float(realized[item.observation_id])
             for item, _score in ranked[1:]
         )
     rest_mean = (
@@ -400,6 +429,9 @@ def evaluate_microstructure_ranking(
             else None
         ),
         "top_pick_uplift_ci95": ci,
+        "top_pick_uplift_ci95_iid": ci_iid,
+        "bootstrap_method": "CIRCULAR_BLOCK_OVER_TIME_ORDERED_TIMESTAMP_CLUSTERS",
+        "effective_sample_size": effective_n,
         "mean_rank_spearman_delta": spearman_delta_mean,
         "temporal_fold_uplift_r": fold_uplift,
         "temporal_folds_evaluated": len(fold_uplift),
@@ -412,6 +444,8 @@ def evaluate_microstructure_ranking(
         "positive_uplift_regimes": positive_regimes,
         "batches": batch_rows,
         "details": batch_rows,
+        "population_parity_verified": True,
+        "missing_microstructure_policy": "EXCLUDED_FROM_BOTH_RANKERS_NOT_IMPUTED",
         "outcome_used_in_rank": False,
         "execution_effect": "NONE",
         "nexus_score_effect": "NONE",

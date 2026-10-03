@@ -49,6 +49,7 @@ from bot.binance_historical_context import (
     shadow_microstructure_context,
 )
 from bot.candidate_trace import ensure_candidate_id
+from bot.research_observation_identity import build_observation_id
 from bot.config import cfg
 from bot.execution_cost import static_slippage_rate
 from bot.nexus_oos_edge_gate import (
@@ -842,6 +843,9 @@ async def replay_symbol(
         ).validate())
         diagnostics.append({
             "candidate_id": candidate_id,
+            "observation_id": build_observation_id(
+                candidate_id, int(decision_ts), symbol, direction
+            ),
             "timestamp": decision_ts,
             "direction": direction,
             "signal_score": float(getattr(sig, "score", 0.0) or 0.0),

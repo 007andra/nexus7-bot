@@ -74,7 +74,8 @@ class MicrostructureOOSTests(unittest.TestCase):
             microstructure_alignment=0.2, taker_pressure=0.1,
             depth_notional_1pct=1000,
         )
-        with self.assertRaisesRegex(ValueError, "duplicate candidate"):
+        # The same event twice is a true duplicate observation: fail closed.
+        with self.assertRaisesRegex(ValueError, "duplicate research observation"):
             compare_rankers_oos([item, item], {"a": 1.0})
 
 

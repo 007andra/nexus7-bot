@@ -177,11 +177,20 @@ class BinanceOOSEvidenceBundleTests(unittest.TestCase):
             second["top1_uplift_r"],
         )
 
-    def test_duplicate_candidate_id_fails_closed(self):
+    def test_duplicate_observation_fails_closed(self):
+        # The check guards duplicate research OBSERVATIONS (same setup, ts,
+        # symbol, side), not repeated setup ids (INV-RESEARCH-OBS-ID-001).
+        reports = _ranking_reports()
+        reports[0]["candidate_diagnostics"].append(
+            dict(reports[0]["candidate_diagnostics"][0]))
+        with self.assertRaisesRegex(RuntimeError, "duplicate research observation_id"):
+            build_opportunity_ranking_report(reports)
+
+    def test_repeated_setup_id_is_not_a_duplicate_observation(self):
         reports = _ranking_reports()
         reports[1]["candidate_diagnostics"][0]["candidate_id"] = "btc-a"
-        with self.assertRaises(RuntimeError):
-            build_opportunity_ranking_report(reports)
+        report = build_opportunity_ranking_report(reports)
+        self.assertEqual(report["status"], "EVIDENCE_AVAILABLE")
 
     def test_incomplete_context_cannot_claim_edge_proven(self):
         reports = _reports()

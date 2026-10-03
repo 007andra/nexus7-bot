@@ -2,12 +2,19 @@
 
 All ranking inputs must exist before trade entry. Realized outcomes are accepted
 only by the separate evaluation helpers and never feed the rank score.
+
+Identity (INV-RESEARCH-OBS-ID-001): ``candidate_id`` is the setup identity and
+may repeat for equivalent setups; every map, tie-break and outcome lookup in
+this module is keyed by ``observation_id`` (setup + decision timestamp +
+symbol + side), so distinct observations never overwrite each other.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
+
+from bot.research_observation_identity import build_observation_id
 
 
 @dataclass(frozen=True)
@@ -26,10 +33,14 @@ class Opportunity:
     microstructure_alignment: float | None = None
     taker_pressure: float | None = None
     depth_notional_1pct: float | None = None
+    observation_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.candidate_id or not self.symbol:
             raise ValueError("candidate identity required")
+        if not self.observation_id:
+            object.__setattr__(self, "observation_id", build_observation_id(
+                self.candidate_id, int(self.decision_ts), self.symbol, self.side))
         for name in (
             "setup_score", "liquidity_score", "regime_confidence", "confidence"
         ):
@@ -96,18 +107,8 @@ def with_microstructure(item: Opportunity, snapshot) -> Opportunity:
     if bool(getattr(snapshot, "promotion_authority", False)):
         raise ValueError("microstructure snapshot cannot promote")
 
-    return Opportunity(
-        candidate_id=item.candidate_id,
-        symbol=item.symbol,
-        expected_value=item.expected_value,
-        net_rr=item.net_rr,
-        setup_score=item.setup_score,
-        liquidity_score=item.liquidity_score,
-        regime_confidence=item.regime_confidence,
-        round_trip_cost=item.round_trip_cost,
-        decision_ts=item.decision_ts,
-        side=item.side,
-        confidence=item.confidence,
+    return replace(
+        item,
         microstructure_alignment=float(snapshot.microstructure_alignment),
         taker_pressure=float(snapshot.taker_pressure),
         depth_notional_1pct=float(snapshot.depth_notional_100bps),
@@ -118,8 +119,47 @@ def rank_opportunities(items: Sequence[Opportunity]) -> list[tuple[Opportunity, 
     ranked = [(item, rank_score(item)) for item in items]
     return sorted(
         ranked,
-        key=lambda pair: (-pair[1], pair[0].candidate_id),
+        key=lambda pair: (-pair[1], pair[0].candidate_id, pair[0].observation_id),
     )
+
+
+def realized_by_observation(
+    items: Sequence[Opportunity],
+    realized_r: Mapping[str, float],
+) -> dict[str, float]:
+    """Resolve outcomes per observation.
+
+    Outcomes keyed by ``observation_id`` are authoritative. A legacy mapping
+    keyed by setup id is accepted only when that setup id is unique among the
+    items; an ambiguous setup key fails closed instead of copying one
+    observation's outcome onto another."""
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.candidate_id] = counts.get(item.candidate_id, 0) + 1
+    out: dict[str, float] = {}
+    for item in items:
+        if item.observation_id in realized_r:
+            out[item.observation_id] = realized_r[item.observation_id]
+        elif item.candidate_id in realized_r:
+            if counts[item.candidate_id] > 1:
+                raise ValueError(
+                    f"ambiguous setup-keyed realized_r for {item.candidate_id}: "
+                    "key outcomes by observation_id"
+                )
+            out[item.observation_id] = realized_r[item.candidate_id]
+    return out
+
+
+def assert_unique_observations(items: Sequence[Opportunity]) -> None:
+    """Fail closed on a duplicated observation; never overwrite silently."""
+    seen: set[str] = set()
+    for item in items:
+        if item.observation_id in seen:
+            raise ValueError(
+                f"duplicate research observation_id {item.observation_id} "
+                f"(setup {item.candidate_id}, ts {item.decision_ts})"
+            )
+        seen.add(item.observation_id)
 
 
 def _percentile_scores(values: Mapping[str, float]) -> dict[str, float]:
@@ -139,8 +179,9 @@ def apply_cross_sectional_liquidity(
     items: Sequence[Opportunity],
 ) -> list[Opportunity]:
     """Replace liquidity score with same-timestamp depth percentiles when present."""
+    assert_unique_observations(items)
     raw = {
-        item.candidate_id: float(item.depth_notional_1pct)
+        item.observation_id: float(item.depth_notional_1pct)
         for item in items
         if item.depth_notional_1pct is not None
     }
@@ -148,24 +189,8 @@ def apply_cross_sectional_liquidity(
     if not percentiles:
         return list(items)
     return [
-        Opportunity(
-            candidate_id=item.candidate_id,
-            symbol=item.symbol,
-            expected_value=item.expected_value,
-            net_rr=item.net_rr,
-            setup_score=item.setup_score,
-            liquidity_score=percentiles.get(
-                item.candidate_id, item.liquidity_score
-            ),
-            regime_confidence=item.regime_confidence,
-            round_trip_cost=item.round_trip_cost,
-            decision_ts=item.decision_ts,
-            side=item.side,
-            confidence=item.confidence,
-            microstructure_alignment=item.microstructure_alignment,
-            taker_pressure=item.taker_pressure,
-            depth_notional_1pct=item.depth_notional_1pct,
-        )
+        replace(item, liquidity_score=percentiles.get(
+            item.observation_id, item.liquidity_score))
         for item in items
     ]
 
@@ -174,7 +199,9 @@ def evaluate_ranked_outcomes(
     items: Sequence[Opportunity],
     realized_r: Mapping[str, float],
 ) -> dict:
-    """Evaluate ranking quality after outcomes exist; realized R never affects rank."""
+    """Evaluate ranking quality after outcomes exist; realized R never affects rank.
+
+    ``realized_r`` is keyed by ``observation_id`` (never by the setup id)."""
     if not items:
         return {
             "n": 0,
@@ -184,12 +211,14 @@ def evaluate_ranked_outcomes(
             "rank_outcome_spearman": None,
             "execution_effect": "NONE",
         }
+    assert_unique_observations(items)
+    realized_r = realized_by_observation(items, realized_r)
     ranked = rank_opportunities(items)
     observed = [
-        (item, score, float(realized_r[item.candidate_id]))
+        (item, score, float(realized_r[item.observation_id]))
         for item, score in ranked
-        if item.candidate_id in realized_r
-        and math.isfinite(float(realized_r[item.candidate_id]))
+        if item.observation_id in realized_r
+        and math.isfinite(float(realized_r[item.observation_id]))
     ]
     if len(observed) < 2:
         return {
@@ -207,19 +236,19 @@ def evaluate_ranked_outcomes(
     top_mean = sum(top) / len(top)
     bottom_mean = sum(bottom) / len(bottom) if bottom else None
 
-    # Spearman via deterministic average-free ranks; candidate_id breaks ties.
+    # Spearman via deterministic average-free ranks; ids break ties.
     by_outcome = sorted(
         observed,
-        key=lambda row: (row[2], row[0].candidate_id),
+        key=lambda row: (row[2], row[0].candidate_id, row[0].observation_id),
     )
     outcome_rank = {
-        row[0].candidate_id: index
+        row[0].observation_id: index
         for index, row in enumerate(by_outcome)
     }
     n = len(observed)
     rank_positions = list(range(n))
     outcome_positions = [
-        outcome_rank[row[0].candidate_id]
+        outcome_rank[row[0].observation_id]
         for row in observed
     ]
     mean_rank = (n - 1) / 2.0
