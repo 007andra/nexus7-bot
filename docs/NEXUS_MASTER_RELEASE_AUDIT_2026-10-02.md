@@ -1,7 +1,9 @@
 # NEXUS-7 — Master Release Audit (2026-10-02)
 
-Status: **ENGINEERING_RELEASE_READY = NO** — one P1 remains open (stale Binance
-protective algo orders after a close, see P1-OPEN-1). No merge, no deploy.
+Status: **ENGINEERING_RELEASE_READY = NO** — P1-OPEN-1 (stale Binance protective
+algo orders after a close) is fixed in code (see below); deploy remains blocked by
+P1-DEPLOY-1 (venue inventory of legacy, unmapped `bgx7-` algo orders must be read
+before the new fail-closed gate goes live). No merge, no deploy.
 
 ## 1. Source of truth (verified from the git DAG, not from summaries)
 
@@ -15,7 +17,7 @@ protective algo orders after a close, see P1-OPEN-1). No merge, no deploy.
 | PR #468 `research/model-h-recalibration-v2` | `fb862fb` | 32 ahead, contains #467 |
 | PR #469 `research/model-h-v3-multiscale-analogs` | `1ada597` | 36 ahead, contains #468 |
 | PR #470 `research/model-h-v4-invariant-cross-sectional` | `c503cda` | 40 ahead, contains #469 |
-| Release candidate `claude/release-candidate-binance-hardening` | see git log | 8 commits on c14cfd7 |
+| Release candidate `claude/release-candidate-binance-hardening` | see git log | 10 commits on c14cfd7 |
 
 DAG: `c14cfd7 ← #467 ← #468 ← #469 ← #470` (linear chain); #465 and #466 branch
 independently from `c14cfd7`. Railway deployed SHA: not observable from this
@@ -36,7 +38,7 @@ code and ported semantically where it still applied.
 |---|---|---|
 | F-002 readiness gate (6be7a7b, 4f6ca80) | ALREADY_IN_PRODUCTION | Binance `place_order` asserts readiness/ownership; transport fence present |
 | naked close contract units (fd96c45) | OBSOLETE | Binance quantities are base asset |
-| emergency close-all / F-001A flatten (b98b421, 2a599ed, 3a661cf) | NEEDS_REWRITE | see P1-OPEN-1 (Binance algo orders not recognized as BGX) |
+| emergency close-all / F-001A flatten (b98b421, 2a599ed, 3a661cf) | REWRITTEN (Binance-native) | P1-OPEN-1: lineage-scoped algo cancel + readback |
 | private order events, causal blocks, snapshot restore (2df44fe, ebbc79b, efa15f7) | ALREADY (Binance-native equivalents PR #458/#459) | — |
 | F-014 malformed snapshot (0a8e9a3) | ALREADY | Binance `get_positions` raises on any invalid row |
 | Q-01/Q-01B exit geometry (80da7bf, 2e2edc1) | PORTED (restart geometry) | `fd5ed4e` |
@@ -66,17 +68,53 @@ code and ported semantically where it still applied.
 | NOVO-F013A-1b | — | does not reproduce on Binance (Decimal step units everywhere); KuCoin-branch artifact | `da60984` (1000+ property cases) | float-validator mutant killed |
 | test_research_process | ENV | child of `run_offline` only propagates `purelib`; `optuna` needs `packaging` installed under `/usr/lib/python3/dist-packages` in this container | environment only (`packaging` added to purelib); no code change | 4/4 after env fix |
 
-### P1-OPEN-1 (blocks release)
-After a BGX position closes on Binance, its protective algo orders
-(`clientAlgoId = bgx7-…`, `closePosition=true`) are never cleaned by BGX:
-`conditional_stop_lifecycle.is_bgx_owned` only recognizes the KuCoin prefix
-`bgx-stop-`, so `cleanup_flat_symbol` classifies them as external, preserves
-them and reports `VERIFIED` (offline probe). The legacy cancel path also targets
-a KuCoin endpoint. If Binance does not auto-cancel `closePosition` algo orders on
-a close (not provable from repository evidence), a stale TP/SL can close the
-NEXT same-symbol position at an old level. Required before release: confirm the
-venue behavior read-only in a supervised session, or implement a Binance-native,
-lineage-scoped algo cancel (DELETE semantics must be verified first).
+### P1-OPEN-1 — CLOSED in code (stale Binance protection after flat)
+Pre-patch (offline, composed): after trade A's SL filled, TP A (`bgx7-…`,
+`closePosition=true`) stayed `NEW`; `cleanup_flat_symbol` classified it as
+external (`is_bgx_owned` only knew `bgx-stop-`), cancelled nothing and logged
+`cleanup_status=VERIFIED`. Root cause: (1) KuCoin prefix as ownership, (2) KuCoin
+cancel endpoint, (3) no durable algo -> lineage map, (4) the flat GC only ran at
+global flat, nothing ran before the next same-symbol entry.
+
+Fix:
+- `bot/binance_protection_registry.py`: durable map `clientAlgoId -> {symbol,
+  kind, opening_order_id, opening_client_oid}` written BEFORE every algo POST
+  (stable financial namespace; load-first, never clobbers a durable map it could
+  not read).
+- `BinanceClient.cancel_algo_order`: `DELETE /fapi/v1/algoOrder` (algoId or
+  clientAlgoId, official SDK 17.5.0 semantics), signed per attempt, single
+  attempt, ACK validated, result never trusted as final state.
+- `bot/binance_stale_protection.py`: `reconcile_symbol` (flat proven -> enumerate
+  `openAlgoOrders` -> strong lineage: opening orderId first, clientOid fallback ->
+  cancel owned orders of closed lineages -> readback -> VERIFIED). Unmapped
+  `bgx7-` -> `UNRESOLVED_UNMAPPED_BGX_PROTECTION`; manual/external on a flat
+  symbol -> `UNRESOLVED_EXTERNAL_PROTECTION`; unreadable inventory ->
+  `UNRESOLVED_INVENTORY_UNKNOWN`; never cancelled, never VERIFIED.
+- Pre-entry gate in `BinanceClient.place_order` (opening orders, LIVE): flat
+  proven via positionRisk, then reconcile; anything but VERIFIED blocks the entry.
+- `cleanup_flat_symbol` delegates Binance clients to the reconciler (readiness
+  per-symbol and global flat sweep; emergency flatten and 2R/partial exits).
+- `_already_active` reuse also requires the registry record of the current
+  opening orderId (a same-minute clientOid can repeat).
+
+Tests: `tests/test_binance_stale_protection.py` (A–Q, composed attack, property
+150 cases, bounded durable map, signed single-attempt DELETE). Mutations M1–M5
+and gate-removal all killed. Fixture changes (justified): dispatch proof now
+expects the read-only `openAlgoOrders` GET before the single POST; two migration
+fixtures state flat proof / registry ownership explicitly.
+
+### P1-DEPLOY-1 (blocks deploy; operational, fail-closed)
+Algo orders created by the currently deployed release have no registry record.
+If any is still active when the new release starts (open BGX position, or a
+leftover sibling of a closed trade), it is `UNRESOLVED_UNMAPPED_BGX_PROTECTION`:
+entries on that symbol are blocked and, at global flat, the readiness sweep
+blocks all entries until an operator resolves it. Not unsafe (no wrong cancel,
+no naked position) but it can freeze trading after deploy. Required before
+deploy: a read-only `GET /fapi/v1/openAlgoOrders` inventory per configured
+symbol plus open positions, and an operator decision for each active order.
+Venue behavior on flat (auto-cancel of `closePosition` algo orders) was not
+verified read-only in this session (no venue credentials/egress); the fix is
+correct either way (`-2011` -> readback converges).
 
 ### #466 blocker (not merged)
 #466 modifies LIVE files (`engine.py`, `strategy.py`, `order_state.py`,
@@ -106,6 +144,8 @@ Changed (all hardening already approved in this audit program):
 - restart: Binance positions can be recovered again (with ledger continuity);
   recovered SL/TP from exchange protection; R exits/trailing disabled without it.
 - protection reuse: only algo orders created by the current opening lineage.
+- P1-OPEN-1: pre-entry stale-protection gate (one extra read-only GET before
+  every opening order; individual DELETE only for owned closed-lineage orders).
 
 ## 5. Research (Phases 12–28) — status
 
