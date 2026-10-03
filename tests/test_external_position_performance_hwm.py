@@ -313,6 +313,57 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provenance["new_peak"], await self.peak())
         self.assertEqual(provenance["old_peak"], epp._INCIDENT_BAD_HWM)
 
+    async def test_legacy_namespace_consumed_marker_survives_novo03_fallback(self):
+        current_ns = "v3:stable-test"
+        legacy_ns = "v2:legacy-test"
+        legacy_key = (
+            "risk:external_performance_repair:ATOMUSDT_20260927:v1:"
+            + legacy_ns
+        )
+        legacy_marker = epp._incident_consumed_marker_for_namespace(legacy_ns)
+        await db.save_key_value(legacy_key, legacy_marker, strict=True)
+
+        with (
+            patch.object(hwm_namespace, "hwm_namespace", return_value=current_ns),
+            patch.object(
+                hwm_namespace,
+                "legacy_hwm_namespace",
+                return_value=legacy_ns,
+            ),
+        ):
+            self.assertTrue(await epp._incident_already_consumed())
+
+    async def test_legacy_namespace_marker_mutation_remains_fail_closed(self):
+        current_ns = "v3:stable-test"
+        legacy_ns = "v2:legacy-test"
+        legacy_key = (
+            "risk:external_performance_repair:ATOMUSDT_20260927:v1:"
+            + legacy_ns
+        )
+        marker = json.loads(
+            epp._incident_consumed_marker_for_namespace(legacy_ns)
+        )
+        marker["status"] = "PENDING"
+        await db.save_key_value(
+            legacy_key,
+            json.dumps(marker, sort_keys=True, separators=(",", ":")),
+            strict=True,
+        )
+
+        with (
+            patch.object(hwm_namespace, "hwm_namespace", return_value=current_ns),
+            patch.object(
+                hwm_namespace,
+                "legacy_hwm_namespace",
+                return_value=legacy_ns,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                db.PersistenceError,
+                "marker ambiguous",
+            ):
+                await epp._incident_already_consumed()
+
     async def test_incident_marker_failure_rolls_back_all_three_keys(self):
         await self.set_peak(epp._INCIDENT_BAD_HWM)
         await db.save_key_value(hwm_namespace.provenance_key(), "before", strict=True)
