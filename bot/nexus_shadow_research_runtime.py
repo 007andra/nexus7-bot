@@ -166,6 +166,7 @@ async def _capture_safe(engine, sig, decision, log) -> None:
     candidate = _candidate_id(sig)
     persisted = False
     audit_observed = False
+    challenger_observed = False
 
     try:
         from bot import database as db
@@ -191,10 +192,23 @@ async def _capture_safe(engine, sig, decision, log) -> None:
             candidate, type(exc).__name__,
         )
 
+    try:
+        from bot import database as db
+        from bot import champion_challenger_forward_v1 as cc_forward
+
+        await cc_forward.observe(db, sig, decision, log)
+        challenger_observed = True
+    except Exception as exc:  # noqa: BLE001 - challenger is research-only
+        log.warning(
+            "[NEXUS_SHADOW_RESEARCH] candidate=%s challenger_forward_error=%s "
+            "decision_effect=NONE execution_effect=NONE",
+            candidate, type(exc).__name__,
+        )
+
     log.info(
         "[NEXUS_SHADOW_RESEARCH] candidate=%s symbol=%s side=%s "
-        "champion_allowed=%s persisted=%s opportunity_audit=%s "
-        "challenger_status=AWAITING_OOS_OUTCOME_AND_CALIBRATION "
+        "champion_allowed=%s persisted=%s opportunity_audit=%s challenger_forward=%s "
+        "challenger_status=FORWARD_V1_ACTIVE_UNCALIBRATED "
         "shadow_only=true decision_effect=NONE execution_effect=NONE",
         candidate,
         getattr(sig, "symbol", "UNKNOWN"),
@@ -202,6 +216,7 @@ async def _capture_safe(engine, sig, decision, log) -> None:
         getattr(decision, "execution_allowed", False) is True,
         persisted,
         audit_observed,
+        challenger_observed,
     )
 
 
