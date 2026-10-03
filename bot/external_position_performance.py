@@ -61,15 +61,40 @@ def incident_repair_key() -> str:
     return f"risk:external_performance_repair:ATOMUSDT_20260927:v1:{hwm_namespace.hwm_namespace()}"
 
 
-def _incident_consumed_marker() -> str:
+def _incident_consumed_marker_for_namespace(namespace: str) -> str:
     return json.dumps({
         "version": 1,
         "incident": "ATOMUSDT_20260927",
-        "namespace": hwm_namespace.hwm_namespace(),
+        "namespace": str(namespace),
         "start_ms": _INCIDENT_START_MS,
         "end_ms": _INCIDENT_END_MS,
         "status": "CONSUMED",
     }, sort_keys=True, separators=(",", ":"))
+
+
+def _incident_consumed_marker() -> str:
+    return _incident_consumed_marker_for_namespace(
+        hwm_namespace.hwm_namespace()
+    )
+
+
+def _accepted_incident_consumed_markers() -> tuple[str, ...]:
+    """Accept only exact current/legacy receipts during NOVO-03 migration.
+
+    database.load_key_value may legitimately return the previous release marker
+    through its read-only namespace fallback. That payload embeds the old HWM
+    namespace, so comparing it only with the current marker incorrectly turns
+    a proven CONSUMED incident into PersistenceError. Every other mutation
+    remains fail-closed.
+    """
+    return tuple(dict.fromkeys((
+        _incident_consumed_marker_for_namespace(
+            hwm_namespace.hwm_namespace()
+        ),
+        _incident_consumed_marker_for_namespace(
+            hwm_namespace.legacy_hwm_namespace()
+        ),
+    )))
 
 
 async def _incident_already_consumed() -> bool:
@@ -78,7 +103,7 @@ async def _incident_already_consumed() -> bool:
     raw = await db.load_key_value(incident_repair_key(), strict=True)
     if raw is None:
         return False
-    if raw != _incident_consumed_marker():
+    if raw not in _accepted_incident_consumed_markers():
         raise db.PersistenceError("external incident repair marker ambiguous")
     return True
 
