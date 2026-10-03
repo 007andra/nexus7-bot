@@ -12,18 +12,26 @@ import os
 from bot.logger import log
 
 
-def _drawdown_blocked(engine) -> tuple[bool, float, float]:
-    """Return observational drawdown-block state without mutating risk policy."""
+def _drawdown_blocked(engine) -> tuple[bool | None, float, float]:
+    """Return observational drawdown-block state without mutating risk policy.
+
+    ``None`` means the state could not be read. Callers must report it as a
+    blocker rather than as "not blocked" (observability must not over-claim
+    that LIVE entries are available).
+    """
     try:
         from bot.config import cfg
 
         drawdown = float(getattr(getattr(engine, "risk", None), "drawdown", 0.0) or 0.0)
         limit = float(getattr(cfg, "MAX_DRAWDOWN", 0.0) or 0.0)
+        if drawdown != drawdown or limit != limit:
+            return None, 0.0, 0.0
         override = str(os.environ.get("LIVE_RISK_OVERRIDE_APPROVED", "")).strip().lower() == "true"
         blocked = bool(limit > 0.0 and drawdown >= limit and not override)
         return blocked, drawdown, limit
-    except Exception:
-        return False, 0.0, 0.0
+    except Exception as exc:  # noqa: BLE001 - observability only; reported as unknown
+        log.debug("[STATUS_OBSERVABILITY] drawdown_state_unreadable=%s", type(exc).__name__)
+        return None, 0.0, 0.0
 
 
 def execution_observability(engine) -> dict:
@@ -82,7 +90,9 @@ def execution_observability(engine) -> dict:
         blockers.append("ENGINE_INACTIVE")
 
     drawdown_blocked, drawdown, drawdown_limit = _drawdown_blocked(engine)
-    if drawdown_blocked:
+    if drawdown_blocked is None:
+        blockers.append("DRAWDOWN_STATE_UNKNOWN")
+    elif drawdown_blocked:
         blockers.append("DRAWDOWN_HARD_GATE")
 
     if blockers:

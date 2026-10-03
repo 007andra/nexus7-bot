@@ -1,9 +1,11 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from bot.config import cfg
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
+from bot import nexus_runtime_engine as runtime_engine
 from bot.nexus_runtime_engine import TradingEngine as RuntimeTradingEngine
 
 
@@ -89,6 +91,33 @@ class ProfessionalRiskAdapterTests(unittest.TestCase):
         adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=95.0, risk_pct=0.01)
         self.assertEqual(adapter.size("TESTUSDT", 101.0, INSTRUMENTS), 0.0)
 
+    def test_fresh_executable_risk_preserves_original_monetary_budget(self):
+        adapter = self._adapter()
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=98.0, risk_pct=0.01)
+        qty = adapter.size("TESTUSDT", 100.0, INSTRUMENTS)
+        self.assertGreater(qty, 0.0)
+
+        allowed, metrics = adapter.validate_fresh_executable_risk(
+            "TESTUSDT", 100.0, qty
+        )
+        self.assertTrue(allowed)
+        self.assertLessEqual(
+            metrics["projected_loss"],
+            metrics["risk_budget"] * 1.000001,
+        )
+
+    def test_adverse_executable_drift_cannot_exceed_v3_risk_budget(self):
+        adapter = self._adapter()
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=98.0, risk_pct=0.01)
+        qty = adapter.size("TESTUSDT", 100.0, INSTRUMENTS)
+        self.assertGreater(qty, 0.0)
+
+        allowed, metrics = adapter.validate_fresh_executable_risk(
+            "TESTUSDT", 101.0, qty
+        )
+        self.assertFalse(allowed)
+        self.assertGreater(metrics["projected_loss"], metrics["risk_budget"])
+
 
 class RuntimeProfessionalRiskPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def test_paper_approval_prepares_virtual_capital_without_exchange_read(self):
@@ -110,6 +139,59 @@ class RuntimeProfessionalRiskPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.capital.equity, 250.0)
         self.assertEqual(snapshot.capital.available_collateral, 250.0)
         self.assertGreater(risk.size("TESTUSDT", 100.0, INSTRUMENTS), 0.0)
+
+    async def test_live_professional_risk_reconciles_cashflow_before_hwm(self):
+        risk = ProfessionalRiskAdapter(_LegacyRisk(balance=100.0))
+        fake_engine = SimpleNamespace(
+            risk=risk,
+            paper_trade=False,
+            _validation_safety_lock_active=False,
+            _effective_risk_pct=lambda: 0.01,
+            client=object(),
+            positions={},
+        )
+        signal = SimpleNamespace(symbol="TESTUSDT", entry=100.0, sl=95.0)
+        decision = SimpleNamespace(execution_allowed=True)
+        capital = SimpleNamespace(
+            capital=CapitalState(equity=100.0, available_collateral=80.0)
+        )
+        ordering = []
+
+        async def reconcile(*args, **kwargs):
+            ordering.append("cashflow")
+            return {"applied": 0, "blocked": False}
+
+        async def repair(*args, **kwargs):
+            ordering.append("repair")
+            return {"status": "NOT_MATCHED"}
+
+        async def restore(*args, **kwargs):
+            ordering.append("hwm")
+            return 100.0
+
+        with patch.object(
+            runtime_engine,
+            "read_account_capital",
+            AsyncMock(return_value=capital),
+        ), patch.object(
+            runtime_engine.capital_flows,
+            "reconcile_external_capital_flows",
+            AsyncMock(side_effect=reconcile),
+        ), patch.object(
+            runtime_engine.hwm_incident_repair,
+            "repair_if_needed",
+            AsyncMock(side_effect=repair),
+        ), patch.object(
+            runtime_engine,
+            "restore_update_real_account_peak",
+            AsyncMock(side_effect=restore),
+        ):
+            await RuntimeTradingEngine._prepare_professional_risk(
+                fake_engine, signal, decision
+            )
+
+        self.assertEqual(ordering, ["cashflow", "repair", "hwm"])
+        self.assertTrue(risk.professional_snapshot.confirmed)
 
     async def test_shadow_validation_lock_keeps_core_adapter_dormant(self):
         risk = ProfessionalRiskAdapter(_LegacyRisk(balance=250.0))

@@ -7,7 +7,7 @@ external/manual and therefore read-only.
 
 At startup, a surviving position may be reassociated only through the stronger
 read-only restart proof: one unique durable BGX FILLED order, independently
-confirmed by KuCoin with matching orderId/clientOid/symbol/side/base quantity,
+confirmed by the active exchange with matching orderId/clientOid/symbol/side/base quantity,
 and currently valid native protection. Symbol similarity alone is never enough.
 
 External positions may be observed, protection-checked and counted toward
@@ -20,13 +20,17 @@ from bot.conditional_stop_protection import conditional_stop_confirmed, _to_base
 from bot.restart_ownership_recovery import prove_restart_ownership
 
 
-def install(TradingEngine, log):
+def install(TradingEngine, log, exchange_name: str = "kucoin"):
     if getattr(TradingEngine, "_pilot_external_position_guard_patched", False):
         return
 
-    from bot import kucoin as _kucoin
-    from bot import shadow_position_forensics as _shadow_position_forensics
-    _shadow_position_forensics.install(_kucoin, log)
+    # Shadow position forensics currently contains KuCoin-specific transport
+    # assumptions. The ownership boundary below is exchange-neutral and is
+    # installed for Binance without importing those KuCoin hooks.
+    if str(exchange_name).lower() == "kucoin":
+        from bot import kucoin as _kucoin
+        from bot import shadow_position_forensics as _shadow_position_forensics
+        _shadow_position_forensics.install(_kucoin, log)
 
     original_guard = getattr(TradingEngine, "_guard_naked_positions", None)
     original_sync = getattr(TradingEngine, "_sync_positions", None)
@@ -158,7 +162,13 @@ def install(TradingEngine, log):
 
             external = set()
             recovered = set()
+            deferred = set()
             proofs = {}
+            # A durable BGX entry intent that is still unresolved (submit result
+            # unknown, or fill not yet absorbed) keeps its symbol out of both
+            # EXTERNAL and the heuristic loader until exchange truth decides.
+            from bot.ambiguous_entry_recovery import pending_recovery_symbols
+            intent_symbols = pending_recovery_symbols(self)
             for row in live_rows:
                 sym = str(row.get("symbol", "") or "")
                 if row_counts.get(sym, 0) != 1:
@@ -185,6 +195,15 @@ def install(TradingEngine, log):
                         proof.base_qty,
                         proof.protection,
                     )
+                elif sym in intent_symbols:
+                    deferred.add(sym)
+                    log.critical(
+                        "[RESTART_OWNERSHIP] symbol=%s result=RECOVERY_PENDING reason=%s "
+                        "basis=unresolved_durable_bgx_entry_intent "
+                        "action=no_load_no_mutation_until_exchange_truth entries_blocked=true",
+                        sym,
+                        proof.reason,
+                    )
                 else:
                     external.add(sym)
                     log.warning(
@@ -197,6 +216,7 @@ def install(TradingEngine, log):
             self._external_position_symbols = external
             self._recovered_position_symbols = recovered
             self._restart_ownership_proofs = proofs
+            self._ambiguous_recovery_symbols = deferred
 
             result = await original_load(self, *args, **kwargs)
 
@@ -230,9 +250,12 @@ def install(TradingEngine, log):
                         sym,
                     )
 
-            for sym in external:
+            for sym in external | deferred:
                 self.positions.pop(sym, None)
                 self._trade_ids.pop(sym, None)
+            if deferred:
+                unprotected = set(getattr(self, "_unprotected_symbols", set()) or set())
+                self._unprotected_symbols = unprotected | deferred
 
             self._external_position_symbols = external
             self._recovered_position_symbols = recovered
@@ -281,6 +304,7 @@ def install(TradingEngine, log):
             # classified external at startup. An external symbol can never use
             # this escape hatch.
             external = set(getattr(self, "_external_position_symbols", set()) or set())
+            external |= set(getattr(self, "_ambiguous_recovery_symbols", set()) or set())
             if only_symbol:
                 if only_symbol in external:
                     log.critical(
@@ -302,7 +326,9 @@ def install(TradingEngine, log):
 
     TradingEngine._pilot_external_position_guard_patched = True
     log.warning(
-        "[EXTERNAL_POSITION_IMMUTABLE] installed: startup positions default to "
-        "EXTERNAL/read-only; only exact durable+exchange+protection proof may "
-        "recover BGX ownership; no heuristic adoption; unprotected externals block"
+        "[EXTERNAL_POSITION_IMMUTABLE] installed exchange=%s: startup positions "
+        "default to EXTERNAL/read-only; only exact durable+exchange+protection "
+        "proof may recover BGX ownership; no heuristic adoption; unprotected "
+        "externals block",
+        str(exchange_name).lower(),
     )

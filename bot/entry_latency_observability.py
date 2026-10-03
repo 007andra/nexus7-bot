@@ -50,7 +50,12 @@ class EntryLatencyCollector:
     def _new_trace(self, symbol: str, now_ns: int) -> _Trace:
         self._seq += 1
         trace = _Trace(symbol=symbol, trace_id=f"{symbol}-{self._seq}")
-        trace.stages["market_data"] = self._latest_market_ns.get(symbol, now_ns)
+        # Never fabricate a market-data boundary: when no acquisition event was
+        # observed for this symbol, market-relative durations stay NA instead
+        # of a misleading 0.0 (audit P1-1).
+        market_ns = self._latest_market_ns.get(symbol)
+        if market_ns is not None:
+            trace.stages["market_data"] = market_ns
         self._traces[symbol] = trace
         return trace
 
@@ -100,6 +105,7 @@ class EntryLatencyCollector:
             f"ack_to_fill_ms={self._ms(s.get('exchange_ack'), s.get('fill'))} "
             f"ack_to_tpsl_ms={self._ms(s.get('exchange_ack'), s.get('tpsl'))} "
             f"market_to_terminal_ms={self._ms(s.get('market_data'), s.get(terminal))} "
+            f"market_data_observed={str('market_data' in s).lower()} "
             f"telemetry_only=true execution_effect=NONE"
         )
 

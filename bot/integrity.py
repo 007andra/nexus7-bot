@@ -161,7 +161,19 @@ class IntegrityGuard:
             for d in div:
                 add("STATE_DIVERGENCE", Severity.BLOCKED, d)
 
-            for sym, position in self._external_position_map(engine, ex_positions).items():
+            try:
+                external_positions = self._external_position_map_strict(engine, ex_positions)
+            except Exception as exc:
+                # Unreadable external exposure must never be reported as
+                # "no external positions" (previously a silent {} fail-open).
+                external_positions = {}
+                add(
+                    "EXTERNAL_POSITIONS_UNREADABLE",
+                    Severity.BLOCKED,
+                    f"posições externas ilegíveis ({type(exc).__name__}); "
+                    "exposição externa não verificável",
+                )
+            for sym, position in external_positions.items():
                 if has_confirmed_stop(position):
                     evidence = protection.get(sym, (True, "inline_stop"))[1]
                     add(
@@ -231,10 +243,32 @@ class IntegrityGuard:
         except Exception as e:
             add("RISK_ENGINE_UNAVAILABLE", Severity.BLOCKED, str(e))
 
-        n429 = getattr(client, "_rate_limit_hits", 0)
+        # RATE_LIMITED must represent a current exchange condition, not a
+        # lifetime process counter. BinanceClient exposes a rolling window and
+        # shared cooldown; retain the historical counter only as a fallback for
+        # older adapters.
+        rate_status = None
+        try:
+            status_reader = getattr(client, "rate_limit_status", None)
+            if callable(status_reader):
+                rate_status = status_reader()
+        except Exception:
+            rate_status = None
+
+        if isinstance(rate_status, dict):
+            n429 = int(rate_status.get("recent_hits", 0) or 0)
+            window_s = float(rate_status.get("window_seconds", 0) or 0)
+            detail = (
+                f"{n429} respostas 429 nos últimos {window_s:.0f}s"
+                if window_s > 0
+                else f"{n429} respostas 429 recentes"
+            )
+        else:
+            n429 = int(getattr(client, "_rate_limit_hits", 0) or 0)
+            detail = f"{n429} respostas 429 recentes"
+
         if n429 >= int(os.environ.get("RATE_LIMIT_BLOCK_AFTER", "5")):
-            add("RATE_LIMITED", Severity.BLOCKED,
-                f"{n429} respostas 429 recentes")
+            add("RATE_LIMITED", Severity.BLOCKED, detail)
 
         if any(i.severity == Severity.BLOCKED for i in issues):
             sev = Severity.BLOCKED
@@ -265,12 +299,16 @@ class IntegrityGuard:
         """True quando o payload da posição traz stopLoss explícito positivo."""
         return inline_stop_confirmed(position)
 
+    def _external_position_map_strict(self, engine, ex_positions: list) -> dict:
+        """Mapeia posições externas; propaga erro de leitura (fail-closed no assess)."""
+        ex = self._exchange_position_map(ex_positions)
+        local = dict(getattr(engine, "positions", {}) or {})
+        return {sym: ex[sym] for sym in sorted(ex) if sym not in local}
+
     def _external_position_map(self, engine, ex_positions: list) -> dict:
-        """Mapeia posições abertas na exchange que não pertencem ao NEXUS-7."""
+        """Compatibilidade: versão tolerante usada só para listagem de símbolos."""
         try:
-            ex = self._exchange_position_map(ex_positions)
-            local = dict(getattr(engine, "positions", {}) or {})
-            return {sym: ex[sym] for sym in sorted(ex) if sym not in local}
+            return self._external_position_map_strict(engine, ex_positions)
         except Exception:
             return {}
 

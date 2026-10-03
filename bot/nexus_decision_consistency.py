@@ -157,6 +157,27 @@ def _score_snapshot(nexus_ai, *, symbol: str, k15: list, k1h: list, k4h: list,
         return {"ok": False, "reason": type(exc).__name__}
 
 
+def _attach_score_snapshot(decision, snapshot: dict, log) -> bool:
+    """Attach observability-only score telemetry; never affects the decision.
+
+    Replaces a bare ``except Exception: pass`` flagged by the silent-except
+    audit. Frozen/slotted decisions (or any other attribute failure) are
+    reported at debug level and the unchanged decision is still returned.
+    """
+    try:
+        setattr(decision, "_bgx_score_snapshot", snapshot)
+        return True
+    except Exception as exc:  # noqa: BLE001 - telemetry must never alter the decision
+        debug = getattr(log, "debug", None)
+        if callable(debug):
+            debug(
+                "[NEXUS_SCORE_SNAPSHOT] attach_failed=%s decision_type=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__, type(decision).__name__,
+            )
+        return False
+
+
 def install(nexus_ai, log) -> None:
     if getattr(nexus_ai, "_closed_candle_consistency_installed", False):
         return
@@ -231,6 +252,11 @@ def install(nexus_ai, log) -> None:
                 snapshot.get("unavailable", []),
                 len(c15), len(c1h), len(c4h),
             )
+
+            # Preserve read-only score telemetry on the decision so the async
+            # engine can notify Telegram after returning from asyncio.to_thread.
+            # Dynamic metadata is intentionally excluded from NexusDecision.to_dict().
+            _attach_score_snapshot(decision, snapshot, log)
             return decision
         finally:
             _HTF_REGIME_CONTEXT.reset(token)

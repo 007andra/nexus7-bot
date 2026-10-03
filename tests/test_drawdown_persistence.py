@@ -10,6 +10,7 @@ from bot.drawdown_persistence import (
     DURABLE_EQUITY_PEAK_KEY,
     rebase_real_account_peak_for_external_flow,
     restore_update_real_account_peak,
+    restore_zero_equity_peak_fail_closed,
 )
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
@@ -106,6 +107,41 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         for value in (0.0, -1.0, math.inf, math.nan, True):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 await restore_update_real_account_peak(self.risk, value, strict=True)
+
+
+    async def test_zero_equity_preserves_highest_known_peak_and_forces_100pct_drawdown(self):
+        self.legacy.balance_confirmed = True
+        # setUp initializes the in-memory peak at 100.0. A lower persisted
+        # value must never lower that known HWM during a zero-equity event.
+        with patch(
+            "bot.drawdown_persistence.db.load_key_value",
+            AsyncMock(return_value="8.8015"),
+        ), patch(
+            "bot.drawdown_persistence.save_key_values_atomic",
+            AsyncMock(return_value=True),
+        ) as save:
+            peak = await restore_zero_equity_peak_fail_closed(
+                self.risk, strict=True
+            )
+
+        self.assertEqual(peak, 100.0)
+        self.assertEqual(self.legacy.balance, 0.0)
+        self.assertEqual(self.legacy.peak_balance, 100.0)
+        self.assertEqual(self.legacy.drawdown, 1.0)
+        self.assertFalse(self.legacy.balance_confirmed)
+        self.assertFalse(self.risk.professional_snapshot.confirmed)
+        self.assertEqual(self.risk.professional_snapshot.peak_equity, 100.0)
+        save.assert_not_awaited()
+
+    async def test_zero_equity_without_durable_peak_fails_closed(self):
+        with patch(
+            "bot.drawdown_persistence.db.load_key_value",
+            AsyncMock(return_value=None),
+        ):
+            with self.assertRaises(db.PersistenceError):
+                await restore_zero_equity_peak_fail_closed(
+                    self.risk, strict=True
+                )
 
 
 class RiskManagerV3PeakRestoreTests(unittest.TestCase):

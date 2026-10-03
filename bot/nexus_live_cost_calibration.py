@@ -4,22 +4,25 @@ This hardening changes only the cost inputs used by NEXUS expected-value math.
 It does NOT change score thresholds, R:R thresholds, leverage, risk sizing,
 position limits, order routing, or any execution permission.
 
-When live market/account cost data are unavailable, behavior falls back exactly
-to the legacy NEXUS assumptions: 6 bps taker fee and 5 bps one-way slippage.
+Cost inputs come from the per-candidate ``bot.execution_cost`` snapshot, the
+same one used by the technical-policy R:R diagnostics, RiskManagerV3 sizing and
+the projected-loss ceiling, so every layer reports the same economics for the
+same candidate. Fees are exchange-aware (Binance ``/fapi/v1/commissionRate``;
+KuCoin ``/api/v1/trade-fees``). When live data are unavailable the fallback is
+never below the legacy NEXUS assumptions (6 bps taker; static per-symbol
+slippage >= 5 bps). If snapshot construction itself fails, the exact legacy
+6 bps / 5 bps context is used and labelled ``legacy_fallback``.
 """
 from __future__ import annotations
 
 import contextvars
 import functools
-import math
-import time
 from dataclasses import dataclass
-from typing import Any
 
+from bot import execution_cost
 from bot.kucoin_execution_model import (
     DEFAULT_SLIPPAGE,
     DEFAULT_TAKER_FEE,
-    fetch_actual_taker_fee,
 )
 
 
@@ -31,82 +34,36 @@ class NexusCostContext:
     fee_source: str
     slippage_source: str
     spread_bps: float | None = None
+    snapshot: execution_cost.ExecutionCostSnapshot | None = None
 
 
 _COST_CONTEXT: contextvars.ContextVar[NexusCostContext | None] = contextvars.ContextVar(
     "bgx_nexus_cost_context", default=None
 )
-_FEE_CACHE: dict[str, tuple[float, str, float]] = {}
-_FEE_CACHE_TTL_S = 3600.0
-
-
-def _finite(value: Any, default: float = 0.0) -> float:
-    try:
-        out = float(value)
-        return out if math.isfinite(out) else default
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _is_major(symbol: str) -> bool:
-    sym = str(symbol or "").upper()
-    return any(base in sym for base in ("BTC", "ETH", "SOL"))
+# Shared with bot.execution_cost so there is exactly one fee cache.
+_FEE_CACHE = execution_cost._FEE_CACHE
+_FEE_CACHE_TTL_S = execution_cost.FEE_CACHE_TTL_S
 
 
 def slippage_from_ticker(ticker: dict | None, symbol: str) -> tuple[float, str, float | None]:
-    """Estimate one-way market slippage from current bid/ask, conservatively."""
-    fallback = DEFAULT_SLIPPAGE
-    if not isinstance(ticker, dict):
-        return fallback, "legacy_fallback", None
-
-    bid = _finite(ticker.get("bid"))
-    ask = _finite(ticker.get("ask"))
-    if bid <= 0 or ask <= 0 or ask < bid:
-        return fallback, "legacy_fallback", None
-
-    mid = (bid + ask) / 2.0
-    if mid <= 0:
-        return fallback, "legacy_fallback", None
-
-    full_spread = (ask - bid) / mid
-    spread_bps = full_spread * 10_000.0
-    impact_floor = 0.00010 if _is_major(symbol) else 0.00020
-    estimate = (full_spread / 2.0) + impact_floor
-    estimate = min(max(estimate, impact_floor), 0.01)
+    """Compatibility view over ``execution_cost.ticker_slippage`` (one formula)."""
+    estimate, spread_bps = execution_cost.ticker_slippage(ticker, symbol)
+    if estimate is None:
+        return DEFAULT_SLIPPAGE, "legacy_fallback", None
     return estimate, "ticker_half_spread_plus_impact", spread_bps
 
 
-async def _cached_taker_fee(client, symbol: str) -> tuple[float, str]:
-    now = time.monotonic()
-    cached = _FEE_CACHE.get(symbol)
-    if cached and cached[2] > now:
-        return cached[0], cached[1]
-
-    try:
-        fee, source = await fetch_actual_taker_fee(client, symbol)
-    except Exception:
-        fee, source = DEFAULT_TAKER_FEE, "legacy_fallback"
-
-    fee = _finite(fee, DEFAULT_TAKER_FEE)
-    if fee < 0 or fee >= 0.02:
-        fee, source = DEFAULT_TAKER_FEE, "legacy_fallback"
-    _FEE_CACHE[symbol] = (fee, source, now + _FEE_CACHE_TTL_S)
-    return fee, source
-
-
 async def build_cost_context(engine, sig) -> NexusCostContext:
-    """Build read-only cost inputs for one NEXUS candidate."""
-    symbol = str(sig.symbol)
-    fee, fee_source = await _cached_taker_fee(engine.client, symbol)
-    ticker = engine.client.get_cached_ticker(symbol) or {}
-    slippage, slip_source, spread_bps = slippage_from_ticker(ticker, symbol)
+    """Build read-only NEXUS cost inputs from the shared candidate snapshot."""
+    snap, _reused = await execution_cost.snapshot_for(engine, sig)
     return NexusCostContext(
-        symbol=symbol,
-        taker_fee=fee,
-        slippage=slippage,
-        fee_source=fee_source,
-        slippage_source=slip_source,
-        spread_bps=spread_bps,
+        symbol=snap.symbol,
+        taker_fee=snap.taker_fee,
+        slippage=snap.one_way_slippage,
+        fee_source=snap.fee_source,
+        slippage_source=snap.slippage_source,
+        spread_bps=snap.spread_bps,
+        snapshot=snap,
     )
 
 
@@ -169,6 +126,9 @@ def install(TradingEngine, nexus_ai, log) -> None:
             result["slippage"] = round(ctx.slippage, 8)
             result["cost_source"] = f"{ctx.fee_source}+{ctx.slippage_source}"
             result["spread_bps"] = None if ctx.spread_bps is None else round(ctx.spread_bps, 4)
+            if ctx.snapshot is not None:
+                result["cost_snapshot_id"] = ctx.snapshot.snapshot_id
+                result["candidate_id"] = ctx.snapshot.candidate_id
         return result
 
     @functools.wraps(original_validate)
@@ -195,7 +155,7 @@ def install(TradingEngine, nexus_ai, log) -> None:
         try:
             log.info(
                 "[NEXUS_COST] symbol=%s taker_bps=%.3f slippage_bps=%.3f "
-                "spread_bps=%s fee_source=%s slippage_source=%s "
+                "spread_bps=%s fee_source=%s slippage_source=%s %s "
                 "thresholds_unchanged=true leverage_unchanged=true",
                 ctx.symbol,
                 ctx.taker_fee * 10_000.0,
@@ -203,6 +163,8 @@ def install(TradingEngine, nexus_ai, log) -> None:
                 "NA" if ctx.spread_bps is None else f"{ctx.spread_bps:.3f}",
                 ctx.fee_source,
                 ctx.slippage_source,
+                ctx.snapshot.log_fields() if ctx.snapshot is not None
+                else "cost_snapshot_id=NA",
             )
             decision = await original_validate(self, sig)
 
@@ -220,9 +182,9 @@ def install(TradingEngine, nexus_ai, log) -> None:
     TradingEngine._bgx_nexus_cost_calibration_installed = True
 
     log.warning(
-        "[NEXUS_COST_CALIBRATION] installed actual_taker_fee=true "
-        "ticker_spread_slippage=true fee_cache_ttl_s=3600 "
-        "fallback_taker_bps=6 fallback_slippage_bps=5 "
+        "[NEXUS_COST_CALIBRATION] installed cost_authority=execution_cost.snapshot "
+        "actual_taker_fee=exchange_aware ticker_spread_slippage=true "
+        "fee_cache_ttl_s=3600 fallback_taker_bps_min=6 fallback_slippage=static_symbol "
         "rr_threshold_unchanged=true score_threshold_unchanged=true "
         "leverage_unchanged=true"
     )

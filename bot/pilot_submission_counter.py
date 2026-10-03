@@ -303,7 +303,15 @@ def install(KuCoinClient, log_obj=log) -> None:
 
     @asynccontextmanager
     async def fenced_entry_post_with_provenance(self, endpoint, body, url, **kwargs):
-        is_new_risk = endpoint in ("/api/v1/orders", "/api/v1/st-orders") and body.get("reduceOnly") is not True and body.get("closeOrder") is not True
+        detector = getattr(self, "_is_new_risk_request", None)
+        if callable(detector):
+            is_new_risk = bool(detector(endpoint, body))
+        else:
+            is_new_risk = (
+                endpoint in ("/api/v1/orders", "/api/v1/st-orders")
+                and body.get("reduceOnly") is not True
+                and body.get("closeOrder") is not True
+            )
         if not is_new_risk:
             async with original_fenced_entry_post(self, endpoint, body, url, **kwargs) as response:
                 yield response
@@ -313,10 +321,10 @@ def install(KuCoinClient, log_obj=log) -> None:
         ownership = getattr(self, "_execution_ownership", None)
         if ownership is None: raise RuntimeError("OPEN_NEW_RISK missing execution ownership at transport boundary")
         await validate_execution_ownership(ownership)
-        oid = str(body.get("clientOid") or ""); order = _managed_order_by_oid(self, oid)
+        oid = str(body.get("clientOid") or body.get("newClientOrderId") or ""); order = _managed_order_by_oid(self, oid)
         context = getattr(self, "_bgx_pilot_boundary_context", {}).get(oid)
         if context is None:
-            symbol = str(body.get("symbol") or getattr(order, "symbol", "")); side = str(body.get("side") or ""); qty = body.get("size"); idem = oid
+            symbol = str(body.get("symbol") or getattr(order, "symbol", "")); side = str(body.get("side") or ""); qty = body.get("size", body.get("quantity")); idem = oid
         else:
             symbol, side, qty, idem = context
         try:

@@ -15,7 +15,7 @@ def install(log):
     import bot.engine as engine_module
     from bot.engine import TradingEngine, Trade
     from bot.config import cfg
-    from bot.kucoin import TAKER_FEE
+    from bot.exchange import TAKER_FEE
     from bot import database as db
     from bot import durable_execution as durable
     from bot.notifier import notify, close_msg
@@ -61,12 +61,28 @@ def install(log):
         if not getattr(engine, "paper_trade", False):
             return await original_assess(self, client, engine)
 
+        # PAPER capital is the durable virtual wallet. Integrity must not
+        # require authenticated exchange balance reads merely to validate a
+        # simulator that cannot mutate exchange state.
         original_log_state = self._log_state
+        original_get_balance = getattr(client, "get_balance", None)
+        paper_balance = float(
+            getattr(engine, "_paper_balance", getattr(engine.risk, "balance", 0.0))
+            or 0.0
+        )
+
+        async def _paper_balance():
+            return paper_balance
+
+        if callable(original_get_balance):
+            client.get_balance = _paper_balance
         self._log_state = lambda: None
         try:
             state = await original_assess(self, client, engine)
         finally:
             self._log_state = original_log_state
+            if callable(original_get_balance):
+                client.get_balance = original_get_balance
 
         kept = []
         removed = []

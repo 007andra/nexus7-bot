@@ -27,13 +27,12 @@ import os
 from typing import Dict, Optional, List
 import numpy as np
 
-# Migrado para KuCoin. O type hint usa o cliente ativo; o import do
-# BybitClient foi removido para não depender de bot/bybit.py.
-from bot.kucoin import KuCoinClient
+# Cliente selecionado em bot.exchange; o engine não depende da venue.
+from bot.exchange import ExchangeClient, is_binance
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
-from bot.notifier import (notify, notify_nexus, signal_msg, order_opened_msg, close_msg,
+from bot.notifier import (notify, notify_nexus, notify_nexus_score, signal_msg, order_opened_msg, close_msg,
     daily_report_msg, daily_target_msg, daily_stop_msg, drawdown_msg, consecutive_losses_msg, online_msg)
 from bot import database as db
 from bot import score as scoring
@@ -43,7 +42,7 @@ from bot.daily_tracker import DailyTracker
 from bot import optimizer as opt
 # ── Fase 3: hardening ─────────────────────────────────────────────
 from bot.integrity import IntegrityGuard, Severity
-from bot.order_state import OrderRegistry, OrderState, InvalidTransition
+from bot.order_state import OrderRegistry, OrderState, InvalidTransition, TERMINAIS
 from bot.pilot import PilotGuard
 from bot.quantity import minimum_base_quantity, validate_base_quantity
 from bot.paper_loss_budget import cap_quantity as cap_paper_quantity
@@ -59,9 +58,9 @@ _NEXUS_TIMEOUT_S = 10.0
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
 # Taxa Bybit: 0.055% por lado (maker) ou 0.055% taker — usamos 0.055% x2 = 0.11% total
 # CORRIGIDO (auditoria #8): 0.00055 era a taxa da Bybit. A exchange agora
-# é a KuCoin (taker 0.06%). Importado do módulo do cliente para manter uma
+# vem da exchange ativa. Importado da boundary para manter uma
 # única fonte de verdade — antes o PnL líquido reportado era subestimado.
-from bot.kucoin import TAKER_FEE
+from bot.exchange import TAKER_FEE
 
 class Trade:
     def __init__(self, symbol, direction, entry, exit_price, qty, pnl_gross, opened_at,
@@ -342,7 +341,7 @@ class Stats:
 from bot.risk import RiskManager
 
 class TradingEngine:
-    def __init__(self, client: KuCoinClient):
+    def __init__(self, client: ExchangeClient):
         self.client       = client
         # KuCoin's final transport fence executes on the exchange client and
         # needs the canonical engine to evaluate the same readiness authority.
@@ -447,7 +446,7 @@ class TradingEngine:
         # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
         # position_manager.py mas NUNCA foi atribuído → AttributeError.
         # A flag vive em bot.kucoin (lida da env var PAPER_TRADE).
-        from bot.kucoin import PAPER_TRADE as _PT
+        from bot.exchange import PAPER_TRADE as _PT
         self.paper_trade: bool = bool(_PT)
         # PnL diário separado: só o REALIZADO conta para a meta.
         # O não realizado oscila muito com 50x e não é lucro de fato.
@@ -541,6 +540,14 @@ class TradingEngine:
                         # Serializa a gestão de posições sob um único lock,
                         # impedindo ordens concorrentes na mesma posição.
                         async with self._pos_lock:
+                            if is_binance():
+                                # Ambiguous BGX entries (submit result unknown)
+                                # are resolved from exchange truth and, when the
+                                # fill lineage is exact, adopted and protected.
+                                from bot.ambiguous_entry_recovery import (
+                                    recover_unadopted_entries,
+                                )
+                                await recover_unadopted_entries(self)
                             await self._guard_naked_positions()
                             await self._sync_positions()
                             await self._check_stagnation_and_invalidation()
@@ -555,7 +562,10 @@ class TradingEngine:
                         self._update_daily_pnl()
                         from bot.durable_daily_stop import entries_blocked
                         daily_state_blocked = await entries_blocked(self)
-                        from bot.exchange_accounting_evidence import schedule as schedule_accounting
+                        if is_binance():
+                            from bot.binance_accounting_evidence import schedule as schedule_accounting
+                        else:
+                            from bot.exchange_accounting_evidence import schedule as schedule_accounting
                         schedule_accounting(self)
                     
                         if not self.active or getattr(self, 'entries_paused', False) or self.daily_stopped or daily_state_blocked or not daily_pnl_ok:
@@ -785,14 +795,14 @@ class TradingEngine:
     def _effective_score(self) -> int:
         """Score mínimo efetivo — aumenta após bater a meta."""
         if self.daily_target_hit:
-            return cfg.POST_TARGET_SCORE  # mais seletivo (88)
-        return cfg.MIN_ENTRY_SCORE        # padrão (60)
+            return cfg.POST_TARGET_SCORE  # mais seletivo (default 72)
+        return cfg.MIN_ENTRY_SCORE        # padrão (default 60)
 
     def _effective_risk_pct(self) -> float:
         """Risco por trade — reduz após bater a meta."""
         if self.daily_target_hit:
-            return cfg.POST_TARGET_RISK   # conservador (15%)
-        return cfg.MAX_RISK_PCT           # padrão (30%)
+            return cfg.POST_TARGET_RISK   # conservador (default 0.5%)
+        return cfg.MAX_RISK_PCT           # padrão (default 1%)
 
     # ── Connect ────────────────────────────────────────────────
     async def _startup_risk_balance(self) -> float:
@@ -1098,6 +1108,20 @@ class TradingEngine:
             price_map = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
             buying_power = self.risk.balance * cfg.LEVERAGE
 
+            # Observability only: expose the minimum-order feasibility envelope
+            # for the full configured universe using the same exchange metadata
+            # already loaded by the runtime. This never changes viable_symbols,
+            # scores, risk, leverage, sizing, or dispatch.
+            try:
+                from bot import min_order_feasibility_matrix as _feasibility_matrix
+                _feasibility_matrix.log_once(self, price_map, log)
+            except Exception as _matrix_exc:
+                log.warning(
+                    "[MIN_ORDER_FEASIBILITY_MATRIX] result=DEFER reason=%s "
+                    "observability_only=true decision_effect=NONE execution_effect=NONE",
+                    type(_matrix_exc).__name__,
+                )
+
             if buying_power <= 0:
                 log.warning(
                     f"⛔ INSUFFICIENT_BUYING_POWER: poder de compra "
@@ -1366,13 +1390,45 @@ class TradingEngine:
 
                 direction = "LONG" if side == "Buy" else "SHORT"
 
+                # ══════════════════════════════════════════════════
+                # NOVO-F013A-1 — a Binance não traz stopLoss na linha da
+                # posição: sem isto o loader SEMPRE enviava SL/TP estimados
+                # (ATR/liquidação), mesmo com a proteção nativa ativa.
+                # Timeout não é sinal de mercado: a lineage conhecida usa os
+                # próprios níveis; origem desconhecida nunca substitui um stop
+                # condicional já ativo por estimativa.
+                # ══════════════════════════════════════════════════
+                from bot import timeout_adoption as _ta
+                _timeout_ctx = (getattr(self, "_timeout_adoptions", None) or {}).get(sym)
+                _lineage_levels = None
+                _conditional_sl = None
+                if not self.paper_trade:
+                    _tick = (getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize")
+                    if _timeout_ctx and _timeout_ctx.get("direction") == direction:
+                        _lineage_levels = await _ta.adopt_known_lineage(
+                            self.client, sym, direction, p, _timeout_ctx, _tick, log)
+                    elif _timeout_ctx:
+                        log.critical(
+                            f"🚨 [TIMEOUT_ADOPTION] {sym}: lado da exchange ({direction}) ≠ "
+                            f"opening order ({_timeout_ctx.get('direction')}) — não adotada"
+                        )
+                        self._unprotected_symbols.add(sym)
+                        continue
+                    elif sl_existente <= 0:
+                        _conditional_sl = await _ta.existing_conditional_stop(
+                            self.client, sym, direction)
+
                 # Preço de entrada vem da EXCHANGE (ep), nunca do ticker —
                 # exigência explícita da correção. SL/TP: usa o que já
                 # está na exchange se existir; caso contrário, calcula
                 # um SL conservador baseado na liquidação (mesma fórmula
                 # já usada e validada em _load_existing_positions).
                 atr_est = ep * 0.007
-                if sl_existente > 0:
+                if _lineage_levels is not None:
+                    sl, tp_existente = _lineage_levels[0], _lineage_levels[1]
+                elif _conditional_sl:
+                    sl = _conditional_sl
+                elif sl_existente > 0:
                     sl = sl_existente
                 elif direction == "LONG":
                     sl = max(liq * 1.02, ep - atr_est * 1.5) if liq > 0 else ep - atr_est * 1.5
@@ -1408,7 +1464,18 @@ class TradingEngine:
                 )
 
                 # ── Proteção: só marca protegida se a exchange confirmar ──
-                if sl_existente > 0:
+                if _lineage_levels is not None:
+                    # Lineage conhecida: proteção já reconciliada nos níveis
+                    # originais por timeout_adoption (nunca estimativa).
+                    if _lineage_levels[2]:
+                        self._unprotected_symbols.discard(sym)
+                    else:
+                        self._unprotected_symbols.add(sym)
+                elif _conditional_sl:
+                    self._unprotected_symbols.discard(sym)
+                    log.info(f"✓ RECONCILE {sym}: stop condicional já ativo "
+                             f"(${_conditional_sl:.6f}) — nenhuma estimativa enviada")
+                elif sl_existente > 0:
                     # A exchange já tinha um stop — nada a enviar, só
                     # confirmar que a marcação de risco está correta.
                     self._unprotected_symbols.discard(sym)
@@ -1909,6 +1976,8 @@ class TradingEngine:
         Move o SL na exchange via /v5/position/trading-stop.
         """
         for sym, pos in list(self.positions.items()):
+            if getattr(pos, "_geometry_unproven", False) is True:
+                continue    # Q-01: trailing never runs on an invented geometry
             try:
                 # Atualiza PnL com preço atual
                 cur = pos.current_price
@@ -2627,13 +2696,54 @@ class TradingEngine:
             except Exception as _e:
                 log.debug(f"nexus: news sentiment indisponível: {_e}")
 
-            return await asyncio.to_thread(
+            decision = await asyncio.to_thread(
                 nexus_ai.decide, symbol=sig.symbol,
                 k15=k15, k1h=k1h, k4h=k4h,
                 entry=sig.entry, sl=sig.sl, tp=sig.tp,
                 ticker=ticker, funding=funding, oi=oi, oi_delta=oi_delta,
                 news_score=news_score,
             )
+
+            # nexus_ai.decide executes in a worker thread. Telegram scheduling
+            # must happen back on the engine event loop, never inside that
+            # worker thread.
+            raw_decision = getattr(decision, "decision", "UNKNOWN")
+            decision_value = getattr(raw_decision, "value", raw_decision)
+            if str(decision_value).upper() == "WAIT":
+                snapshot = getattr(decision, "_bgx_score_snapshot", {}) or {}
+                reasoning = getattr(decision, "reasoning", None) or []
+                payload = {
+                    "symbol": sig.symbol,
+                    "decision": "WAIT",
+                    "final_score": float(getattr(decision, "setup_quality", 0.0) or 0.0),
+                    "estimated_final": snapshot.get("estimated_final"),
+                    "component_score": snapshot.get("component_score"),
+                    "risk_penalty": snapshot.get("risk_penalty"),
+                    "confidence": snapshot.get(
+                        "fusion_confidence",
+                        getattr(decision, "confidence", None),
+                    ),
+                    "rr_net": snapshot.get(
+                        "rr_net",
+                        getattr(decision, "risk_reward", None),
+                    ),
+                    "ev_pct": snapshot.get(
+                        "ev_pct",
+                        getattr(decision, "expected_value", None),
+                    ),
+                    "data_quality": snapshot.get(
+                        "data_quality",
+                        getattr(decision, "data_quality", None),
+                    ),
+                    "regime": snapshot.get(
+                        "regime",
+                        getattr(decision, "market_regime", "N/A"),
+                    ),
+                    "mtf": snapshot.get("mtf", "N/A"),
+                    "reason": reasoning[-1] if reasoning else "aguardando confirmação",
+                }
+                asyncio.create_task(notify_nexus_score(payload))
+            return decision
         except Exception as e:
             log.error(f"_nexus_validate {sig.symbol}: {type(e).__name__}")
             raise
@@ -2688,7 +2798,12 @@ class TradingEngine:
                     and not durable.can_open(self)):
                 log.critical(
                     "[DURABLE_STATE] nova entrada bloqueada: estado persistente "
-                    "não confirmado; posições existentes continuam gerenciadas"
+                    "não confirmado; posições existentes continuam gerenciadas "
+                    "errors=%s pending=%s paused=%s daily_pnl_ok=%s",
+                    sorted(getattr(self, "_durable_state_errors", set())),
+                    [(o.client_oid, o.symbol, o.state.value) for o in self.orders.pending_orders()],
+                    bool(getattr(self, "entries_paused", False)),
+                    getattr(self, "_daily_pnl_ok", True),
                 )
                 return
 
@@ -2887,25 +3002,83 @@ class TradingEngine:
             # margem de manutenção depende da conta inteira — informa
             # isso ao módulo para que ele se declare não-confiável
             # nesse cenário, em vez de dar um número falsamente preciso.
-            _liq = liq.analyze(
-                entry=sig.entry, stop=sig.sl, leverage=cfg.LEVERAGE,
-                is_long=(sig.direction == "LONG"), symbol=sig.symbol,
-                n_open_positions=len(self.positions) + 1,   # +1 = esta que abriria
-            )
-            # Fase 5C: se o notional puder ter saído do Tier 1 (MMR
-            # maior que o assumido), a liquidação real fica MAIS PERTO
-            # do que calculamos. Log de auditoria, não bloqueio — não
-            # temos a tabela exata de tiers.
-            _notional_est = qty * sig.entry
-            if _notional_est and liq.notional_exceeds_tier1(_notional_est):
-                log.warning(
-                    f"⚠️ [{sig.symbol}] notional ${_notional_est:,.0f} pode "
-                    f"exceder o Tier 1 assumido (MMR={_liq.mmr:.3%}) — "
-                    f"MMR real pode ser maior, liquidação mais próxima "
-                    f"do que calculado"
+            if is_binance():
+                from bot import binance_cross_portfolio_stress as binance_cross_stress
+
+                _binance_stress = await binance_cross_stress.evaluate(
+                    self, sig, qty
                 )
-            _liq_pct = _liq.liq_move_pct
-            _sl_pct  = _liq.stop_move_pct
+                _sl_pct = (
+                    abs(sig.entry - sig.sl) / sig.entry * 100
+                    if sig.entry > 0 and sig.sl > 0
+                    else 0.0
+                )
+                _liq_pct = 0.0
+                _sl_inseguro = False
+
+                if not _binance_stress.allowed:
+                    log.warning(
+                        "[BINANCE_CROSS_STRESS] symbol=%s result=BLOCK reason=%s "
+                        "mode=%s risk_rate=%.4f limit=%.4f stressed_margin=%.8f "
+                        "maintenance=%.8f closing_fees=%.8f opening_fee=%.8f "
+                        "existing_positions=%d stage=PRE_ORDER "
+                        "execution_effect=BLOCK_NEW_ENTRY",
+                        sig.symbol,
+                        _binance_stress.reason,
+                        _binance_stress.mode,
+                        _binance_stress.risk_rate,
+                        binance_cross_stress.MAX_STOP_STRESS_RISK_RATE,
+                        _binance_stress.stressed_margin,
+                        _binance_stress.maintenance,
+                        _binance_stress.closing_fees,
+                        _binance_stress.opening_fee,
+                        _binance_stress.existing_positions,
+                    )
+                    try:
+                        await db.save_signal(
+                            sig.symbol,
+                            sig.direction,
+                            {"total": int(sig.score)},
+                            entrou=False,
+                            motivo=(
+                                "binance cross stress: "
+                                f"{_binance_stress.reason}"
+                            ),
+                        )
+                    except Exception as _e:
+                        log.debug(f"save_signal binance_cross_stress: {_e}")
+                    return
+
+                log.info(
+                    "[BINANCE_CROSS_STRESS] symbol=%s result=PASS reason=%s "
+                    "mode=%s risk_rate=%.4f limit=%.4f existing_positions=%d "
+                    "stage=PRE_ORDER kucoin_liquidation_formula_used=false "
+                    "execution_effect=NONE",
+                    sig.symbol,
+                    _binance_stress.reason,
+                    _binance_stress.mode,
+                    _binance_stress.risk_rate,
+                    binance_cross_stress.MAX_STOP_STRESS_RISK_RATE,
+                    _binance_stress.existing_positions,
+                )
+            else:
+                _liq = liq.analyze(
+                    entry=sig.entry, stop=sig.sl, leverage=cfg.LEVERAGE,
+                    is_long=(sig.direction == "LONG"), symbol=sig.symbol,
+                    n_open_positions=len(self.positions) + 1,
+                )
+                # KuCoin-only legacy tier audit. Binance uses user-specific
+                # leverage brackets in binance_cross_portfolio_stress.
+                _notional_est = qty * sig.entry
+                if _notional_est and liq.notional_exceeds_tier1(_notional_est):
+                    log.warning(
+                        f"⚠️ [{sig.symbol}] notional ${_notional_est:,.0f} pode "
+                        f"exceder o Tier 1 assumido (MMR={_liq.mmr:.3%}) — "
+                        f"MMR real pode ser maior, liquidação mais próxima "
+                        f"do que calculado"
+                    )
+                _liq_pct = _liq.liq_move_pct
+                _sl_pct = _liq.stop_move_pct
 
             # ══════════════════════════════════════════════════════════
             # OVERRIDE EXPLÍCITO — ALLOW_SL_BEYOND_LIQUIDATION
@@ -2925,8 +3098,10 @@ class TradingEngine:
                 "ALLOW_SL_BEYOND_LIQUIDATION", "false"
             ).lower() == "true"
 
-            # stop_effective já considera a folga mínima exigida
-            _sl_inseguro = not _liq.stop_effective
+            # Binance uses account-level CROSS stop stress above. KuCoin keeps
+            # the legacy liquidation-price effectiveness check.
+            if not is_binance():
+                _sl_inseguro = not _liq.stop_effective
 
             if _sl_inseguro and _allow_beyond:
                 # Não bloqueia, mas registra e avisa — o operador precisa
@@ -3012,8 +3187,28 @@ class TradingEngine:
             _client_oid = self.client.build_client_oid(
                 sig.symbol, side, qty, _idem
             )
+            # NOVO-F013A-1f — a key that repeats for the SAME unresolved intent
+            # (duplicate submission guard) must never hand a NEW financial
+            # intent the ManagedOrder of a finished trade (same symbol/side/qty
+            # inside the same minute after the previous trade closed). A
+            # terminal previous order with no live position => new generation.
+            _base_idem, _generation = _idem, 0
+            _prev = self.orders.get(_client_oid) if hasattr(self.orders, "get") else None
+            while (_prev is not None and _prev.state in TERMINAIS
+                   and sig.symbol not in self.positions and _generation < 16):
+                _generation += 1
+                _idem = f"{_base_idem}|g{_generation}"
+                _client_oid = self.client.build_client_oid(sig.symbol, side, qty, _idem)
+                _prev = self.orders.get(_client_oid)
+            if _generation:
+                log.warning(
+                    "[ORDER_IDENTITY] symbol=%s previous_intent=TERMINAL generation=%s "
+                    "clientOid=%s reason=new_financial_intent_same_minute",
+                    sig.symbol, _generation, _client_oid,
+                )
 
             for attempt in range(1, MAX_RETRIES + 1):
+                _managed = None
                 try:
                     # ══════════════════════════════════════════════════
                     # P0 — NUNCA RETENTAR ORDEM SEM VERIFICAR EXECUÇÃO
@@ -3051,6 +3246,16 @@ class TradingEngine:
                     # ══════════════════════════════════════════════════
                     # Recheck after analysis/network waits, immediately before
                     # reservation and dispatch. Never size/send against stale funds.
+                    if is_binance() and not self.paper_trade:
+                        from bot.binance_cross_portfolio_stress import final_dispatch_context_valid
+
+                        if not final_dispatch_context_valid(self, sig, qty):
+                            log.critical(
+                                "[BINANCE_CROSS_STRESS] symbol=%s result=BLOCK "
+                                "reason=final_dispatch_context_mismatch stage=FINAL_PREDISPATCH",
+                                sig.symbol,
+                            )
+                            return
                     if not await self._refresh_entry_balance():
                         return
                     if self.paper_trade:
@@ -3078,6 +3283,15 @@ class TradingEngine:
                         _managed.transition(OrderState.SUBMITTING, source="REST")
                     except InvalidTransition as _ie:
                         log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
+                    if _managed.protection_plan is None:
+                        # Durable protective intent travels with the clientOid
+                        # so an ambiguous submit can still be protected once
+                        # the BGX fill is proven (ambiguous_entry_recovery).
+                        from bot.order_state import normalize_protection_plan
+                        _managed.protection_plan = normalize_protection_plan({
+                            "direction": sig.direction, "entry": sig.entry,
+                            "sl": sig.sl, "tp": sig.tp,
+                        })
 
                     # The exact exchange clientOid and SUBMITTING intent must
                     # be durable before place_order can perform network I/O.
@@ -3294,10 +3508,26 @@ class TradingEngine:
                         # registrada com o entry price REAL da exchange
                         # (nunca ticker) e recebe SL/TP imediatamente.
                         # ══════════════════════════════════════════════
+                        _adoptions = dict(getattr(self, "_timeout_adoptions", None) or {})
+                        _adoptions[sig.symbol] = {
+                            "order_id": _oid_real,
+                            "client_oid": (_order or {}).get("clientOid", "") or "",
+                            "direction": sig.direction,
+                            "planned_sl": sig.sl, "planned_tp": sig.tp,
+                        }
+                        self._timeout_adoptions = _adoptions
                         try:
                             _ainda_desprotegidos = await self._reconcile_exchange_positions(
                                 only_symbol=sig.symbol
                             )
+                            _adopted = self.positions.get(sig.symbol)
+                            if _adopted is not None and not self.paper_trade:
+                                # F-013 at the adopted position's exchange average:
+                                # same budget authority and stop repair as no-timeout.
+                                from bot import postfill_risk_recheck as _pfg
+                                _geo = await _pfg.reconcile(
+                                    self, sig, _adopted.qty, {}, log, position_fill=_adopted.entry)
+                                _adopted.sl = _adopted.trailing_sl = _geo.sl
                             if sig.symbol in self.positions:
                                 try:
                                     _managed.transition(
@@ -3319,6 +3549,8 @@ class TradingEngine:
                                 f"_reconcile_exchange_positions falhou para "
                                 f"{sig.symbol}: {_re}"
                             )
+                        finally:
+                            (getattr(self, "_timeout_adoptions", None) or {}).pop(sig.symbol, None)
                         if self._durable_state_enforced:
                             await durable.persist_orders(
                                 self, "fill_timeout_reconcile", strict=False
@@ -3336,7 +3568,44 @@ class TradingEngine:
                     last_exc = exc
                     err_str  = str(exc)
 
-                    # Extrai retCode e retMsg da mensagem de erro estruturada
+                    # BinanceClient owns transport retries and ambiguous-order
+                    # recovery by newClientOrderId. A second engine-level
+                    # submission would create a second logical dispatch boundary,
+                    # so Binance fails closed here and waits for the next signal.
+                    if is_binance():
+                        if self._durable_state_enforced:
+                            await durable.record_binance_margin_rejection(self, _managed, exc)
+                        import re as _re
+                        _code_match = _re.search(
+                            r"code=(-?\d+)", err_str
+                        )
+                        _msg_match = _re.search(
+                            r"msg=(.*)$", err_str
+                        )
+                        ret_code = (
+                            _code_match.group(1)
+                            if _code_match else "?"
+                        )
+                        ret_msg = (
+                            _msg_match.group(1).strip()
+                            if _msg_match else err_str
+                        )
+                        log.error(
+                            f"❌ _open {sig.symbol} tentativa "
+                            f"{attempt}/{MAX_RETRIES} FALHOU | "
+                            f"exchange=binance code={ret_code} "
+                            f"msg='{ret_msg}' | "
+                            f"outer_retry=false "
+                            f"client_transport_recovery=authoritative"
+                        )
+                        log.error(
+                            f"🚫 _open {sig.symbol}: Binance não fará "
+                            f"nova submissão lógica após falha do "
+                            f"dispatcher; aguardando reconciliação/novo sinal"
+                        )
+                        break
+
+                    # KuCoin legacy classification remains venue-specific.
                     import re as _re
                     rc_match  = _re.search(r"KuCoin\s+(\d+):\s*(.*)|code['\"]?\s*[:=]\s*['\"]?(\d+)", err_str)
                     ret_code  = rc_match.group(1) if rc_match else "?"
@@ -3409,30 +3678,44 @@ class TradingEngine:
             # Prioridade: avgDealPrice/dealValue-dealSize (dado real da
             # ordem) > ticker em cache (aproximação de mercado).
             # ══════════════════════════════════════════════════════
-            try:
-                _fill = 0.0
-                _st = _fill_check.get("status", {}) or {}
-                _deal_size  = float(_st.get("dealSize", 0)  or 0)
-                _deal_value = float(_st.get("dealValue", 0) or 0)
-                if _deal_size > 0 and _deal_value > 0:
-                    _fill = _deal_value / _deal_size   # preço médio real
-                if _fill <= 0:
-                    _tk = self.client.get_cached_ticker(sig.symbol) or {}
-                    _fill = float(_tk.get("lastPrice", 0) or 0)
-                if _fill > 0:
-                    _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
-                    if _slip_pct > 0.05:
-                        log.warning(
-                            f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
-                            f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
-                        )
-                    # Desloca SL/TP na mesma proporção para preservar o R:R
-                    _delta = _fill - sig.entry
-                    sig.entry += _delta
-                    sig.sl    += _delta
-                    sig.tp    += _delta
-            except Exception as e:
-                log.debug(f"fill price {sig.symbol}: {e}")
+            if not self.paper_trade:
+                # ══════════════════════════════════════════════════
+                # F-013 (Binance) — GEOMETRIA PÓS-FILL ÚNICA
+                #
+                # A proteção nativa já foi instalada na Binance nos níveis
+                # planejados. Deslocar SL/TP localmente pelo delta do fill
+                # (ou pelo ticker) criava duas geometrias. Agora: fill só do
+                # status da ordem; SL/TP locais = proteção na exchange; aperto
+                # (se o orçamento V3 exigir) é feito NA EXCHANGE com readback.
+                # ══════════════════════════════════════════════════
+                from bot import postfill_risk_recheck as _pfg
+                _geo = await _pfg.reconcile(self, sig, qty, _fill_check.get("status") or {}, log)
+                sig.entry, sig.sl, sig.tp = _geo.entry, _geo.sl, _geo.tp
+            else:
+                try:
+                    _fill = 0.0
+                    _st = _fill_check.get("status", {}) or {}
+                    _deal_size  = float(_st.get("dealSize", 0)  or 0)
+                    _deal_value = float(_st.get("dealValue", 0) or 0)
+                    if _deal_size > 0 and _deal_value > 0:
+                        _fill = _deal_value / _deal_size   # preço médio real
+                    if _fill <= 0:
+                        _tk = self.client.get_cached_ticker(sig.symbol) or {}
+                        _fill = float(_tk.get("lastPrice", 0) or 0)
+                    if _fill > 0:
+                        _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
+                        if _slip_pct > 0.05:
+                            log.warning(
+                                f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
+                                f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
+                            )
+                        # Desloca SL/TP na mesma proporção para preservar o R:R
+                        _delta = _fill - sig.entry
+                        sig.entry += _delta
+                        sig.sl    += _delta
+                        sig.tp    += _delta
+                except Exception as e:
+                    log.debug(f"fill price {sig.symbol}: {e}")
 
             # EXEC-01: `qty` aqui vem de RiskManager.size() e JÁ está em
             # UNIDADE BASE — NÃO converter. Este é o caminho de origem
@@ -3441,15 +3724,18 @@ class TradingEngine:
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
+            _plan = getattr(_managed, "protection_plan", None)
+            if isinstance(_plan, dict):
+                _plan["materialized"] = True
             # Diagnostic filled-position count only. Submission was consumed
             # before sending, including every ambiguous/error path.
             if self.pilot.enabled:
                 self.pilot.register_position_opened(sig.symbol)
             # Persiste no banco
             # ITEM 2: grava os COMPONENTES do score, não só o total.
-            # Permite que score_weights.calibrate_from_history() descubra
-            # estatisticamente quais sinais realmente preveem trades
-            # vencedores — em vez de manter os pesos manuais (+10/+5/+3).
+            # Mantém os dados necessários para uma futura calibração offline
+            # dos pesos (+10/+5/+3), hoje definidos manualmente. O antigo
+            # calibrador bot/score_weights.py nunca foi conectado e foi removido.
             _feats = {}
             try:
                 for _k, _v in (pre_score or {}).items():

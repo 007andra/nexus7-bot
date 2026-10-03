@@ -2,7 +2,9 @@ name: Runtime Truth Candidate
 
 on:
   pull_request:
-    branches: [main]
+    # migration/binance-usdm is the Binance USD-M production branch; PRs into it
+    # must run the same gates as PRs into main.
+    branches: [main, migration/binance-usdm]
     paths:
       - 'bot/runtime_truth.py'
       - 'bot/runtime_truth_exporter.py'

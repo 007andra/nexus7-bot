@@ -1,8 +1,15 @@
-"""Read-only KuCoin ledger reconciliation for external capital flows.
+"""Read-only exchange ledger reconciliation for external capital flows.
 
-This module distinguishes deposits/transfers from trading PnL for LIVE drawdown.
-It never mutates the exchange and never authorizes an order. Only completed
-TransferIn/TransferOut ledger records are eligible.
+KuCoin can provide transfer rows with a post-flow accountEquity anchor, so its
+existing path can safely rebase the durable high-water mark when the evidence
+matches. Binance USD-M income rows expose TRANSFER identity/amount but not a
+post-flow equity anchor. Binance is delegated to ``bot.cash_flow_ledger``: it
+bootstraps by checkpointing already observed transfer identities, rebases the
+performance HWM (time-weighted) only when the pre-flow equity is provable from
+the exchange ledger, and otherwise keeps the flow PENDING (entries blocked)
+until an explicit operator attestation.
+
+This module never mutates the exchange and never authorizes an order.
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ from bot.logger import log
 # assumed positive transfer amounts and could checkpoint past a signed KuCoin
 # TransferOut without applying it. v2 rescans the bounded recent ledger once.
 LAST_FLOW_OFFSET_KEY = "risk:external_capital_flow:last_offset:v2"
+BINANCE_LAST_FLOW_CURSOR_KEY = "risk:external_capital_flow:binance:seen_transfers:v1"
 
 
 def _finite(value, label: str) -> float:
@@ -109,6 +117,32 @@ async def _fetch_transfers(client) -> list[dict]:
     return transfers
 
 
+def _is_binance_client(client) -> bool:
+    """Capability detection without importing the active adapter at module load."""
+    return callable(getattr(client, "_listen_key_request", None))
+
+
+async def _reconcile_binance_capital_flows(
+    client,
+    risk,
+    current_equity: float,
+    *,
+    strict: bool,
+) -> dict:
+    """Delegate to the canonical external cash-flow ledger.
+
+    Binance /fapi/v1/income has no post-transfer equity anchor, so the ledger
+    only rebases the performance HWM when the pre-flow equity is provable from
+    exchange evidence (see ``bot.cash_flow_ledger``); otherwise the flow stays
+    PENDING and new entries remain blocked until an operator attestation.
+    """
+    from bot import cash_flow_ledger
+
+    return await cash_flow_ledger.reconcile_binance(
+        client, risk, current_equity, strict=strict,
+    )
+
+
 def _equity_matches(post_equity: float, current_equity: float) -> bool:
     # Bootstrap is intentionally conservative: only reconcile a ledger event
     # whose post-transfer equity still matches the currently observed account.
@@ -117,15 +151,19 @@ def _equity_matches(post_equity: float, current_equity: float) -> bool:
 
 
 async def reconcile_external_capital_flows(client, risk, current_equity: float, *, strict: bool = True) -> dict:
-    """Apply newly verified KuCoin external cash flows to the durable HWM.
-
-    First-install bootstrap is fail-safe. Historical transfers are never
-    replayed blindly: among the bounded recent completed transfers, at most the
-    newest event whose post-transfer accountEquity matches the current account
-    equity is applied. The newest visible transfer offset is then checkpointed,
-    preventing any older event from being double counted.
-    """
+    """Reconcile external cash flows using exchange-native evidence semantics."""
     current_equity = _positive(current_equity, "current equity")
+
+    if _is_binance_client(client):
+        return await _reconcile_binance_capital_flows(
+            client,
+            risk,
+            current_equity,
+            strict=strict,
+        )
+
+    # KuCoin path: post-transfer accountEquity permits an evidence-anchored HWM
+    # rebase. Historical transfers are never replayed blindly.
     transfers = await _fetch_transfers(client)
     if not transfers:
         log.info("[CAPITAL_FLOW_LEDGER] transfers=0 action=none execution_effect=NONE")

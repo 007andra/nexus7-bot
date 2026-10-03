@@ -86,7 +86,7 @@ def install(TradingEngine, log):
     if getattr(TradingEngine, "_operator_loss_policy_installed", False):
         return
     from bot.config import cfg
-    from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+    from bot import execution_cost
     original_open = TradingEngine._open
     original_exit = TradingEngine._check_stagnation_and_invalidation
 
@@ -97,8 +97,20 @@ def install(TradingEngine, log):
 
     async def open_with_technical_loss_geometry(self, sig, *args, **kwargs):
         if enabled(self):
+            # Same per-candidate cost snapshot later reused by NEXUS EV/R:R, so
+            # the technical estimated_net_rr and NEXUS rr_net agree for the
+            # same candidate (audit P0-3). A snapshot failure falls back to the
+            # conservative static cost and says so.
             try:
-                cost = estimated_round_trip_cost_pct(sig.symbol) / 100.0
+                snapshot, reused = await execution_cost.snapshot_for(self, sig)
+                cost_fields = snapshot.log_fields() + f" cost_snapshot_reused={str(reused).lower()}"
+                cost = snapshot.round_trip_cost_fraction
+            except Exception as exc:  # noqa: BLE001 - diagnostics must not raise
+                cost = execution_cost.static_round_trip_cost_fraction(getattr(sig, "symbol", ""))
+                cost_fields = (
+                    f"cost_snapshot_id=static_fallback cost_snapshot_error={type(exc).__name__}"
+                )
+            try:
                 min_rr_net = float(os.environ.get(
                     "NEXUS_MIN_RR_NET",
                     str(round(float(cfg.MIN_RR_RATIO) * 0.80, 2)),
@@ -120,13 +132,17 @@ def install(TradingEngine, log):
                 log.info(
                     "[TECHNICAL_STOP_POLICY] symbol=%s result=PASS source=strategy_structure_atr "
                     "sl=%.8f tp=%.8f stop_distance_pct=%.5f target_distance_pct=%.5f "
-                    "min_rr_net_reference=%.3f estimated_net_rr=%.3f net_rr_reference_met=%s "
-                    "estimated_cost_pct=%.5f geometry_mutated=false economic_gate=NEXUS "
-                    "sizing_authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE",
+                    "entry_reference=%.8f gross_rr=%.4f "
+                    "min_rr_net_reference=%.3f estimated_net_rr=%.4f net_rr_reference_met=%s "
+                    "estimated_cost_pct=%.5f %s geometry_mutated=false economic_gate=NEXUS "
+                    "risk_authority=RiskManagerV3 "
+                    "final_quantity_policy=min(stop_risk_qty,operator_margin_cap_qty)",
                     sig.symbol, original_sl, original_tp,
                     diagnostics["stop_distance_pct"], diagnostics["target_distance_pct"],
+                    float(sig.entry),
+                    diagnostics["target_distance_pct"] / diagnostics["stop_distance_pct"],
                     min_rr_net, diagnostics["estimated_net_rr"],
-                    diagnostics["net_rr_meets_reference"], cost * 100.0,
+                    diagnostics["net_rr_meets_reference"], cost * 100.0, cost_fields,
                 )
             except (ValueError, TypeError, ArithmeticError) as exc:
                 log.error(

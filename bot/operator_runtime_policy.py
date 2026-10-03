@@ -1,14 +1,20 @@
 """Operator LIVE sizing and explicit risk-override policy.
 
-The controlled LIVE pilot keeps the operator-requested execution geometry:
+The controlled LIVE pilot applies the operator margin ceiling:
 
-* target initial margin = 50% of freshly authenticated available collateral;
+* operator cap: initial margin <= 50% of freshly authenticated available
+  collateral by default, or an explicitly configured fraction up to 100%;
 * leverage is read from the existing configuration (production currently uses 50x);
-* stop-risk sizing remains telemetry under this operator margin policy.
+* the executed quantity is decided by ``final_sizing_invariants``:
+  ``min(stop_risk_qty, operator_margin_cap_qty)`` with RiskManagerV3 as risk
+  authority. The hook installed here is shadowed in a pilot context.
 
-A drawdown breach is fail-closed by default. It may be bypassed only when the
-operator explicitly enables LIVE_RISK_OVERRIDE_APPROVED=true. The override
-never bypasses balance, position-count, protection, duplicate-order,
+A drawdown breach is fail-closed by default. It may be bypassed only by the
+explicit global LIVE_RISK_OVERRIDE_APPROVED=true override, or by the bounded
+drawdown-recovery policy when that policy is fully configured and currently
+eligible. Recovery only neutralizes the legacy engine pause so the candidate
+can reach the normal risk and durable pre-dispatch recovery gates; it never
+bypasses balance, daily-stop, position-count, protection, duplicate-order,
 reconciliation, instrument or other execution-safety gates.
 """
 from __future__ import annotations
@@ -17,7 +23,7 @@ import math
 import os
 
 from bot.config import cfg
-from bot import startup_ready_notification
+from bot import market_radar, startup_ready_notification
 
 
 MARGIN_FRACTION = 0.50
@@ -48,13 +54,36 @@ def _protect_drawdown_update(self, bound_update, log, *, source: str):
                     float(cfg.MAX_DRAWDOWN) * 100.0,
                 )
             else:
-                log.error(
-                    "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "override=false entries_blocked=true execution_effect=BLOCK_NEW_ENTRIES",
-                    source,
-                    drawdown_before * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
+                from bot.drawdown_recovery import threshold_decision
+                recovery_allowed, recovery_reason, recovery = threshold_decision(
+                    drawdown_before
                 )
+                if (
+                    recovery_allowed
+                    and recovery_reason == "recovery_threshold_exception"
+                ):
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_%s] episode=%s drawdown=%.2f%% "
+                        "configured_limit=%.2f%% recovery_ceiling=%.2f%% "
+                        "legacy_pause_may_be_neutralized=true "
+                        "final_authority=can_open+durable_predispatch "
+                        "execution_effect=NONE",
+                        source,
+                        recovery.episode_id,
+                        drawdown_before * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                        float(recovery.max_drawdown) * 100.0,
+                    )
+                else:
+                    log.error(
+                        "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "override=false entries_blocked=true recovery_reason=%s "
+                        "execution_effect=BLOCK_NEW_ENTRIES",
+                        source,
+                        drawdown_before * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                        recovery_reason,
+                    )
 
         try:
             return await bound_update(*args, **kwargs)
@@ -74,13 +103,42 @@ def _protect_drawdown_update(self, bound_update, log, *, source: str):
                         float(cfg.MAX_DRAWDOWN) * 100.0,
                     )
                 else:
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "legacy_pause_preserved=true active_restored=false override=false",
-                        source,
-                        drawdown * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                    from bot.drawdown_recovery import threshold_decision
+                    recovery_allowed, recovery_reason, recovery = threshold_decision(
+                        drawdown
                     )
+                    if (
+                        recovery_allowed
+                        and recovery_reason == "recovery_threshold_exception"
+                    ):
+                        # Keep the engine loop alive only long enough for the
+                        # normal daily-stop/risk gates and durable pre-dispatch
+                        # recovery receipt to decide the candidate. This does
+                        # not authorize an order by itself.
+                        self.active = True
+                        self._dd_alerted = True
+                        log.critical(
+                            "[DRAWDOWN_RECOVERY_%s] episode=%s drawdown=%.2f%% "
+                            "configured_limit=%.2f%% recovery_ceiling=%.2f%% "
+                            "legacy_pause_neutralized=true active_restored=true "
+                            "final_authority=can_open+daily_stop+durable_predispatch "
+                            "execution_effect=NONE",
+                            source,
+                            recovery.episode_id,
+                            drawdown * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            float(recovery.max_drawdown) * 100.0,
+                        )
+                    else:
+                        log.error(
+                            "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                            "legacy_pause_preserved=true active_restored=false "
+                            "override=false recovery_reason=%s",
+                            source,
+                            drawdown * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            recovery_reason,
+                        )
 
     return _guarded_update
 
@@ -121,14 +179,25 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
             )
             if self.drawdown >= cfg.MAX_DRAWDOWN:
                 if not _risk_override_enabled():
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "override=false entries_blocked=true",
+                    from bot.drawdown_recovery import threshold_decision
+                    recovery_allowed, recovery_reason, recovery = threshold_decision(self.drawdown)
+                    if not (recovery_allowed and recovery_reason == "recovery_threshold_exception"):
+                        log.error(
+                            "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
+                            "override=false entries_blocked=true recovery_reason=%s",
+                            float(self.drawdown) * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            recovery_reason,
+                        )
+                        return False
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_SCAN] episode=%s drawdown=%.2f%% "
+                        "threshold_exception=true final_authority=predispatch",
+                        recovery.episode_id,
                         float(self.drawdown) * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
                     )
-                    return False
-                log.critical(
+                else:
+                    log.critical(
                     "[DRAWDOWN_OVERRIDE] drawdown=%.2f%% configured_limit=%.2f%% "
                     "override=true entries_blocked=false",
                     float(self.drawdown) * 100.0,
@@ -150,14 +219,25 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                 return False
             if self.drawdown >= cfg.MAX_DRAWDOWN:
                 if not _risk_override_enabled():
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "override=false entries_blocked=true",
+                    from bot.drawdown_recovery import threshold_decision
+                    recovery_allowed, recovery_reason, recovery = threshold_decision(self.drawdown)
+                    if not (recovery_allowed and recovery_reason == "recovery_threshold_exception"):
+                        log.error(
+                            "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
+                            "override=false entries_blocked=true recovery_reason=%s",
+                            float(self.drawdown) * 100.0,
+                            float(cfg.MAX_DRAWDOWN) * 100.0,
+                            recovery_reason,
+                        )
+                        return False
+                    log.critical(
+                        "[DRAWDOWN_RECOVERY_SCAN_V3] episode=%s drawdown=%.2f%% "
+                        "threshold_exception=true final_authority=predispatch",
+                        recovery.episode_id,
                         float(self.drawdown) * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
                     )
-                    return False
-                log.critical(
+                else:
+                    log.critical(
                     "[DRAWDOWN_OVERRIDE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
                     "override=true entries_blocked=false",
                     float(self.drawdown) * 100.0,
@@ -211,9 +291,13 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                     getattr(current_bound_update, "__name__", type(current_bound_update).__name__),
                 )
             watcher = startup_ready_notification.start(self, log)
+            # Observability-only Telegram panel; shares this reviewed run
+            # owner's lifecycle and never touches execution state.
+            radar = market_radar.start(self, log)
             try:
                 return await previous_run(self, *args, **kwargs)
             finally:
+                await market_radar.cancel(radar)
                 await startup_ready_notification.cancel(watcher)
 
         TradingEngine.run = _run_with_instance_drawdown_advisory
@@ -221,7 +305,7 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
 
 
 def _install_margin_sizing(log) -> None:
-    """Keep 50% of fresh available collateral as the LIVE pilot margin target."""
+    """Apply the operator allocation to fresh LIVE available collateral."""
     from bot import engine as engine_module
     from bot import pilot_live_runtime
     from bot import pilot_risk_cap_hardening as pilot_cap
@@ -257,7 +341,17 @@ def _install_margin_sizing(log) -> None:
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        target_margin = available * MARGIN_FRACTION
+        from bot.final_sizing_invariants import operator_margin_fraction, operator_target_margin
+        try:
+            margin_fraction = operator_margin_fraction()
+        except ValueError:
+            pilot_cap._PILOT_FINAL_QTY.set(0.0)
+            log.critical(
+                "[PILOT_MARGIN_SIZING] symbol=%s result=BLOCK reason=invalid_margin_fraction",
+                symbol,
+            )
+            return 0.0
+        target_margin = operator_target_margin(available, leverage, margin_fraction)
         target_notional = target_margin * leverage
         try:
             target_qty = float(
@@ -300,10 +394,11 @@ def _install_margin_sizing(log) -> None:
             "[PILOT_MARGIN_SIZING] symbol=%s result=PASS available=%.6f "
             "margin_pct=%.2f%% target_margin=%.6f leverage=%.0fx "
             "target_notional=%.6f qty=%.12g actual_margin=%.6f "
-            "stop_risk_qty_advisory=%.12g authority=operator_margin_policy",
+            "stop_risk_qty_advisory=%.12g authority=operator_margin_policy "
+            "superseded_by=final_sizing_invariants",
             symbol,
             available,
-            MARGIN_FRACTION * 100.0,
+            margin_fraction * 100.0,
             target_margin,
             leverage,
             target_notional,
@@ -321,10 +416,13 @@ def install(TradingEngine, log) -> None:
     """Install after all controlled-pilot sizing/risk wrappers."""
     _install_drawdown_advisory(TradingEngine, log)
     _install_margin_sizing(log)
+    from bot.final_sizing_invariants import operator_margin_fraction
     log.critical(
-        "[OPERATOR_RUNTIME_POLICY] installed margin_target=50pct_available "
+        "[OPERATOR_RUNTIME_POLICY] installed margin_cap=%.2fpct_available "
+        "sizing_authority=final_sizing_invariants "
         "leverage=%sx drawdown_default=hard_gate explicit_override_supported=true "
-        "override_enabled=%s railway_variables_unchanged=true",
+        "override_enabled=%s",
+        operator_margin_fraction() * 100.0,
         cfg.LEVERAGE,
         _risk_override_enabled(),
     )

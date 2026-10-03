@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-
 from bot import nexus_decision_consistency as consistency
 
 
@@ -104,6 +103,31 @@ def test_detect_regime_outside_entry_decision_retains_original_inputs():
 
     fake_ai.detect_regime([1] * 15, [1] * 15, [1] * 15, [1] * 15)
     assert observed == [15]
+
+
+def test_wait_score_snapshot_is_handed_back_without_execution_change():
+    def original(symbol, k15, k1h, k4h, *args, **kwargs):
+        return SimpleNamespace(
+            decision="WAIT",
+            setup_quality=0.0,
+            reasoning=["aguardando confirmação"],
+        )
+
+    fake_ai = _fake_ai(original)
+    fake_log = SimpleNamespace(
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+    )
+
+    consistency.install(fake_ai, fake_log)
+    result = fake_ai.decide(
+        "SOLUSDT", _candles(100), _candles(100), _candles(100)
+    )
+
+    assert result.decision == "WAIT"
+    snapshot = getattr(result, "_bgx_score_snapshot")
+    assert isinstance(snapshot, dict)
+    assert "ok" in snapshot
 
 
 def test_install_is_idempotent():

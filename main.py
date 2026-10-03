@@ -1,5 +1,5 @@
 """
-BGX Capital — API Server v12.1 (KuCoin)
+BGX Capital — API Server v12.2 (exchange-selectable)
 Única mudança em relação à versão Bybit:
   - Import: KuCoinClient em vez de BybitClient
   - Variável de ambiente: KUCOIN_API_KEY/SECRET/PASSPHRASE
@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # ── ÚNICA LINHA ALTERADA em relação à versão Bybit ───────────────
-from bot.kucoin import KuCoinClient as ExchangeClient, PAPER_TRADE, TRADING_MODE_REASON
+from bot.exchange import ExchangeClient, PAPER_TRADE, TRADING_MODE_REASON, EXCHANGE_NAME, EXCHANGE_PRODUCT
 # ─────────────────────────────────────────────────────────────────
 
 from bot.nexus_runtime_engine import TradingEngine
@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
     O carregamento de instrumentos vai para uma task de background com
     timeout, e o engine só inicia depois que ela conclui.
     """
-    log.info("🚀 BGX Capital v12.1 (KuCoin) iniciando...")
+    log.info("🚀 BGX Capital v12.2 (%s %s) iniciando...", EXCHANGE_NAME, EXCHANGE_PRODUCT)
 
     # ══════════════════════════════════════════════════════════════
     # SELF-CHECK DE INTEGRIDADE (previne bugs silenciosos)
@@ -130,6 +130,151 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.error(f"❌ load_instruments falhou: {e} — seguindo mesmo assim")
 
+        # Binance private-auth startup probe: signed READ-ONLY request.
+        # This proves API key/secret/signature/timestamp validity without
+        # creating, cancelling, or modifying any exchange order. Failure is
+        # telemetry-only while PAPER is active; LIVE release gates remain
+        # authoritative and unchanged.
+        if EXCHANGE_NAME == "binance":
+            try:
+                await asyncio.wait_for(client.sync_time(), timeout=5)
+                _auth_rows = await asyncio.wait_for(
+                    client._get("/fapi/v3/balance", auth=True), timeout=10
+                )
+                if isinstance(_auth_rows, list):
+                    log.info(
+                        "[BINANCE_PRIVATE_AUTH] status=PASS "
+                        "endpoint=/fapi/v3/balance http=200 response=list "
+                        "values_redacted=true execution_effect=NONE"
+                    )
+
+                    # Read-only execution-readiness probe. This intentionally
+                    # avoids account-wide open-order queries (weight 40) and
+                    # performs no exchange mutation.
+                    try:
+                        _probe_symbol = "BTCUSDT"
+                        _position_mode = await asyncio.wait_for(
+                            client.get_position_mode(), timeout=8
+                        )
+                        _account_state = await asyncio.wait_for(
+                            client.get_account_state(), timeout=8
+                        )
+                        _positions = await asyncio.wait_for(
+                            client.get_positions(), timeout=8
+                        )
+                        _normal_orders = await asyncio.wait_for(
+                            client.get_open_orders(_probe_symbol), timeout=8
+                        )
+                        _algo_orders = await asyncio.wait_for(
+                            client.get_stop_orders(_probe_symbol), timeout=8
+                        )
+                        _brackets = await asyncio.wait_for(
+                            client.get_leverage_brackets(_probe_symbol), timeout=8
+                        )
+                        _mode_ok = _position_mode == "ONE_WAY"
+                        _state_ok = isinstance(_account_state, dict)
+                        _positions_ok = isinstance(_positions, list)
+                        _normal_ok = isinstance(_normal_orders, list)
+                        _algo_ok = isinstance(_algo_orders, list)
+                        _brackets_ok = bool(
+                            isinstance(_brackets, dict)
+                            and isinstance(_brackets.get("brackets"), list)
+                            and _brackets.get("brackets")
+                        )
+                        _ready = all(
+                            (
+                                _mode_ok,
+                                _state_ok,
+                                _positions_ok,
+                                _normal_ok,
+                                _algo_ok,
+                                _brackets_ok,
+                            )
+                        )
+                        log.log(
+                            20 if _ready else 30,
+                            "[BINANCE_READINESS] status=%s position_mode=%s "
+                            "account_state=%s positions_read=%s normal_orders_read=%s "
+                            "algo_orders_read=%s leverage_brackets_read=%s "
+                            "probe_symbol=%s mutation=false execution_effect=%s",
+                            "PASS" if _ready else "BLOCK_LIVE_RELEASE",
+                            _position_mode,
+                            _state_ok,
+                            _positions_ok,
+                            _normal_ok,
+                            _algo_ok,
+                            _brackets_ok,
+                            _probe_symbol,
+                            "NONE" if _ready else "BLOCK_LIVE_RELEASE",
+                        )
+                    except Exception as _readiness_error:
+                        log.warning(
+                            "[BINANCE_READINESS] status=FAIL error_type=%s "
+                            "detail=%s mutation=false execution_effect=BLOCK_LIVE_RELEASE",
+                            type(_readiness_error).__name__,
+                            str(_readiness_error).replace("\n", " ")[:180],
+                        )
+                else:
+                    log.warning(
+                        "[BINANCE_PRIVATE_AUTH] status=FAIL "
+                        "endpoint=/fapi/v3/balance reason=unexpected_response "
+                        "values_redacted=true execution_effect=NONE"
+                    )
+            except Exception as _e:
+                # BinanceClient RuntimeError messages contain only HTTP/code/msg;
+                # credential/signature material is never included by _request.
+                _auth_error = str(_e).replace("\n", " ")[:240]
+                _classification = "FUTURES_PRIVATE_REJECTED"
+                _spot_http = None
+                _spot_code = None
+
+                # If Futures returns -2015, run one additional signed READ-ONLY
+                # Spot account probe. This separates a Futures-scope problem
+                # from key/IP/environment problems without logging account data.
+                if "code=-2015" in _auth_error:
+                    try:
+                        import aiohttp as _aiohttp
+
+                        from bot import binance as _binance_module
+                        _key = _binance_module.API_KEY
+                        _params = client._signed_params({})
+                        _timeout = _aiohttp.ClientTimeout(total=8)
+                        async with _aiohttp.ClientSession(timeout=_timeout) as _session:
+                            async with _session.get(
+                                "https://api.binance.com/api/v3/account",
+                                params=_params,
+                                headers={"X-MBX-APIKEY": _key},
+                            ) as _resp:
+                                _spot_http = _resp.status
+                                try:
+                                    _payload = await _resp.json(content_type=None)
+                                except Exception:
+                                    _payload = {}
+                                if isinstance(_payload, dict):
+                                    _spot_code = _payload.get("code")
+
+                        if _spot_http == 200:
+                            _classification = "FUTURES_PERMISSION_OR_ACCOUNT_SCOPE"
+                        elif _spot_code == -2015:
+                            _classification = "API_KEY_IP_OR_ENVIRONMENT"
+                        elif _spot_code == -1022:
+                            _classification = "API_SECRET_OR_SIGNATURE"
+                        elif _spot_code == -1021:
+                            _classification = "TIMESTAMP_OR_RECV_WINDOW"
+                        else:
+                            _classification = "SPOT_DIAGNOSTIC_INCONCLUSIVE"
+                    except Exception:
+                        _classification = "SPOT_DIAGNOSTIC_FAILED"
+
+                log.warning(
+                    "[BINANCE_PRIVATE_AUTH] status=FAIL "
+                    "endpoint=/fapi/v3/balance error_type=%s detail=%s "
+                    "classification=%s spot_http=%s spot_code=%s "
+                    "values_redacted=true execution_effect=NONE",
+                    type(_e).__name__, _auth_error, _classification,
+                    _spot_http, _spot_code,
+                )
+
         app.state.ready = True
 
         if _blocked_by_selfcheck:
@@ -157,7 +302,7 @@ async def lifespan(app: FastAPI):
 
         app.state.blocked = False
         app.state.engine_task = asyncio.create_task(engine.run())
-        log.info("✅ BGX Capital online (KuCoin Futures)")
+        log.info("✅ BGX Capital online (%s %s)", EXCHANGE_NAME, EXCHANGE_PRODUCT)
 
         # Mensagem de startup deriva do estado operacional real. Em especial,
         # PAPER_TRADE=false + VALIDATION_LOCK agora é SHADOW_LIVE e nunca
@@ -209,7 +354,7 @@ async def lifespan(app: FastAPI):
     log.info("👋 Encerrado")
 
 
-app = FastAPI(title="BGX Capital KuCoin", version="12.1.0", lifespan=lifespan)
+app = FastAPI(title=f"BGX Capital {EXCHANGE_NAME}", version="12.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -238,8 +383,8 @@ async def health():
     )
     return {
         "status":   "ok",
-        "version":  "12.1.0",
-        "exchange": "kucoin",
+        "version":  "12.2.0",
+        "exchange": EXCHANGE_NAME,
         "ready":    runtime["ready"],
         "connected": runtime["connected"],
         "active": runtime["active"],
@@ -255,7 +400,7 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "12.1.0", "exchange": "kucoin"}
+    return {"status": "online", "version": "12.2.0", "exchange": EXCHANGE_NAME}
 
 
 # ── Status / Saldo / Posições ─────────────────────────────────────
@@ -266,7 +411,7 @@ async def status():
 @app.get("/api/balance", dependencies=[Depends(_require_auth)])
 async def balance():
     b = await app.state.client.get_balance()
-    return {"balance": b, "currency": "USDT", "exchange": "kucoin"}
+    return {"balance": b, "currency": "USDT", "exchange": EXCHANGE_NAME}
 
 @app.get("/api/positions", dependencies=[Depends(_require_auth)])
 async def positions():
@@ -274,7 +419,7 @@ async def positions():
     return {
         "open":     [p.to_dict() for p in eng.positions.values()],
         "count":    len(eng.positions),
-        "exchange": "kucoin",
+        "exchange": EXCHANGE_NAME,
     }
 
 
@@ -600,9 +745,14 @@ async def dashboard():
 # ── Backtest manual ───────────────────────────────────────────────
 @app.post("/api/backtest", dependencies=[Depends(_require_auth)])
 async def trigger_backtest():
+    # weekly_backtest_loop never returns; each call used to start another
+    # permanent loop task. Keep at most one alive per process.
+    running = getattr(app.state, "backtest_task", None)
+    if running is not None and not running.done():
+        return {"message": "Backtest já em execução", "started": False}
     from bot import backtest as bt
-    asyncio.create_task(bt.weekly_backtest_loop(app.state.client))
-    return {"message": "Backtest iniciado"}
+    app.state.backtest_task = asyncio.create_task(bt.weekly_backtest_loop(app.state.client))
+    return {"message": "Backtest iniciado", "started": True}
 
 
 if __name__ == "__main__":

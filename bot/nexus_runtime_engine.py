@@ -9,13 +9,21 @@ No exchange mutation, release state, or execution permission is changed here.
 """
 from __future__ import annotations
 
+import math
+
 from bot import account_balance_semantics
+from bot import capital_flow_reconciliation as capital_flows
+from bot import binance_hwm_incident_repair as hwm_incident_repair
 from bot import missed_opportunity_audit
 from bot.account_capital_reader import read_account_capital
 from bot.config import cfg
-from bot.drawdown_persistence import restore_update_real_account_peak
+from bot.drawdown_persistence import (
+    restore_update_real_account_peak,
+    restore_zero_equity_peak_fail_closed,
+)
 from bot.engine import TradingEngine as CoreTradingEngine
 from bot.kucoin_position_units import KuCoinPositionUnitAdapter
+from bot.exchange import EXCHANGE_NAME
 from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
 from bot.notifier import notify
@@ -29,11 +37,13 @@ class TradingEngine(CoreTradingEngine):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # KuCoin currentQty is native contracts while every engine/risk/Position
-        # quantity is base asset. Normalize all engine-facing position reads at
-        # one explicit runtime boundary. The underlying exchange client and all
-        # order-dispatch methods remain untouched/delegated.
-        if not isinstance(self.client, KuCoinPositionUnitAdapter):
+        # KuCoin exposes native contract counts and therefore needs an inbound
+        # normalization proxy. Binance USD-M already exposes base-asset
+        # quantities, so wrapping it in the KuCoin multiplier adapter would
+        # convert the quantity a second time.
+        if EXCHANGE_NAME == "kucoin" and not isinstance(
+            self.client, KuCoinPositionUnitAdapter
+        ):
             self.client = KuCoinPositionUnitAdapter(self.client)
         if not isinstance(self.risk, ProfessionalRiskAdapter):
             self.risk = ProfessionalRiskAdapter(self.risk)
@@ -51,9 +61,9 @@ class TradingEngine(CoreTradingEngine):
         This override is intentionally limited to the composed runtime. The
         unwrapped legacy core keeps its original contracts-to-base conversion.
         """
-        if isinstance(self.client, KuCoinPositionUnitAdapter):
+        if isinstance(self.client, KuCoinPositionUnitAdapter) or EXCHANGE_NAME == "binance":
             value = float(quantity)
-            if value != value or value < 0:
+            if not math.isfinite(value) or value < 0:
                 raise ValueError(
                     f"_contracts_to_base_qty({symbol}): invalid normalized base quantity"
                 )
@@ -86,6 +96,28 @@ class TradingEngine(CoreTradingEngine):
             state = await account_balance_semantics.read_account_state(self.client)
             equity = float(state["equity"])
             self.risk.update(equity)
+
+            if equity <= 0.0:
+                await restore_zero_equity_peak_fail_closed(self.risk, strict=True)
+                self.risk.balance_confirmed = False
+                self.risk.invalidate_capital()
+                self._drawdown_hard_gate_active = True
+                log.critical(
+                    "[LIVE_CAPITAL_ORDER] stage=balance_refresh equity=0 "
+                    "cashflow_reconcile=SKIPPED hwm_promotion=BLOCKED "
+                    "execution_effect=BLOCK_NEW_ENTRIES"
+                )
+                return
+
+            # External cash flows are accounting events, not performance. This
+            # reconciliation MUST complete before any positive equity is allowed
+            # to promote the durable HWM.
+            await capital_flows.reconcile_external_capital_flows(
+                self.client, self.risk, equity, strict=True
+            )
+            await hwm_incident_repair.repair_if_needed(
+                self.risk, equity, strict=True
+            )
             await restore_update_real_account_peak(self.risk, equity, strict=True)
 
             if equity > 0:
@@ -137,11 +169,14 @@ class TradingEngine(CoreTradingEngine):
             return
 
         risk_pct = float(self._effective_risk_pct())
+        from bot.execution_cost import reusable_snapshot
+
         self.risk.set_plan(
             symbol=sig.symbol,
             entry=float(sig.entry),
             stop=float(sig.sl),
             risk_pct=risk_pct,
+            cost_snapshot=reusable_snapshot(sig),
         )
 
         if getattr(self, "paper_trade", False):
@@ -157,9 +192,25 @@ class TradingEngine(CoreTradingEngine):
 
         try:
             snapshot = await read_account_capital(self.client)
+            equity = float(snapshot.capital.equity)
+            if equity <= 0.0:
+                await restore_zero_equity_peak_fail_closed(self.risk, strict=True)
+                self.risk.invalidate_capital()
+                raise RuntimeError("LIVE capital unavailable for RiskManagerV3")
+
             self.risk.update_capital(snapshot.capital)
+
+            # Candidate-level capital refresh must obey the same ordering as the
+            # controlled LIVE balance path: reconcile exchange cash flows first,
+            # then allow authenticated equity to update the performance HWM.
+            await capital_flows.reconcile_external_capital_flows(
+                self.client, self.risk, equity, strict=True
+            )
+            await hwm_incident_repair.repair_if_needed(
+                self.risk, equity, strict=True
+            )
             await restore_update_real_account_peak(
-                self.risk, snapshot.capital.equity, strict=True
+                self.risk, equity, strict=True
             )
             if not self.risk._v3.can_open(len(self.positions)):
                 self.risk.invalidate_capital()

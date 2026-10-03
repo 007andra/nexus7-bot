@@ -4,7 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # migration/binance-usdm is the Binance USD-M production branch; PRs into it
+    # must run the same gates as PRs into main.
+    branches: [main, migration/binance-usdm]
   schedule:
     - cron: "23 5 * * 1"
   workflow_dispatch:

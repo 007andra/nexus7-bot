@@ -1,10 +1,8 @@
 import logging, sys, os
-import json
 import queue
 import re
 import threading
 import time
-import urllib.request
 from collections import Counter
 
 _AI_TG_QUEUE = queue.Queue(maxsize=100)
@@ -57,7 +55,8 @@ def _diag(message, exc=None):
         return
 
 def _tg_enabled():
-    return os.environ.get("NEXUS_TELEGRAM", "true").lower() == "true" and bool(os.environ.get("TELEGRAM_TOKEN")) and bool(os.environ.get("TELEGRAM_CHAT"))
+    from bot import telegram_credentials
+    return os.environ.get("NEXUS_TELEGRAM", "true").lower() == "true" and telegram_credentials.configured()
 
 def _safe_float(value):
     try: return float(value)
@@ -140,10 +139,12 @@ def _tg_worker():
     while True:
         text=_AI_TG_QUEUE.get()
         try:
-            token=os.environ.get("TELEGRAM_TOKEN",""); chat=os.environ.get("TELEGRAM_CHAT","")
-            if not token or not chat: continue
-            req=urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage",data=json.dumps({"chat_id":chat,"text":text}).encode("utf-8"),headers={"Content-Type":"application/json"},method="POST")
-            with urllib.request.urlopen(req,timeout=8) as resp: resp.read(64)
+            # Canonical transport (classified, bounded retry, shared breaker).
+            # Class names only: never the exception text, URL or token.
+            from bot import telegram_transport
+            res=telegram_transport.deliver_sync(text,source="nexus_audit")
+            if not res.sent and res.skipped is None:
+                _diag(f"Telegram delivery failed: class={res.cls} attempts={res.attempts} status={res.status if res.status is not None else 'NA'}")
         except Exception as exc:
             _diag("Telegram delivery failed", exc)
         finally: _AI_TG_QUEUE.task_done()
