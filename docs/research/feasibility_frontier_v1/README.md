@@ -82,24 +82,25 @@ Nenhum desses módulos é registrado pelo runtime, e um teste garante isso.
 O MIN_ORDER aprova 55 dos 665 sinais.
 
 **3. MIN_ORDER + NEXUS ao mesmo tempo:**
-- Na prática, só **SOL e ETH com R bruto 3** (5 de 665 sinais, 0,8%).
+- Na prática, só **SOL e ETH com R bruto 3** (5 de 665 sinais, 0,8%): SOL com 3 sinais e filtros INFERRED; ETH com 2 sinais e filtros **ASSUMED**.
+  O resultado de ETH é hipótese (cenário N5, otimista) e **não deve ser promovido** até os filtros reais serem registrados.
 - Em teoria, quase todas as alts com minNotional de 5 passariam com R ≥ 3,5 e stop de cerca de 0,5%. Essa geometria quase não aparece na estratégia atual.
 - Os dois gates selecionam populações quase disjuntas:
   - o MIN_ORDER exige stop curto (orçamento de 0,0438 USDT para uma ordem mínima de cerca de 5 USDT ou mais);
   - o NEXUS exige stop ≥ 6,5 × o custo quando R = 2 (1,30% nos majors, 1,95% nas alts).
 
 **4. R bruto mínimo por símbolo, no stop mediano observado.** Está no REPORT, seção 4. Exemplos:
-- TRX 5,11; BNB 3,80; BTC 3,34; ETH 2,76; SOL 2,37;
+- TRX 5,11; BNB 3,80; BTC 3,34; ETH 2,76 (filtros ASSUMED; o R mínimo independe dos filtros); SOL 2,37;
 - alts de stop largo ficam entre 1,9 e 2,3 (ARB, FIL, INJ, LINK e NEAR passam com R = 2).
 
 **5. Equity mínima para o MIN_ORDER, no stop mediano observado, com as políticas atuais:**
-- TRX 5,2; ETH 7,1 (N5); BNB 10,3; SOL 10,5;
-- DOGE 11,8; XRP 13,2; ATOM 14,6; ADA 14,9; APT 14,5;
-- OP 18,3; UNI 18,7; DOT 18,9; PEOPLE 19,5; SEI 20,6; SUI 20,9;
-- FIL 23,0; ARB 24,0; INJ 28,1; NEAR 29,5;
+- TRX 5,2; ETH 7,1 (ASSUMED, N5); BNB 10,3; SOL 10,5;
+- DOGE 11,8 (ASSUMED); XRP 13,2 (ASSUMED); ATOM 14,6; ADA 14,9 (ASSUMED); APT 14,5 (ASSUMED);
+- OP 18,3; UNI 18,7 (ASSUMED); DOT 18,9 (ASSUMED); PEOPLE 19,5; SEI 20,6 (ASSUMED); SUI 20,9 (ASSUMED);
+- FIL 23,0; ARB 24,0; INJ 28,1 (ASSUMED); NEAR 29,5;
 - LTC 44,8; AVAX 47,0; ETC 54,4; AAVE 79,9; BTC 84,6; LINK 92,4 USDT.
 
-Isso não basta sozinho: o NEXUS também exige o R mínimo do item 4.
+Valores marcados ASSUMED usam o cenário N5 (otimista) e são hipóteses, não fatos; com minNotional 20 a equity mínima é cerca de 4× maior (ver REPORT). Isso não basta sozinho: o NEXUS também exige o R mínimo do item 4.
 
 **6. O custo está sendo superestimado?** Provavelmente sim, e de forma material:
 - alts: 30 bps estáticos contra pelo menos 14 a 17 bps com BBO;

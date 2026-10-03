@@ -6,6 +6,7 @@ RESEARCH / SHADOW ONLY. decision_effect=NONE execution_effect=NONE. No threshold
 - Equity 8.7583 USDT, effective stop-risk 0.50%, leverage 50x, margin cap 100% of available
 - NEXUS net R:R floor 1.60; EV evaluated at win_prob=0.45 (confidence 33.3); observed low-confidence case p=0.356 (confidence 12.4)
 - Costs = live runtime static model: taker 5 bps/side; slippage 5 bps/side majors (BTC/ETH/SOL), 10 bps/side alts; MIN_ORDER sizing slippage floor NEXUS_EXPECTED_SLIPPAGE_PCT=0.10%
+- ASSUMED rows (suffix (N5)/(N20)) have NO filter evidence: they are hypotheses, never facts, and must not be promoted to any LIVE conclusion until real filters are logged
 - Filters provenance: OBSERVED = full filters in [SIZING_DECOMPOSITION]; INFERRED = [MIN_ORDER_FEASIBILITY] min_valid_qty+binding+price; ASSUMED = no evidence (N5/N20 scenarios)
 
 ## 1. Per-symbol model at current equity, observed median stop and observed median gross R:R

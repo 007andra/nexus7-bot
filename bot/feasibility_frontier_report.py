@@ -22,6 +22,10 @@ STOP_GRID = (0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.02, 0.025, 0.03)
 # 0.356 <-> confidence 12.4 (observed on the SOL candidates vetoed in production).
 P_BASE = 0.45
 P_OBSERVED_LOW = 0.30 + 0.45 * 12.4 / 100
+ASSUMED_DISCLAIMER = (
+    "- ASSUMED rows (suffix (N5)/(N20)) have NO filter evidence: they are hypotheses, "
+    "never facts, and must not be promoted to any LIVE conclusion until real filters are logged"
+)
 
 
 def _instruments(sym: str, row: dict) -> list[tuple[str, Instrument]]:
@@ -81,6 +85,7 @@ def render(dataset: dict, res: dict) -> str:
       f"observed low-confidence case p={P_OBSERVED_LOW:.3f} (confidence 12.4)")
     w("- Costs = live runtime static model: taker 5 bps/side; slippage 5 bps/side majors "
       "(BTC/ETH/SOL), 10 bps/side alts; MIN_ORDER sizing slippage floor NEXUS_EXPECTED_SLIPPAGE_PCT=0.10%")
+    w(ASSUMED_DISCLAIMER)
     w("- Filters provenance: OBSERVED = full filters in [SIZING_DECOMPOSITION]; INFERRED = "
       "[MIN_ORDER_FEASIBILITY] min_valid_qty+binding+price; ASSUMED = no evidence (N5/N20 scenarios)")
     w("")
