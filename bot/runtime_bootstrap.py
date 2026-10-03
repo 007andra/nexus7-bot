@@ -52,6 +52,7 @@ def install() -> None:
     from bot import nexus_live_cost_calibration as _nexus_live_cost_calibration
     from bot import min_order_feasibility as _min_order_feasibility
     from bot import nexus_prefinal_veto_observability as _nexus_prefinal_veto_observability
+    from bot import nexus_shadow_research_runtime as _nexus_shadow_research_runtime
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import daily_stop_runtime_hardening as _daily_stop_runtime_hardening
     from bot import selfcheck_entrypoint_hardening as _selfcheck_entrypoint_hardening
@@ -191,6 +192,7 @@ def install() -> None:
     _min_order_feasibility.install(TradingEngine, _log)
     _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
+    _nexus_shadow_research_runtime.install(TradingEngine, _log)
 
     # Runtime-truth stage wrappers are deliberately interleaved with the
     # existing strategy wrapper installation order. Each wrapper records the
