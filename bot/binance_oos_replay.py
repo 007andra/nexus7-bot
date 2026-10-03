@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import bisect
 import calendar
 import json
 import os
@@ -324,37 +325,61 @@ async def load_verified_book_depth(
     )
 
 
+AGG_TRADES_DOWNLOAD_TIMEOUT_S = 900.0
+AGG_TRADES_DOWNLOAD_RETRIES = 3
+
+
 async def load_verified_agg_trades(
     symbol: str,
     dates: Sequence[str],
     *,
     cache_dir: str | Path | None = None,
-    concurrency: int = 3,
+    concurrency: int = 2,
+    decision_timestamps: Sequence[int] | None = None,
+    window_ms: int = 5 * 60 * 1000,
 ):
     """Load checksum-verified candidate-day USD-M aggTrades.
 
-    Daily aggTrades can be large, so concurrency is deliberately lower than
-    metrics/bookDepth. HTTP 404 is an observational gap; checksum/schema errors
-    remain fatal. Missing ids are measured but never interpolated.
+    Daily aggTrades are large (millions of rows per day for BTC), so:
+    downloads use a long timeout with bounded retries of transient transport
+    errors (each retry re-downloads and re-verifies the checksum); archives are
+    not written to the on-disk cache (provenance stays in the manifest via
+    sha256); and, when ``decision_timestamps`` is given, each verified day is
+    reduced AFTER its gap diagnostics to the trades inside some decision's
+    pressure window (decision - window_ms, decision] — exactly the rows
+    ``AggTradeTimeline.pressure`` can read, so results are unchanged.
+    HTTP 404 is an observational gap; checksum/schema errors remain fatal.
+    Missing ids are measured but never interpolated.
     """
     limit = int(concurrency)
     if limit < 1 or limit > 8:
         raise ValueError("aggTrades concurrency must be in [1,8]")
+    if int(window_ms) <= 0:
+        raise ValueError("aggTrades window must be positive")
     semaphore = asyncio.Semaphore(limit)
+    decisions = sorted(int(ts) for ts in decision_timestamps) if decision_timestamps is not None else None
+
+    def in_some_window(trade_ts: int) -> bool:
+        # trade is readable by a decision d iff d - window < trade_ts <= d,
+        # i.e. the first decision >= trade_ts is < trade_ts + window.
+        index = bisect.bisect_left(decisions, trade_ts)
+        return index < len(decisions) and decisions[index] < trade_ts + int(window_ms)
 
     async def load_one(source_date: str):
         async with semaphore:
             url = daily_agg_trades_url(symbol, source_date)
             try:
                 archive = await download_archive_verified(
-                    url, cache_path=_archive_cache_path(cache_dir, url)
+                    url, cache_path=None,
+                    timeout_s=AGG_TRADES_DOWNLOAD_TIMEOUT_S,
+                    retries=AGG_TRADES_DOWNLOAD_RETRIES,
                 )
             except RuntimeError as exc:
                 if "HTTP 404" in str(exc):
                     return source_date, None, None, None
                 raise
             rows = parse_agg_trades_archive(archive.payload)
-            gaps = agg_trade_gap_diagnostics(rows)
+            gaps = dict(agg_trade_gap_diagnostics(rows))
             artifact = ResearchArtifact(
                 source=url,
                 dataset="aggTrades",
@@ -365,6 +390,10 @@ async def load_verified_agg_trades(
                 first_ts=rows[0].timestamp if rows else None,
                 last_ts=rows[-1].timestamp if rows else None,
             )
+            gaps["rows_in_archive"] = len(rows)
+            if decisions is not None:
+                rows = tuple(row for row in rows if in_some_window(int(row.timestamp)))
+            gaps["rows_retained_for_decision_windows"] = len(rows)
             return source_date, rows, artifact, gaps
 
     loaded = await asyncio.gather(
@@ -927,6 +956,7 @@ async def replay_symbol(
             symbol,
             candidate_dates,
             cache_dir=cache_dir,
+            decision_timestamps=[int(item["timestamp"]) for item in diagnostics],
         )
         artifacts = artifacts + agg_trade_artifacts
 

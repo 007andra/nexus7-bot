@@ -21,6 +21,7 @@ on:
       - "bot/binance_oos_replay.py"
       - "bot/binance_oos_evidence_bundle.py"
       - "bot/binance_historical_context.py"
+      - "bot/binance_research_data.py"
   workflow_dispatch:
 
 jobs:

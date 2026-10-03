@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bot.binance_historical_context import MetricsObservation, MetricsTimeline
 from bot.binance_oos_replay import (
@@ -102,7 +102,7 @@ class BinanceOOSReplayTests(unittest.TestCase):
             "2026-01-03": 3000,
         }
 
-        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0, retries=0):
             # Force reverse-ish completion order to prove gather timing cannot
             # alter deterministic merge order.
             if "2026-01-01" in url:
@@ -163,7 +163,7 @@ class BinanceOOSReplayTests(unittest.TestCase):
         )
 
     def test_book_depth_loader_treats_404_as_observational_gap(self):
-        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0, retries=0):
             raise RuntimeError("Binance research archive HTTP 404")
 
         with patch(
@@ -192,7 +192,7 @@ class BinanceOOSReplayTests(unittest.TestCase):
             )
 
     def test_agg_trades_loader_treats_404_as_observational_gap(self):
-        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0, retries=0):
             raise RuntimeError("Binance research archive HTTP 404")
 
         with patch(
@@ -214,7 +214,7 @@ class BinanceOOSReplayTests(unittest.TestCase):
     def test_agg_trades_loader_is_deterministic_under_concurrency(self):
         dates = ("2026-08-30", "2026-08-31")
 
-        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0, retries=0):
             if "08-30" in url:
                 await asyncio.sleep(0.02)
                 payload = b"day30"
@@ -332,3 +332,82 @@ class BinanceOOSReplayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AggTradesWindowEquivalenceTests(unittest.TestCase):
+    """Window filtering keeps exactly the rows AggTradeTimeline.pressure reads."""
+
+    def test_filtered_pressure_equals_full_pressure_including_day_boundary(self):
+        import random
+        from bot.binance_historical_context import AggTradeTimeline
+        rng = random.Random(4661)
+        day0 = 1_767_225_600_000                      # 2026-01-01T00:00Z
+        trades_by_day = {}
+        for d, day in enumerate(("2026-01-01", "2026-01-02")):
+            base = day0 + d * 86_400_000
+            ts = sorted(base + rng.randint(0, 86_399_999) for _ in range(4000))
+            ts += [base + 86_400_000 - 1_000, base + 86_400_000 - 120_000]   # tail near midnight
+            trades_by_day[day] = tuple(sorted(
+                (AggTradeObservation(d * 100_000 + i, 100.0 + rng.random(), 1.0 + rng.random(),
+                                     i, i, t, rng.random() < 0.5)
+                 for i, t in enumerate(sorted(ts))),
+                key=lambda r: r.timestamp))
+        decisions = [day0 + 86_400_000 + 60_000,                        # 00:01 day 2 -> window crosses midnight
+                     day0 + 3_600_000 * 5, day0 + 86_400_000 + 3_600_000 * 13]
+
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0, retries=0):
+            self.assertIsNone(cache_path, "aggTrades archives are not cached on disk")
+            self.assertGreaterEqual(timeout_s, 600)
+            self.assertGreaterEqual(retries, 1)
+            day = "2026-01-01" if "2026-01-01" in url else "2026-01-02"
+            return SimpleNamespace(payload=day.encode(), sha256="c" * 64)
+
+        with patch("bot.binance_oos_replay.download_archive_verified", side_effect=fake_download), \
+                patch("bot.binance_oos_replay.parse_agg_trades_archive",
+                      side_effect=lambda payload: trades_by_day[payload.decode()]):
+            filtered, _, _, gaps = asyncio.run(load_verified_agg_trades(
+                "BTCUSDT", ("2026-01-01", "2026-01-02"), decision_timestamps=decisions))
+            full, _, _, _ = asyncio.run(load_verified_agg_trades(
+                "BTCUSDT", ("2026-01-01", "2026-01-02")))
+        self.assertLess(len(filtered), len(full) // 10, "memory bounded")
+        a, b = AggTradeTimeline(filtered), AggTradeTimeline(full)
+        for ts in decisions:
+            self.assertEqual(a.pressure(ts), b.pressure(ts))
+        self.assertEqual(gaps["2026-01-02"]["rows_in_archive"], len(trades_by_day["2026-01-02"]))
+
+
+class DownloadRetryTests(unittest.TestCase):
+    def test_transient_timeout_is_retried_and_checksum_still_verified(self):
+        from bot import binance_research_data as data
+        calls = []
+
+        async def flaky(url, timeout_s):
+            calls.append(url)
+            if len([c for c in calls if not c.endswith(".CHECKSUM")]) == 1 and not url.endswith(".CHECKSUM"):
+                raise asyncio.TimeoutError()
+            return b"payload" if not url.endswith(".CHECKSUM") else (
+                data.archive_sha256(b"payload") + "  BTCUSDT-aggTrades-2026-01-01.zip").encode()
+        url = data.daily_agg_trades_url("BTCUSDT", "2026-01-01")
+        with patch.object(data, "_http_get_bytes", side_effect=flaky), \
+                patch.object(asyncio, "sleep", AsyncMock()):
+            archive = asyncio.run(data.download_archive_verified(url, retries=2))
+        self.assertEqual(archive.sha256, data.archive_sha256(b"payload"))
+
+    def test_http_error_and_checksum_mismatch_are_not_retried(self):
+        from bot import binance_research_data as data
+        url = data.daily_agg_trades_url("BTCUSDT", "2026-01-01")
+        calls = []
+
+        async def not_found(u, timeout_s):
+            calls.append(u)
+            raise RuntimeError("Binance research archive HTTP 404")
+        with patch.object(data, "_http_get_bytes", side_effect=not_found):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
+                asyncio.run(data.download_archive_verified(url, retries=3))
+        self.assertLessEqual(len(calls), 2, "one attempt per URL")
+
+        async def bad(u, timeout_s):
+            return b"payload" if not u.endswith(".CHECKSUM") else ("0" * 64 + "  x.zip").encode()
+        with patch.object(data, "_http_get_bytes", side_effect=bad):
+            with self.assertRaises(ValueError):
+                asyncio.run(data.download_archive_verified(url, retries=3))

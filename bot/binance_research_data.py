@@ -370,6 +370,21 @@ async def _http_get_bytes(url: str, timeout_s: float) -> bytes:
     return payload
 
 
+async def _http_get_bytes_retrying(url: str, timeout_s: float, retries: int) -> bytes:
+    """Bounded retry for TRANSIENT transport failures only (timeout / client
+    connection errors). HTTP status errors (404 etc.) are never retried, and
+    every attempt is a full re-download that the caller checksum-verifies."""
+    attempts = max(0, int(retries)) + 1
+    for attempt in range(attempts):
+        try:
+            return await _http_get_bytes(url, timeout_s)
+        except (asyncio.TimeoutError, aiohttp.ClientError):
+            if attempt + 1 >= attempts:
+                raise
+            await asyncio.sleep(min(30.0, 2.0 ** attempt))
+    raise RuntimeError("unreachable")
+
+
 async def download_archive(
     url: str,
     *,
@@ -397,6 +412,7 @@ async def download_archive_verified(
     *,
     cache_path: str | Path | None = None,
     timeout_s: float = 30.0,
+    retries: int = 0,
 ) -> VerifiedArchive:
     """Download/cache one archive and fail closed unless official checksum matches."""
     if not str(url).startswith(_ROOT + "/") or not str(url).endswith(".zip"):
@@ -410,7 +426,7 @@ async def download_archive_verified(
         payload = await asyncio.to_thread(path.read_bytes)
         # Never trust a cached checksum as provenance. Fetch the official
         # Binance sidecar again and validate cached bytes against it.
-        checksum_bytes = await _http_get_bytes(url + ".CHECKSUM", timeout_s)
+        checksum_bytes = await _http_get_bytes_retrying(url + ".CHECKSUM", timeout_s, retries)
         checksum_text = checksum_bytes.decode("utf-8")
         digest = verify_archive_checksum(
             payload,
@@ -428,8 +444,8 @@ async def download_archive_verified(
             await asyncio.to_thread(checksum_tmp.replace, checksum_path)
     else:
         payload, checksum_bytes = await asyncio.gather(
-            _http_get_bytes(url, timeout_s),
-            _http_get_bytes(url + ".CHECKSUM", timeout_s),
+            _http_get_bytes_retrying(url, timeout_s, retries),
+            _http_get_bytes_retrying(url + ".CHECKSUM", timeout_s, retries),
         )
         checksum_text = checksum_bytes.decode("utf-8")
         # Verify before any bytes are admitted into the deterministic cache.
