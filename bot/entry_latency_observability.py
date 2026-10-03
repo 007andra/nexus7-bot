@@ -18,11 +18,11 @@ _SYMBOL = r"(?P<symbol>[A-Z0-9]+USDT)"
 _RE_WS = re.compile(rf"\[{_SYMBOL}\].*WS cache hit")
 _RE_SIGNAL = re.compile(rf"\[{_SYMBOL}\].*✅ SINAL")
 _RE_CANDIDATE = re.compile(rf"✅ \[{_SYMBOL}\] CANDIDATO")
-_RE_PULLBACK = re.compile(rf"\[PULLBACK_CONFIRMATION\] symbol={_SYMBOL} .*result=(?P<result>[A-Z_]+)")
+_RE_PULLBACK = re.compile(rf"\[PULLBACK_CONFIRMATION\] (?:setup_id=\S+ )?symbol={_SYMBOL} .*result=(?P<result>[A-Z_]+)")
 _RE_AI = re.compile(rf"\[AI_DECISION\] symbol={_SYMBOL} .*decision=(?P<decision>APPROVE|REJECT)")
 _RE_PREFLIGHT = re.compile(rf"🔎 _open {_SYMBOL} ")
 _RE_DISPATCH = re.compile(rf"📡 _open {_SYMBOL} tentativa")
-_RE_ORDER = re.compile(rf"📤 \[ORDER\].*orderId=(?P<order_id>\S+) symbol={_SYMBOL} ")
+_RE_ORDER = re.compile(rf"📤 \[(?:BINANCE_)?ORDER\].*orderId=(?P<order_id>\S+) symbol={_SYMBOL} ")
 _RE_TPSL = re.compile(rf"🛡️ {_SYMBOL}: .*anexados à posição")
 _RE_FILLED = re.compile(rf"✅ \[FILLED\].*orderId=(?P<order_id>\S+) symbol={_SYMBOL} ")
 
