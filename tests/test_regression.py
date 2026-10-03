@@ -385,25 +385,26 @@ def test_caso_negativo_B_http_aceita_sem_fill():
 
 def test_preco_execucao_prioriza_dado_real_da_ordem():
     """
-    Auditoria forense: entry_price da posição priorizava o ticker
-    público em cache (aproximação) mesmo quando wait_for_fill() já
-    tinha consultado dealSize/dealValue reais da ordem na mesma
-    chamada. Corrigido para usar o dado real primeiro.
+    F-013 (supersedes the earlier ordering check): the fill price comes only
+    from exchange evidence (fills ledger > terminal order dealValue/dealSize >
+    position average consistent with that fill). The cached ticker is NEVER a
+    fill price (INV-FILL-AUTHORITY-001), and the signal is not shifted.
     """
     import inspect
     from bot import engine as E
+    from bot import postfill_geometry as P
     src = inspect.getsource(E)
-    check("dealValue é lido do status da ordem", "dealValue" in src)
-    check("dealSize é lido do status da ordem", '_st.get("dealSize"' in src)
-    i_deal = src.find("_deal_value / _deal_size")
-    # BUG NO PRÓPRIO TESTE (corrigido durante esta auditoria): existe
-    # uma chamada ANTERIOR a get_cached_ticker (linha ~1980, para dados
-    # do NEXUS AI) não relacionada a esta correção. find() pegava essa
-    # ocorrência por engano. Precisa buscar a partir do ponto de _deal.
-    i_ticker = src.find("get_cached_ticker(sig.symbol)", i_deal)
-    check("preço real da ordem é tentado antes do ticker aproximado "
-          "(na janela pós-wait_for_fill)",
-          -1 < i_deal < i_ticker, f"deal={i_deal} ticker={i_ticker}")
+    i_wait = src.find("_fill_check = await self.client.wait_for_fill(_oid_real)")
+    i_pos = src.find("pos = Position(sig, qty)", i_wait)
+    window = src[i_wait:i_pos]
+    check("janela pós-fill sem ticker como preço de fill",
+          i_wait > -1 and i_pos > i_wait and "get_cached_ticker" not in window,
+          f"wait={i_wait} pos={i_pos}")
+    check("sinal não é deslocado pelo delta do fill", "sig.sl    += _delta" not in src)
+    psrc = inspect.getsource(P)
+    check("postfill_geometry usa dealValue/dealSize e fills ledger",
+          "dealValue" in psrc and "fills_ledger" in psrc)
+    check("postfill_geometry nunca consulta ticker", "get_cached_ticker" not in psrc)
 
 
 def test_apenas_um_callsite_de_open_abre_posicao_nova():

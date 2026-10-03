@@ -13,11 +13,9 @@ compatible with the configured leverage while preserving exact NEXUS approval.
 
 For an initially NEXUS-approved setup this module therefore:
 1. refreshes exact account-specific CROSS MMR;
-2. keeps already-safe geometry unchanged;
-3. otherwise compresses SL and TP proportionally, preserving R:R, only when at
-   least 40% of the original stop distance remains and fee viability survives;
-4. re-runs NEXUS on the exact adjusted SL/TP;
-5. lets RiskManagerV3 size only after that second exact approval.
+2. keeps already-safe geometry unchanged and lets RiskManagerV3 size it;
+3. otherwise refuses the trade (F-003: TECHNICAL_STOP_OUTSIDE_LIQUIDATION_SAFE_ZONE).
+   The technical stop is never compressed and leverage is never auto-reduced.
 
 The configured leverage is never lowered. The downstream liquidation guard,
 RiskManagerV3, drawdown, ownership, exposure, durable execution and native
@@ -439,73 +437,20 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
             )
             return initial
 
-        old_sl = float(sig.sl)
-        old_tp = float(sig.tp)
-        sig.sl = round(float(geometry["sl"]), 8)
-        sig.tp = round(float(geometry["tp"]), 8)
-        sig.tp1 = sig.tp
-        sig.tp2 = sig.tp
-        sig.rr = round(float(geometry["rr"]), 2)
-        sig.rr1 = sig.rr
-        sig.rr2 = sig.rr
-
-        move_to_tp_pct = abs(sig.tp - float(sig.entry)) / float(sig.entry) * 100.0
-        total_fees_pct = float(getattr(sig, "total_fees", 0.0) or 0.0)
-        min_move_pct = total_fees_pct * float(getattr(cfg, "FEE_MULTIPLIER", 2.0))
-        if move_to_tp_pct < min_move_pct:
-            sig.sl, sig.tp = old_sl, old_tp
-            log.warning(
-                "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=BLOCK "
-                "reason=post_compression_fee_viability move_to_tp=%.3f%% "
-                "required=%.3f%% execution_effect=BLOCK_NEW_LIVE_ENTRY",
-                sig.symbol, move_to_tp_pct, min_move_pct,
-            )
-            return NexusDecision.wait(sig.symbol, "post_compression_fee_viability")
-
-        sig.expected_pnl = round(move_to_tp_pct - total_fees_pct, 3)
-        sig.reason = (
-            f"{getattr(sig, 'reason', '')} | CROSS50_SAFE "
-            f"SL{float(geometry['original_stop_pct']):.2f}%→"
-            f"{float(geometry['final_stop_pct']):.2f}%"
-        ).strip(" |")
-
+        # F-003: the technical stop is never compressed to fit the liquidation
+        # buffer at the configured leverage (and leverage is never lowered
+        # automatically). A stop outside the safe zone is NO TRADE.
+        from bot.risk_budget import TECHNICAL_STOP_OUTSIDE_LIQUIDATION_SAFE_ZONE
         log.warning(
-            "[KUCOIN_CROSS_GEOMETRY] symbol=%s direction=%s result=ADJUSTED "
-            "leverage=%sx stop=%.3f%%->%.3f%% rr=%.3f retained=%.1f%% "
-            "extra_liq_headroom=%.2fpp nexus_recheck=REQUIRED",
-            sig.symbol, sig.direction, int(cfg.LEVERAGE),
-            float(geometry["original_stop_pct"]),
-            float(geometry["final_stop_pct"]), float(geometry["rr"]),
-            float(geometry["retained_fraction"]) * 100.0,
-            _EXTRA_LIQ_HEADROOM_PCT,
+            "[KUCOIN_CROSS_GEOMETRY] symbol=%s direction=%s result=BLOCK reason=%s "
+            "leverage=%sx technical_stop=%.3f%% safe_stop=%.3f%% liq=%.3f%% "
+            "stop_compression=DISABLED execution_effect=BLOCK_NEW_LIVE_ENTRY",
+            sig.symbol, sig.direction, TECHNICAL_STOP_OUTSIDE_LIQUIDATION_SAFE_ZONE,
+            int(cfg.LEVERAGE), float(geometry.get("original_stop_pct", 0.0)),
+            float(geometry.get("safe_stop_pct", 0.0)),
+            float(geometry.get("liq_move_pct", 0.0)),
         )
-
-        revised = await original_nexus_validate(self, sig, *args, **kwargs)
-        revised_error = decision_validation_error(
-            revised, sig.symbol, sig.direction, sig.entry, sig.sl, sig.tp
-        )
-        if revised_error is not None:
-            log.warning(
-                "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=BLOCK "
-                "reason=nexus_recheck_invalid_%s execution_effect=BLOCK_NEW_LIVE_ENTRY",
-                sig.symbol, revised_error,
-            )
-            return NexusDecision.wait(sig.symbol, f"nexus_recheck_invalid_{revised_error}")
-        if revised.execution_allowed is not True:
-            log.info(
-                "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=REJECT "
-                "reason=nexus_recheck_veto execution_effect=NONE",
-                sig.symbol,
-            )
-            return revised
-
-        log.warning(
-            "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=PASS "
-            "exact_cross_mmr=true nexus_recheck=true leverage_unchanged=%sx "
-            "execution_effect=NONE",
-            sig.symbol, int(cfg.LEVERAGE),
-        )
-        return revised
+        return NexusDecision.wait(sig.symbol, TECHNICAL_STOP_OUTSIDE_LIQUIDATION_SAFE_ZONE)
 
     async def _calculate_with_fresh_cross_mmr(
         symbol, direction, closes, highs, lows, volumes, client=None

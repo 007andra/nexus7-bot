@@ -263,41 +263,27 @@ def test_geometry_real_ada_example_uses_exact_cross_mmr_and_stays_50x_safe():
     assert final_check.gap_pct >= liquidation.MIN_GAP_PCT
 
 
-def test_live_unsafe_50x_geometry_fetches_cross_mmr_then_rechecks_nexus_before_sizing():
+def test_live_unsafe_50x_geometry_is_no_trade_without_compressing_technical_stop():
+    # F-003: the technical stop is never compressed to fit the liquidation
+    # buffer; a stop outside the safe zone at the configured leverage is NO TRADE.
     events, client, engine, sig = _build_runtime()
     old_sl, old_tp = sig.sl, sig.tp
 
     result = _run_at_production_50x(engine, sig)
 
-    nexus_events = [event for event in events if isinstance(event, tuple) and event[0] == "nexus"]
-    assert len(nexus_events) == 2
-    assert nexus_events[0][2:] == (round(old_sl, 8), round(old_tp, 8))
-    assert nexus_events[1][2:] == (round(sig.sl, 8), round(sig.tp, 8))
-    assert sig.sl != old_sl
-    assert sig.tp != old_tp
-    assert events.index("account") < events.index("sized")
-    assert events.index("cross") < events.index("sized")
-    assert events.index(nexus_events[1]) < events.index("sized")
-    assert events[-2:] == ["sized", "legacy_score"]
-    assert client.account_calls == 1
+    assert result.execution_allowed is False
+    assert "TECHNICAL_STOP_OUTSIDE_LIQUIDATION_SAFE_ZONE" in str(result.to_dict())
+    assert (sig.sl, sig.tp) == (old_sl, old_tp), "technical stop untouched"
+    assert engine.nexus_calls == 1, "no second NEXUS decision on fabricated geometry"
+    assert engine.sizing_calls == 0
     assert client.cross_calls == 1
     assert client.requested_leverages == ["50"]
-    assert engine.sizing_calls == 1
-    assert result["total"] == 54
-
-    final_check = liquidation.analyze(
-        entry=sig.entry,
-        stop=sig.sl,
-        leverage=50,
-        is_long=False,
-        symbol=sig.symbol,
-        n_open_positions=1,
-    )
-    assert final_check.stop_effective is True
+    assert "blocked_before_sizing" in events
 
 
 def test_pretrade_reuses_fresh_presizing_cross_mmr_cache_without_second_private_call():
-    events, client, engine, sig = _build_runtime()
+    safe_sig = _Signal(sl=0.20571345, tp=0.20264310, rr=2.0, tp1=0.20264310, tp2=0.20264310)
+    events, client, engine, sig = _build_runtime(signal=safe_sig)
     _run_at_production_50x(engine, sig)
     assert client.account_calls == 1
     assert client.cross_calls == 1
@@ -329,16 +315,13 @@ def test_cross_mmr_failure_after_nexus_fails_closed_before_sizing():
     assert "legacy_score" not in events
 
 
-def test_second_nexus_veto_of_adjusted_geometry_fails_closed_before_sizing():
-    events, client, engine, sig = _build_runtime(second_approval=False)
+def test_unsafe_geometry_never_asks_nexus_to_approve_a_compressed_stop():
+    events, client, engine, sig = _build_runtime(second_approval=True)
     result = _run_at_production_50x(engine, sig)
 
     assert result.execution_allowed is False
-    assert engine.nexus_calls == 2
+    assert engine.nexus_calls == 1
     assert engine.sizing_calls == 0
-    assert client.cross_calls == 1
-    assert client.requested_leverages == ["50"]
-    assert "blocked_before_sizing" in events
     assert "legacy_score" not in events
 
 

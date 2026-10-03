@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from bot import durable_execution
 from bot import durable_reconcile_hardening as hardening
 from bot import order_state
 from bot import pilot_submission_counter as provenance
@@ -44,12 +45,14 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
             _clear=clear,
             _block=block,
             _advance=advance,
+            ORDERS_UNRESOLVED=durable_execution.ORDERS_UNRESOLVED,
         )
 
     def _engine(self):
         engine = SimpleNamespace()
         engine.orders = OrderRegistry()
-        engine.errors = {"orders"}
+        # Restored unresolved intents: the original reconcile left this reason.
+        engine.errors = {durable_execution.ORDERS_UNRESOLVED}
         engine._durable_state_ok = False
         engine.persist_reasons = []
         engine.client = SimpleNamespace(

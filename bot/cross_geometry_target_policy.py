@@ -1,5 +1,10 @@
 """Preserve the strategy take-profit when CROSS liquidation safety tightens SL.
 
+F-003: an ADJUSTED (compressed-stop) geometry is no longer applied by
+``kucoin_contract_risk_hardening`` — a technical stop outside the liquidation
+safe zone is NO TRADE. This helper only shapes the diagnostic geometry dict;
+it never moves an order's stop.
+
 The underlying KuCoin CROSS-risk hardening may need to move an ATR stop closer
 to entry so the configured 50x position remains stop-effective before the
 liquidation boundary. Historically it scaled TP inward by the same fraction to
@@ -91,7 +96,7 @@ def install(hardening_module, log) -> None:
     hardening_module._geometry_from_exact_mmr = geometry_with_original_target
     setattr(hardening_module, _POLICY_FLAG, True)
     log.warning(
-        "[CROSS_GEOMETRY_TARGET_POLICY] installed stop_compression_only=true "
+        "[CROSS_GEOMETRY_TARGET_POLICY] installed diagnostic_only=true stop_compression_applied=false "
         "original_strategy_tp_preserved=true target_extension=false "
         "second_nexus_recheck_required=true leverage_unchanged=true "
         "score_threshold_unchanged=true rr_threshold_unchanged=true"

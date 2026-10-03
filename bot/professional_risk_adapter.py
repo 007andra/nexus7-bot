@@ -11,11 +11,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import os
 from typing import Any
 
 from bot.config import cfg
-from bot.kucoin import TAKER_FEE
 from bot.logger import log
 from bot.professional_risk import CapitalState
 from bot.risk_manager_v3 import RiskManagerV3
@@ -135,6 +133,61 @@ class ProfessionalRiskAdapter:
             unrealized_pnl=current.unrealized_pnl,
         ))
 
+    def size_detail(self, symbol: str, entry: float, instruments: dict,
+                    size_mult: float = 1.0):
+        """F-003 single sizing authority: risk budget -> maximum base quantity.
+
+        Returns ``(StopRiskSizingResult, risk_pct, cost_fraction)``; raises on
+        missing plan/capital, entry mismatch or a risk_pct above the structural
+        ceiling (never normalized silently).
+        """
+        from bot.risk_budget import cost_fraction, validate_risk_pct
+        from bot.kucoin_execution_model import configured_taker_fee
+
+        key = str(symbol)
+        plan = self._plans.get(key)
+        if plan is None:
+            raise RuntimeError("planned geometry unavailable")
+        if not math.isclose(float(entry), plan.entry, rel_tol=1e-9, abs_tol=1e-12):
+            raise RuntimeError(
+                f"entry mismatch planned={plan.entry:.12g} current={float(entry):.12g}")
+        if not self._v3.confirmed:
+            raise RuntimeError("capital state unconfirmed")
+        multiplier = float(size_mult)
+        if not math.isfinite(multiplier) or multiplier <= 0:
+            raise ValueError("size_mult must be positive and finite")
+        effective_risk_pct = validate_risk_pct(plan.risk_pct * multiplier)
+
+        self._reconcile_latest_available()
+        if not self._v3.confirmed:
+            raise RuntimeError("capital state invalidated during reconciliation")
+
+        # Canonical per-symbol cost: 2 x taker + 2 x adverse slippage (the same
+        # model as research/geometry), expressed through the primitive's
+        # fee-per-side + total-slippage parameters.
+        fee = float(configured_taker_fee())
+        total_cost = cost_fraction(key)
+        sizing = self._v3.size_for_stop(
+            symbol=key,
+            entry=float(entry),
+            stop=plan.stop,
+            instruments=instruments,
+            risk_pct=effective_risk_pct,
+            leverage=float(cfg.LEVERAGE),
+            fee_rate_per_side=fee,
+            expected_slippage_pct=max(0.0, total_cost - 2.0 * fee),
+        )
+        log.info(
+            "[RISK_SIZING] symbol=%s qty=%.12g equity=%.6f risk_pct=%.4f risk_budget=%.6f "
+            "cost_fraction=%.5f projected_stop_loss=%.6f stop_distance_pct=%.6f "
+            "required_margin=%.6f binding=%s rejection=%s",
+            key, sizing.qty, self._v3.equity, effective_risk_pct, sizing.risk_budget,
+            total_cost, sizing.projected_stop_loss, sizing.stop_distance_pct,
+            sizing.required_margin, sizing.binding_constraint,
+            sizing.rejection_reason or "-",
+        )
+        return sizing, effective_risk_pct, total_cost
+
     def size(self, symbol: str, entry: float, instruments: dict,
              size_mult: float = 1.0, open_positions: dict | None = None) -> float:
         """Return stop-risk-sized base quantity or fail closed with zero.
@@ -145,58 +198,12 @@ class ProfessionalRiskAdapter:
         the signature solely for compatibility with the canonical engine.
         """
         del open_positions
-        key = str(symbol)
-        plan = self._plans.get(key)
-        if plan is None:
-            log.critical("[RISK_V3_CORE] %s blocked: planned geometry unavailable", key)
-            return 0.0
-        if not math.isclose(float(entry), plan.entry, rel_tol=1e-9, abs_tol=1e-12):
-            log.critical(
-                "[RISK_V3_CORE] %s blocked: entry mismatch planned=%.12g current=%.12g",
-                key, plan.entry, float(entry),
-            )
-            return 0.0
-        if not self._v3.confirmed:
-            log.critical("[RISK_V3_CORE] %s blocked: capital state unconfirmed", key)
-            return 0.0
-
         try:
-            multiplier = float(size_mult)
-            if not math.isfinite(multiplier) or multiplier <= 0:
-                raise ValueError("size_mult must be positive and finite")
-            effective_risk_pct = plan.risk_pct * multiplier
-            if not 0 < effective_risk_pct <= 1:
-                raise ValueError("effective risk_pct outside (0,1]")
-
-            self._reconcile_latest_available()
-            if not self._v3.confirmed:
-                raise RuntimeError("capital state invalidated during reconciliation")
-
-            expected_slippage = float(
-                os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001")
-            )
-            sizing = self._v3.size_for_stop(
-                symbol=key,
-                entry=float(entry),
-                stop=plan.stop,
-                instruments=instruments,
-                risk_pct=effective_risk_pct,
-                leverage=float(cfg.LEVERAGE),
-                fee_rate_per_side=float(TAKER_FEE),
-                expected_slippage_pct=expected_slippage,
-            )
-            log.info(
-                "[RISK_V3_CORE] symbol=%s qty=%.12g risk_budget=%.6f "
-                "projected_stop_loss=%.6f stop_distance_pct=%.6f "
-                "required_margin=%.6f binding=%s decision_effect=NONE",
-                key, sizing.qty, sizing.risk_budget,
-                sizing.projected_stop_loss, sizing.stop_distance_pct,
-                sizing.required_margin, sizing.binding_constraint,
-            )
+            sizing, _, _ = self.size_detail(symbol, entry, instruments, size_mult)
             return float(sizing.qty)
         except Exception as exc:
             log.critical(
                 "[RISK_V3_CORE] %s blocked: %s",
-                key, type(exc).__name__,
+                str(symbol), type(exc).__name__,
             )
             return 0.0

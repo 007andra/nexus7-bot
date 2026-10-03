@@ -86,10 +86,21 @@ class LossPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sig.tp, 2700.)
 
     def test_margin_rounds_down(self):
-        from bot.pilot_live_runtime import _pilot_quantity_for_notional
-        qty = _pilot_quantity_for_notional(dict(multiplier=.01, lotSize=1, minQty=1, minNotional=0), 2531.41, 23.0667 * .5 * 50)
-        self.assertEqual(qty, .22)
-        self.assertLessEqual(qty * 2531.41 / 50, 23.0667 * .5)
+        # F-003: quantity comes from the risk budget and is floored to whole lots;
+        # the margin ceiling can only reduce it.
+        from bot.professional_risk import CapitalState, stop_risk_size
+        out = stop_risk_size(capital=CapitalState(23.0667, 23.0667), entry=2531.41, stop=2506.10,
+                             risk_pct=0.01, leverage=50, qty_step=0.01, min_qty=0.01,
+                             max_margin_pct=0.10, fee_rate_per_side=0.0006,
+                             expected_slippage_pct=0.001)
+        self.assertEqual(out.qty, 0.0, "one ETH lot loses more than 1% of 23 USDT")
+        self.assertEqual(out.rejection_reason, "MIN_CONTRACT_EXCEEDS_RISK_BUDGET")
+        out = stop_risk_size(capital=CapitalState(2306.67, 2306.67), entry=2531.41, stop=2506.10,
+                             risk_pct=0.01, leverage=50, qty_step=0.01, min_qty=0.01,
+                             max_margin_pct=0.10, fee_rate_per_side=0.0006,
+                             expected_slippage_pct=0.001)
+        self.assertLessEqual(out.projected_stop_loss, 23.0667 + 1e-9)
+        self.assertLessEqual(out.required_margin, 2306.67 * 0.10 + 1e-9)
 
     async def test_live_discretionary_exit_disabled_paper_retained(self):
         original = AsyncMock()

@@ -3,16 +3,16 @@ import inspect
 from bot import operator_runtime_policy as policy
 
 
-def test_operator_margin_fraction_remains_fifty_percent():
-    assert policy.MARGIN_FRACTION == 0.50
+def test_operator_policy_has_no_margin_target():
+    # F-003: sizing is the stop-loss risk budget; no percentage-of-available target.
+    assert not hasattr(policy, "MARGIN_FRACTION")
+    assert not hasattr(policy, "_install_margin_sizing")
 
 
 def test_operator_policy_uses_configured_leverage_without_mutating_it():
     source = inspect.getsource(policy)
-    assert "target_margin = available * MARGIN_FRACTION" in source
-    assert "target_notional = target_margin * leverage" in source
-    assert "leverage = float(cfg.LEVERAGE)" in source
     assert "cfg.LEVERAGE =" not in source
+    assert "sizing_authority=RISK_BUDGET_V3" in source
 
 
 def test_drawdown_policy_is_fail_closed_by_default_with_explicit_override():
@@ -22,10 +22,3 @@ def test_drawdown_policy_is_fail_closed_by_default_with_explicit_override():
     assert "override=true entries_blocked=false" in source
     assert "legacy_pause_preserved=true active_restored=false override=false" in protected
     assert "legacy_pause_neutralized=true active_restored=true override=true" in protected
-
-
-def test_margin_policy_returns_operator_target_quantity_not_stop_risk_telemetry():
-    source = inspect.getsource(policy._install_margin_sizing)
-    assert "stop_risk_qty_advisory" in source
-    assert "authority=operator_margin_policy" in source
-    assert "return target_qty" in source

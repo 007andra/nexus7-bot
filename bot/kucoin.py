@@ -584,6 +584,19 @@ class KuCoinClient:
                 and body.get('reduceOnly') is not True
                 and body.get('closeOrder') is not True):
             raise ValueError('New entry blocked by operator pause')
+        if (endpoint in ('/api/v1/orders', '/api/v1/st-orders')
+                and body.get('reduceOnly') is not True
+                and body.get('closeOrder') is not True):
+            # INV-LIVE-READINESS-001: final transport boundary for new risk.
+            from bot.runtime_readiness import assert_entry_dispatch_ready
+            assert_entry_dispatch_ready(
+                self, stage='transport', symbol=str(body.get('symbol', '')),
+                side=str(body.get('side', '')), client_oid=str(body.get('clientOid', '')),
+            )
+            # INV-PREDISPATCH-RISK-001 (F-003): authorized contracts + native stop
+            # + freshest entry must keep the loss at the stop within budget.
+            from bot.risk_budget import assert_transport_dispatch
+            assert_transport_dispatch(self, endpoint, body)
         return self._session.post(url, **kwargs)
 
     @asynccontextmanager
@@ -732,7 +745,10 @@ class KuCoinClient:
                     log.warning(f"KuCoin POST {endpoint}: {code} {msg}")
             except Exception as e:
                 from bot.execution_ownership import StaleExecutionFence, ExecutionOwnershipUnavailable
-                if isinstance(e, (StaleExecutionFence, ExecutionOwnershipUnavailable)):
+                from bot.runtime_readiness import EntryReadinessRefused
+                from bot.risk_budget import RiskBudgetRefused
+                if isinstance(e, (StaleExecutionFence, ExecutionOwnershipUnavailable,
+                                  EntryReadinessRefused, RiskBudgetRefused)):
                     raise
                 # Network/timeout ambiguity is reconciled by clientOid.
                 ambiguous = True
@@ -1583,49 +1599,14 @@ class KuCoinClient:
         elif isinstance(data, dict) and isinstance(data.get("data"), list):
             raw = data["data"]
         else:
-            raise RuntimeError(
-                "POSITIONS_UNCONFIRMED: KuCoin positions payload unavailable "
-                "or malformed"
-            )
+            from bot.position_snapshot import READ_FAILED, PositionSnapshotUnconfirmed
+            raise PositionSnapshotUnconfirmed(READ_FAILED)
 
-        positions = []
-
-        for p in raw:
-            try:
-                qty = float(p.get("currentQty", 0))
-                if qty == 0:
-                    continue
-                kc_sym = p.get("symbol", "")
-                _entry = float(p.get("avgEntryPrice", 0))
-                positions.append({
-                    "symbol":           to_standard(kc_sym),
-                    "side":             "Buy" if qty > 0 else "Sell",
-                    "size":             abs(qty),
-                    "entryPrice":       _entry,
-                    # Alias para compatibilidade com código que esperava o
-                    # formato Bybit (auditoria #2)
-                    "avgPrice":         _entry,
-                    "markPrice":        float(p.get("markPrice", 0)),
-                    "unrealisedPnl":    float(p.get("unrealisedPnl", 0)),
-                    "leverage":         float(p.get("realLeverage", 1)),
-                    # ADICIONADO (auditoria #2): liquidationPrice não era
-                    # exposto, fazendo o engine calcular SL com liq=0.
-                    "liquidationPrice": float(p.get("liquidationPrice", 0)),
-                    "liqPrice":         float(p.get("liquidationPrice", 0)),
-                    # Stops efetivamente aplicados na exchange — permitem
-                    # auditar se a posição está protegida de fato.
-                    "stopLoss":         float(p.get("stopLoss",   0) or 0),
-                    "takeProfit":       float(p.get("takeProfit", 0) or 0),
-                    "posMargin":        float(p.get("posMargin", 0)),
-                })
-            except (ValueError, TypeError) as _e:
-                # auditoria #10: posição com campos inválidos agora é logada
-                log.warning(
-                    f"posição descartada por campo inválido: {_e} | "
-                    f"dados: {str(p)[:150]}"
-                )
-                continue
-        return positions
+        # F-014: every row is validated; a row that cannot be interpreted makes
+        # the whole read non-authoritative (raises) instead of disappearing
+        # and later being read as a remote close. Valid zero rows = flat.
+        from bot.position_snapshot import normalize_kucoin_positions
+        return normalize_kucoin_positions(raw, to_standard)
 
     # ── WebSocket ─────────────────────────────────────────────────
     async def _seed_kline_cache(self, symbols: list, intervals: list):
@@ -1877,10 +1858,19 @@ class KuCoinClient:
         if registry is None:
             return
 
-        # Correlação primária por orderId (Fase 2); fallback client_oid
-        mo = registry.get_by_order_id(order_id) if order_id else None
-        if mo is None and client_oid:
-            mo = registry.get(client_oid)
+        # F-011: identify a candidate, then PROVE identity and fill validity
+        # before any registry/order mutation (bot.order_event_identity).
+        from bot.order_event_identity import (
+            OrderEventRejected, check_fill, check_identity, log_rejection,
+        )
+        by_id = registry.get_by_order_id(order_id) if order_id else None
+        by_coid = registry.get(client_oid) if client_oid else None
+        if by_id is not None and by_coid is not None and by_id is not by_coid:
+            log_rejection("PRIVATE_WS", "identifier_conflict", by_id,
+                          symbol=data.get("symbol", ""), order_id=order_id,
+                          client_oid=client_oid)
+            return
+        mo = by_id or by_coid
         if mo is None:
             # Evento de uma ordem que este processo não rastreia (ex:
             # ordem manual do usuário, ou processo reiniciado). Não é
@@ -1891,8 +1881,24 @@ class KuCoinClient:
             )
             return
 
-        if order_id:
-            registry.index_order_id(order_id, mo.client_oid)
+        _type   = data.get("type", "")
+        _status = data.get("status", "")
+        try:
+            check_identity(
+                mo, symbol=data.get("symbol", ""), order_id=order_id,
+                client_oid=client_oid, side=data.get("side"),
+                reduce_only=data.get("reduceOnly"), close_order=data.get("closeOrder"),
+            )
+            filled = None
+            if _type in ("match", "filled") or _status == "done":
+                info = (getattr(self, "_instruments", None) or {}).get(mo.symbol)
+                filled = check_fill(mo, filled=data.get("filledSize", 0),
+                                    size=data.get("size"), info=info)
+        except OrderEventRejected as exc:
+            log_rejection("PRIVATE_WS", exc.reason, mo, symbol=data.get("symbol", ""),
+                          order_id=order_id, client_oid=client_oid,
+                          filled=data.get("filledSize"))
+            return
 
         _evt_ts = float(data.get("ts", 0) or 0) / 1e9 if data.get("ts") else time.time()
         # Evento mais antigo que a última atualização conhecida: ignora
@@ -1904,20 +1910,17 @@ class KuCoinClient:
             )
             return
 
-        _type   = data.get("type", "")
-        _status = data.get("status", "")
-        filled  = float(data.get("filledSize", 0) or 0)
-        match_sz = float(data.get("matchSize", 0) or 0)
         match_px = float(data.get("matchPrice", 0) or 0)
-
+        before = (mo.state, mo.filled_qty, mo.order_id)
+        bind = {"order_id": order_id} if order_id else {}
         try:
             if _type == "canceled" or (_status == "done" and filled == 0):
-                mo.transition(OrderState.CANCELLED, source="WS")
+                mo.transition(OrderState.CANCELLED, source="WS", **bind)
             elif _status == "done" and filled > 0:
                 mo.transition(
                     OrderState.FILLED, filled_qty=filled,
                     avg_price=match_px if match_px else mo.avg_price,
-                    source="WS",
+                    source="WS", **bind,
                 )
                 log.info(
                     f"✅ [FILLED] source=PRIVATE_WS "
@@ -1927,22 +1930,39 @@ class KuCoinClient:
                     f"tradeOrders:{data.get('symbol','?')}"
                 )
             elif _type == "match":
-                mo.transition(
-                    OrderState.PARTIALLY_FILLED, filled_qty=filled,
-                    avg_price=match_px if match_px else mo.avg_price,
-                    source="WS",
-                )
+                if filled is not None and abs(filled - float(mo.filled_qty or 0)) <= 1e-12 \
+                        and mo.state == OrderState.PARTIALLY_FILLED:
+                    pass   # duplicate cumulative fill: idempotent no-op
+                else:
+                    mo.transition(
+                        OrderState.PARTIALLY_FILLED, filled_qty=filled,
+                        avg_price=match_px if match_px else mo.avg_price,
+                        source="WS", **bind,
+                    )
             elif _type == "open" and mo.state == OrderState.SUBMITTING:
                 mo.transition(OrderState.SUBMITTED, order_id=order_id, source="WS")
         except InvalidTransition as e:
             # Transição impossível pelo evento WS — não é bug do WS
             # necessariamente, pode ser reconexão com evento fora de
             # ordem. Loga e mantém o estado atual (fail-safe).
-            log.warning(f"WS privado: transição inválida ignorada: {e}")
+            log.warning(f"[ORDER_EVENT_TRANSITION_REJECTED] WS privado: {e}")
+            return
+
+        if order_id and mo.order_id == order_id:
+            registry.index_order_id(order_id, mo.client_oid)
+        if (mo.state, mo.filled_qty, mo.order_id) == before:
+            return   # nothing changed: no persistence (idempotent)
+        log.info("[ORDER_EVENT_ACCEPTED] clientOid=%s orderId=%s symbol=%s state=%s filled=%s",
+                 mo.client_oid, mo.order_id or "?", mo.symbol, mo.state.value, mo.filled_qty)
 
         persist_callback = getattr(registry, "persist_callback", None)
         if callable(persist_callback):
             await persist_callback(mo)
+        if mo.order_id and mo.state in (OrderState.PARTIALLY_FILLED, OrderState.FILLED):
+            # F-013A: WS is only a TRIGGER for the post-fill recheck of the
+            # position opened by this order; its matchPrice is never the VWAP.
+            from bot import postfill_geometry
+            postfill_geometry.request_revalidation(getattr(self, "_engine", None), mo.order_id)
 
     async def _ws_loop(self, symbols: list, intervals: list):
         """Loop principal de reconexão WebSocket com backoff exponencial."""

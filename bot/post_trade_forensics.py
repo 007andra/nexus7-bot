@@ -180,6 +180,20 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
                     payload = _lineage(sig, nexus, order_record)
                     pos._forensic_lineage = payload
                     await _persist_lineage(payload, log)
+                    if not getattr(self, "paper_trade", True):
+                        # Q-01B: durable exit geometry for this exact trade lineage.
+                        try:
+                            from bot import trade_lifecycle
+                            await trade_lifecycle.open_trade(pos, pos.qty, "entry_confirmed")
+                        except Exception as exc:
+                            log.error("[TRADE_LINEAGE_OPEN_FAILED] symbol=%s error=%s",
+                                      symbol, type(exc).__name__)
+                        try:
+                            from bot import exit_geometry_durability
+                            await exit_geometry_durability.persist(pos, "entry_confirmed")
+                        except Exception as exc:
+                            log.error("[EXIT_GEOMETRY_PERSIST_FAILED] symbol=%s stage=entry error=%s",
+                                      symbol, type(exc).__name__)
                 else:
                     log.warning(
                         "[TRADE_LINEAGE] symbol=%s durable=false reason=NO_CONFIRMED_OPENING_ORDER execution_effect=NONE", symbol,
@@ -218,6 +232,25 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
         result = await original_sync(self, *args, **kwargs)
         after = set((getattr(self, "positions", {}) or {}).keys())
         removed = [sym for sym in before if sym not in after]
+        pending = getattr(self, "_pending_lineage_terminal", None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self._pending_lineage_terminal = pending
+        if not getattr(self, "paper_trade", True):
+            for sym in removed:
+                pending[sym] = before[sym]
+        if pending:
+            # NOVO-02: a lineage becomes terminal only from an authoritative
+            # snapshot (raises when unconfirmed) proving the symbol flat/flipped;
+            # unconfirmed reads are retried on the next sync, never assumed.
+            try:
+                from bot import trade_lifecycle
+                rows = await self.client.get_positions()
+                await trade_lifecycle.terminalize_positions(dict(pending), rows, "exchange_flat_sync")
+                pending.clear()
+            except Exception as exc:
+                log.error("[TRADE_LINEAGE_TERMINAL_DEFERRED] symbols=%s error=%s",
+                          ",".join(sorted(pending)), type(exc).__name__)
         new_trades = list((getattr(stats, "trades", []) or [])[trades_before:]) if stats is not None else []
 
         for sym in removed:

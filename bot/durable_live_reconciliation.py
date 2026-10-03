@@ -114,6 +114,13 @@ def apply_exchange_order_truth(
         raise ValueError("non-finite durable order quantity")
     if requested <= 0:
         raise ValueError("invalid durable requested quantity")
+    if data.get("size") not in (None, ""):
+        # F-011 INV-ORDER-FILL-001: exchange cumulative fill bounded by the
+        # exchange order size, which must belong to this order.
+        from bot.order_event_identity import check_fill
+        instruments = getattr(engine, "instruments", None) or {}
+        check_fill(order, filled=filled, size=data.get("size"),
+                   info=instruments.get(order.symbol) if isinstance(instruments, dict) else None)
 
     has_active_flag = "isActive" in data
     active = bool(data.get("isActive")) if has_active_flag else None
@@ -219,6 +226,9 @@ async def reconcile_pending(engine, *, min_interval_s: float = _MIN_INTERVAL_S) 
         return False
     pending = list(pending_reader() or [])
     if not pending:
+        # No non-terminal intent remains: the unresolved-order cause is proven
+        # resolved. Persistence/restore/protection reasons are not ours.
+        durable._clear(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
         return True
     if not getattr(engine, "connected", False):
         return False
@@ -233,7 +243,7 @@ async def reconcile_pending(engine, *, min_interval_s: float = _MIN_INTERVAL_S) 
 
     lookup = getattr(getattr(engine, "client", None), "get_order_by_client_oid", None)
     if not callable(lookup):
-        durable._block(engine, "orders")
+        durable._block(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
         return False
 
     changed = 0
@@ -274,13 +284,13 @@ async def reconcile_pending(engine, *, min_interval_s: float = _MIN_INTERVAL_S) 
         if not await durable.persist_orders(
             engine, "continuous_exchange_truth_reconcile", strict=True
         ):
-            durable._block(engine, "orders")
+            durable._block(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
             return False
 
     remaining = list(pending_reader() or [])
     if remaining or unresolved:
-        durable._block(engine, "orders")
+        durable._block(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
         return False
 
-    durable._clear(engine, "orders")
+    durable._clear(engine, durable.ORDERS_UNRESOLVED, source="reconcile_pending")
     return True

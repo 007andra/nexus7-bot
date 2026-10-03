@@ -58,8 +58,9 @@ def install(TradingEngine, KuCoinClient, taker_fee: float, log) -> None:
                 if not cur or cur <= 0:
                     continue
 
-                risk_dist = abs(pos.entry - pos.sl)
-                if risk_dist <= 0:
+                from bot.exit_geometry import initial_risk_per_unit
+                risk_dist = initial_risk_per_unit(pos)   # Q-01: initial 1R
+                if risk_dist is None:
                     continue
                 funding_cost = pos.entry * 0.0001 * 3
                 tp1_price = (
@@ -155,7 +156,20 @@ def install(TradingEngine, KuCoinClient, taker_fee: float, log) -> None:
 
                 pos.tp1_hit = True
                 pos.qty = remaining_qty
-                be_ok = await self.client.set_sl(sym, pos.entry)
+                # Q-01C: break-even is a floor; a better (trailed) stop is kept.
+                from bot.stop_monotonic import (
+                    EQUAL_AFTER_ROUNDING, WORSE, current_stop, decide_stop, log_decision,
+                )
+                current_sl = current_stop(pos)
+                be_decision = decide_stop(
+                    pos.direction, current_sl, pos.entry,
+                    tick_size=(getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize"),
+                    market_price=cur)
+                log_decision(sym, pos.direction, current_sl, pos.entry, be_decision,
+                             "paper_partial_break_even")
+                keep_better = be_decision.reason in (WORSE, EQUAL_AFTER_ROUNDING)
+                be_ok = (await self.client.set_sl(sym, pos.entry)
+                         if be_decision.replace else keep_better)
 
                 # The partial fill itself is authoritative, so quantity and the
                 # one-shot marker advance even if the BE protection update fails.
@@ -177,8 +191,9 @@ def install(TradingEngine, KuCoinClient, taker_fee: float, log) -> None:
                     continue
 
                 self._unprotected_symbols.discard(sym)
-                pos.sl = pos.entry
-                pos.trailing_sl = pos.entry
+                if be_decision.replace:
+                    pos.sl = pos.entry
+                    pos.trailing_sl = pos.entry
                 log.info(
                     f"[PARTIAL_TP_CONFIRMED] symbol={sym} orderId={order_id} "
                     f"closed_qty={partial_qty:.8f} remaining_qty={remaining_qty:.8f} "

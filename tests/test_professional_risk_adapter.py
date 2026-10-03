@@ -69,7 +69,7 @@ class ProfessionalRiskAdapterTests(unittest.TestCase):
 
     def test_later_available_balance_is_conservative_margin_cap(self):
         adapter = self._adapter(balance=1000.0)
-        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=99.0, risk_pct=0.50)
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=99.0, risk_pct=0.05)
         adapter.balance = 10.0
         adapter.balance_confirmed = True
         qty = adapter.size("TESTUSDT", 100.0, INSTRUMENTS)
@@ -83,6 +83,11 @@ class ProfessionalRiskAdapterTests(unittest.TestCase):
             (qty * 100.0) / float(cfg.LEVERAGE),
             max_margin + 1e-9,
         )
+
+    def test_risk_pct_above_structural_ceiling_is_refused_not_normalized(self):
+        adapter = self._adapter(balance=1000.0)
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=99.0, risk_pct=0.50)
+        self.assertEqual(adapter.size("TESTUSDT", 100.0, INSTRUMENTS), 0.0)
 
     def test_entry_mismatch_fails_closed(self):
         adapter = self._adapter()

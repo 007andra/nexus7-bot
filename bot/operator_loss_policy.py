@@ -122,7 +122,7 @@ def install(TradingEngine, log):
                     "sl=%.8f tp=%.8f stop_distance_pct=%.5f target_distance_pct=%.5f "
                     "min_rr_net_reference=%.3f estimated_net_rr=%.3f net_rr_reference_met=%s "
                     "estimated_cost_pct=%.5f geometry_mutated=false economic_gate=NEXUS "
-                    "sizing_authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE",
+                    "sizing_authority=RISK_BUDGET_V3 stop_compression=DISABLED",
                     sig.symbol, original_sl, original_tp,
                     diagnostics["stop_distance_pct"], diagnostics["target_distance_pct"],
                     min_rr_net, diagnostics["estimated_net_rr"],

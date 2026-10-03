@@ -21,19 +21,62 @@ _PAPER_KEY = "paper_runtime_state_v1"
 PAPER_STATE_KEY = _PAPER_KEY
 
 
-def _block(engine, reason: str):
+# Causal block reasons (F-010, INV-INTEGRITY-BLOCK-001..003). Each reason has
+# exactly one owner able to prove its resolution; clearing one reason never
+# touches another. ``"orders"`` keeps its legacy spelling and now means ONLY
+# "the order registry snapshot is not confirmed durable".
+ORDERS_PERSISTENCE = "orders"                    # cleared by: persist_orders success
+ORDERS_UNRESOLVED = "orders_unresolved"          # cleared by: order reconciliation, no pending intent
+ORDERS_RESTORE = "orders_restore"                # cleared by: successful registry restore
+PROTECTION_UNCONFIRMED = "protection_unconfirmed"  # cleared by: protection readiness readback
+
+
+def active_reasons(engine) -> tuple:
+    return tuple(sorted(getattr(engine, "_durable_state_errors", None) or ()))
+
+
+def _block(engine, reason: str, *, source: str = ""):
     errors = getattr(engine, "_durable_state_errors", None)
     if errors is None:
         errors = set()
         engine._durable_state_errors = errors
-    errors.add(str(reason))
+    reason = str(reason)
+    added = reason not in errors
+    errors.add(reason)
     engine._durable_state_ok = False
+    if added:
+        log.warning(
+            "[INTEGRITY_BLOCK_ADDED] domain=%s reason=%s active_reasons=%s source=%s",
+            reason.split("_", 1)[0], reason, ",".join(sorted(errors)), source or "unspecified",
+        )
 
 
-def _clear(engine, reason: str):
-    errors = getattr(engine, "_durable_state_errors", set())
-    errors.discard(str(reason))
+def _clear(engine, reason: str, *, source: str = ""):
+    """Remove only ``reason``; the caller must have proven that cause resolved.
+
+    Unknown or already-cleared reasons are a no-op and can never unblock
+    entries held by other active reasons.
+    """
+    errors = getattr(engine, "_durable_state_errors", None)
+    if errors is None:
+        errors = set()
+        engine._durable_state_errors = errors
+    reason = str(reason)
+    present = reason in errors
+    errors.discard(reason)
     engine._durable_state_ok = not errors
+    if present:
+        log.warning(
+            "[INTEGRITY_BLOCK_CLEARED] domain=%s reason=%s active_reasons=%s source=%s",
+            reason.split("_", 1)[0], reason, ",".join(sorted(errors)) or "NONE",
+            source or "unspecified",
+        )
+    if errors and present:
+        log.warning(
+            "[INTEGRITY_BLOCK_STILL_ACTIVE] cleared=%s active_reasons=%s source=%s "
+            "new_entries=BLOCKED",
+            reason, ",".join(sorted(errors)), source or "unspecified",
+        )
 
 
 def can_open(engine) -> bool:
@@ -68,6 +111,9 @@ def _position_record(position) -> dict:
         "qty_original": position.qty_original,
         "opened_at": position.opened_at.isoformat(),
         "peak_pnl": position.peak_pnl,
+        # Q-01 trade geometry (None = initial risk unknown -> R exits fail closed).
+        "initial_sl": getattr(position, "initial_sl", None),
+        "peak_price": getattr(position, "peak_price", None),
         "trailing_sl": position.trailing_sl,
         "trailing_active": position.trailing_active,
         "trailing_milestone": position.trailing_milestone,
@@ -135,6 +181,18 @@ def _restore_position(record: dict):
         opened_at = opened_at.astimezone(timezone.utc).replace(tzinfo=None)
     position.opened_at = opened_at
     position.peak_pnl = _nonnegative(record.get("peak_pnl", 0), "peak_pnl")
+    # Q-01: legacy snapshots lack the geometry fields. initial risk is never
+    # invented (None -> discretionary R exits fail closed, protection kept);
+    # the peak price falls back to peak_pnl/qty_original, which can only
+    # understate the excursion (peak_pnl never accrued on more than that qty).
+    raw_initial = record.get("initial_sl")
+    position.initial_sl = None if raw_initial is None else _positive(raw_initial, "initial_sl")
+    raw_peak = record.get("peak_price")
+    if raw_peak is None:
+        from bot.exit_geometry import peak_excursion
+        excursion = peak_excursion(position)
+        raw_peak = entry + excursion if direction == "LONG" else entry - excursion
+    position.peak_price = _positive(raw_peak, "peak_price")
     position.trailing_sl = _positive(record.get("trailing_sl", sl), "trailing_sl")
     position.trailing_active = bool(record.get("trailing_active", False))
     position.trailing_milestone = int(record.get("trailing_milestone", 0))
@@ -148,6 +206,18 @@ def _restore_position(record: dict):
 
 
 async def persist_orders(engine, reason: str, *, strict: bool = False) -> bool:
+    # F-010B INV-DURABLE-RESTORE-001: while the durable snapshot could not be
+    # restored, the in-memory registry is empty/partial and has no authority to
+    # replace it. Refuse (caller sees False); keep orders_restore active.
+    if ORDERS_RESTORE in (getattr(engine, "_durable_state_errors", None) or ()):
+        log.critical(
+            "[DURABLE_ORDER_PERSIST_BLOCKED] reason=restore_unconfirmed source=%s "
+            "restore_state=%s active_reasons=%s registry_orders=%s snapshot_version=1 "
+            "durable_write=NONE",
+            str(reason)[:80], getattr(engine, "_durable_order_restore_state", "UNKNOWN"),
+            ",".join(active_reasons(engine)), len(getattr(engine.orders, "_orders", ()) or ()),
+        )
+        return False
     try:
         async with engine._durable_order_lock:
             engine.orders.gc(max_age=7 * 86400)
@@ -157,10 +227,11 @@ async def persist_orders(engine, reason: str, *, strict: bool = False) -> bool:
                 "orders": engine.orders.snapshot(),
             }, separators=(",", ":"), sort_keys=True)
             await db.save_key_value(_ORDER_KEY, payload, strict=True)
-        _clear(engine, "orders")
+        # Proves persistence health only, never that an order is resolved.
+        _clear(engine, ORDERS_PERSISTENCE, source="persist_orders")
         return True
     except Exception as exc:
-        _block(engine, "orders")
+        _block(engine, ORDERS_PERSISTENCE, source="persist_orders")
         log.critical(
             "[DURABLE_ORDER] persistence failed; new entries blocked: %s: %s",
             type(exc).__name__, exc,
@@ -258,8 +329,14 @@ async def restore_engine_state(engine) -> bool:
     else:
         _clear(engine, "database")
 
+    # F-010B restore state model. READ FAILURE != EMPTY STATE:
+    #   VALID / VALID_EMPTY (no snapshot stored) -> registry authoritative;
+    #   RESTORE_FAILED (storage read error) / MALFORMED (parse/schema/record)
+    #   -> orders_restore stays active and the snapshot must not be overwritten.
+    engine._durable_order_restore_state = "RESTORE_FAILED"
     try:
         raw_orders = await db.load_key_value(_ORDER_KEY, strict=True)
+        engine._durable_order_restore_state = "MALFORMED"
         if raw_orders:
             state = json.loads(raw_orders)
             if not isinstance(state, dict) or state.get("version") != 1:
@@ -269,10 +346,15 @@ async def restore_engine_state(engine) -> bool:
                 "[DURABLE_ORDER] restored orders=%s pending=%s",
                 len(engine.orders), len(engine.orders.pending_orders()),
             )
-        _clear(engine, "orders")
+        engine._durable_order_restore_state = "VALID" if raw_orders else "VALID_EMPTY"
+        _clear(engine, ORDERS_RESTORE, source="restore_engine_state")
     except Exception as exc:
-        _block(engine, "orders")
-        log.critical("[DURABLE_ORDER] restore failed; new entries blocked: %s", exc)
+        _block(engine, ORDERS_RESTORE, source="restore_engine_state")
+        log.critical(
+            "[DURABLE_ORDER] restore failed state=%s; new entries blocked; durable "
+            "snapshot preserved (writes refused): %s",
+            engine._durable_order_restore_state, exc,
+        )
 
     if not getattr(engine, "paper_trade", False):
         return can_open(engine)
@@ -349,7 +431,7 @@ async def reconcile_orders(engine) -> bool:
     """
     pending = list(engine.orders.pending_orders())
     if not pending:
-        _clear(engine, "orders")
+        _clear(engine, ORDERS_UNRESOLVED, source="startup_reconcile")
         return True
 
     unresolved = []
@@ -384,11 +466,12 @@ async def reconcile_orders(engine) -> bool:
             unresolved.append(order.client_oid)
 
     saved = await persist_orders(engine, "startup_reconcile", strict=True)
-    if unresolved:
-        _block(engine, "orders")
+    if unresolved or engine.orders.pending_orders():
+        _block(engine, ORDERS_UNRESOLVED, source="startup_reconcile")
         log.critical(
             "[DURABLE_ORDER] unresolved intents=%s; new entries blocked; no retry sent",
             len(unresolved),
         )
         return False
+    _clear(engine, ORDERS_UNRESOLVED, source="startup_reconcile")
     return saved

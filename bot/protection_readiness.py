@@ -113,6 +113,13 @@ async def _reconcile_global_flat_bgx_protection(engine, symbols) -> bool:
     return True
 
 
+def _clear_protection_block(engine) -> None:
+    # F-010: only an exchange readback proving every position protected may
+    # retire the protection-postcondition reason.
+    from bot import durable_execution as durable
+    durable._clear(engine, durable.PROTECTION_UNCONFIRMED, source="protection_readiness")
+
+
 async def refresh_protection_readiness(engine) -> bool:
     """Refresh canonical readiness and return the derived boolean."""
     engine._protection_system_ready = False
@@ -418,6 +425,8 @@ async def refresh_protection_readiness(engine) -> bool:
 
         ready = len(unprotected) == 0
         engine._protection_system_ready = ready
+        if ready:
+            _clear_protection_block(engine)
         engine._protection_readiness_evidence["unprotected_positions"] = len(unprotected)
         engine._protection_readiness_evidence["reason"] = (
             "confirmed_flat_no_pending_exposure_and_bgx_cleanup"
@@ -479,6 +488,7 @@ async def refresh_protection_readiness(engine) -> bool:
     engine._protection_readiness_evidence["verified"] = verified
     engine._protection_readiness_evidence["reason"] = "all_live_positions_readback_verified"
     engine._protection_system_ready = True
+    _clear_protection_block(engine)
     log.info(
         "[PROTECTION_READINESS] ready=true positions=%s unprotected_positions=%s "
         "basis=EXCHANGE_READBACK "

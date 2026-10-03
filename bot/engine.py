@@ -97,6 +97,11 @@ class Position:
         self.tp          = sig.tp
         self.score       = sig.score
         self.qty         = qty
+        # Q-01: immutable trade geometry. initial_sl defines 1R for the whole
+        # trade (BE/trailing move self.sl, never this); peak_price is the best
+        # price seen, independent of the quantity still held.
+        self.initial_sl  = sig.sl
+        self.peak_price  = sig.entry
         self.opened_at   = datetime.utcnow()
         self.pnl         = 0.0
         self.peak_pnl    = 0.0
@@ -125,6 +130,9 @@ class Position:
             self.pnl = (self.entry - current_price) * self.qty
         if self.pnl > self.peak_pnl:
             self.peak_pnl = self.pnl
+        peak = getattr(self, "peak_price", None)
+        if peak is None or (current_price > peak if self.direction == "LONG" else current_price < peak):
+            self.peak_price = current_price
 
     def pnl_pct(self) -> float:
         if self.entry <= 0 or self.qty <= 0:
@@ -151,12 +159,14 @@ class Position:
             return None
         self.trailing_active = True
         # Trava TRAILING_LOCK % abaixo do pico de preço
+        # Q-01: peak in PRICE units; a partial exit must not inflate it.
+        from bot.exit_geometry import peak_excursion
         if self.direction == "LONG":
-            peak_price = self.entry + (self.peak_pnl / self.qty if self.qty > 0 else 0)
+            peak_price = self.entry + peak_excursion(self)
             new_sl = peak_price * (1 - cfg.TRAILING_LOCK * 0.1)
             return max(new_sl, self.sl)   # nunca recua abaixo do SL original
         else:
-            peak_price = self.entry - (self.peak_pnl / self.qty if self.qty > 0 else 0)
+            peak_price = self.entry - peak_excursion(self)
             new_sl = peak_price * (1 + cfg.TRAILING_LOCK * 0.1)
             return min(new_sl, self.sl)   # nunca recua acima do SL original
 
@@ -686,6 +696,11 @@ class TradingEngine:
         self.entries_paused = False
         self.client.entries_paused = False
         log.info('[ENTRY_PAUSE] paused=false risk_gates=UNCHANGED')
+
+    async def close_all_positions(self, reason: str = "operator_close_all") -> dict:
+        """Operator emergency flatten; keeps management running (F-001)."""
+        from bot.emergency_flatten import close_all_positions
+        return await close_all_positions(self, reason=reason)
 
     def stop(self):
         self.pause_entries()
@@ -1229,6 +1244,98 @@ class TradingEngine:
 
         return float(contracts) * mult
 
+    async def _adopt_timeout_lineage(self, sym, row, direction, ep, upnl, ctx):
+        """NOVO-F013A-1: adopt the position of a timed-out opening order.
+
+        OPENING LINEAGE -> NATIVE st-orders PROTECTION -> AUTHORITATIVE ACTIVE
+        SL/TP -> F-013/F-013A reconciliation -> local Position. The Position is
+        created UNCONFIRMED (initial_sl=None); only postfill_geometry confirms
+        the geometry after fill authority, read-back and the F-003 recheck.
+        No ATR/liquidation estimate is ever sent or used as geometry."""
+        from bot import native_protection
+        from bot.conditional_stop_lifecycle import STRONG_PREFIX, owned_for_strong_lineage
+        if ctx.get("direction") != direction:
+            log.critical(
+                f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: lado da exchange ({direction}) ≠ "
+                f"opening order ({ctx.get('direction')}) — NÃO adotada; desprotegida até resolução"
+            )
+            self._unprotected_symbols.add(sym)
+            return None
+        try:
+            _base_qty = self._contracts_to_base_qty(sym, float(row.get("size", 0) or 0))
+        except ValueError as _ue:
+            log.critical(f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: {_ue} — não adotada")
+            self._unprotected_symbols.add(sym)
+            return None
+        tick = (getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize")
+        side = "sell" if direction == "LONG" else "buy"
+
+        async def _owned(order, kind):
+            # NOVO-F013A-1c: strong lineage of THIS opening order only.
+            return await owned_for_strong_lineage(
+                self.client, sym, side, kind, STRONG_PREFIX + str(ctx.get("order_id", "")),
+                str(order.get("clientOid") or ""),
+                order_id=str(order.get("id") or order.get("orderId") or ""))
+        prot = await native_protection.discover(
+            self.client, sym, direction, order_id=ctx.get("order_id", ""),
+            client_oid=ctx.get("client_oid", ""), planned_sl=ctx.get("planned_sl"),
+            planned_tp=ctx.get("planned_tp"), tick=tick, row=row, lineage_owned=_owned)
+        native_sl = prot.native_sl or ctx.get("planned_sl")
+        native_tp = prot.native_tp or ctx.get("planned_tp")
+        if prot.sl is None and prot.readable and native_sl:
+            # Missing protection: restore the ORIGINAL technical stop of this
+            # lineage (provable: echoed/dispatched trigger) — never an estimate.
+            try:
+                mark = float(row.get("markPrice", ep) or ep)
+            except (TypeError, ValueError):
+                mark = 0.0
+            valid = mark > 0 and (native_sl < mark if direction == "LONG" else native_sl > mark)
+            ok = False
+            if valid:
+                try:
+                    ok = await self.client.set_position_stops(sym, sl=native_sl)
+                except Exception as _se:
+                    log.error(f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: reaplicar stop original falhou: {_se}")
+            log.critical(
+                f"[NATIVE_PROTECTION_RECOVERY] {sym}: SL nativo ausente — stop ORIGINAL "
+                f"{native_sl} reaplicado={ok} trigger_valido={valid} fallback_ATR=NAO_USADO"
+            )
+            if ok:
+                prot = await native_protection.discover(
+                    self.client, sym, direction, order_id=ctx.get("order_id", ""),
+                    client_oid=ctx.get("client_oid", ""), planned_sl=ctx.get("planned_sl"),
+                    planned_tp=ctx.get("planned_tp"), tick=tick, row=row,
+                    lineage_owned=_owned)
+        local_sl = prot.sl or native_sl
+        local_tp = prot.tp or native_tp
+        if not (local_sl and local_tp):
+            log.critical(f"🚨 [NATIVE_PROTECTION_RECOVERY] {sym}: lineage sem níveis prováveis — "
+                         f"não adotada; desprotegida até resolução")
+            self._unprotected_symbols.add(sym)
+            return None
+        sig = Signal(sym, direction, ep, local_sl, local_tp, 0.75, "Timeout adoption (native)", 75)
+        pos = Position(sig, _base_qty)
+        pos.initial_sl = None            # confirmed only by postfill_geometry (F-013)
+        pos.pnl = upnl
+        pos._native_protection = prot
+        try:
+            pos.update_pnl(float(row.get("markPrice", ep) or ep))
+        except (TypeError, ValueError):
+            pass
+        self.positions[sym] = pos
+        if prot.sl is not None and prot.foreign_tighter is None:
+            self._unprotected_symbols.discard(sym)
+        else:
+            self._unprotected_symbols.add(sym)
+        log.warning(
+            f"🔧 [NATIVE_PROTECTION_RECOVERY] {sym}: adotada após timeout — opening_order_id="
+            f"{str(ctx.get('order_id', ''))[:16]} {direction} qty={_base_qty} avg={ep} "
+            f"native_sl={prot.native_sl} native_tp={prot.native_tp} level_source={prot.level_source} "
+            f"active_sl={prot.sl} sl_source={prot.sl_source} active_tp={prot.tp} "
+            f"ignored={prot.ignored} fallback_ATR=NAO_USADO initial_sl=NONE(postfill)"
+        )
+        return pos
+
     async def _reconcile_exchange_positions(self, only_symbol: str = None) -> list:
         """
         P0 (ADV-01) — descobre e protege posições que existem na
@@ -1331,6 +1438,15 @@ class TradingEngine:
                         continue
 
                     _qty_local = float(getattr(_pos_local, "qty", 0) or 0)
+                    if _qty_ex > _qty_local * (1 + 1e-9) + 1e-12 and not self.paper_trade:
+                        # F-013A — an exposure INCREASE is never absorbed silently
+                        # while the geometry stays CONFIRMED: it is BGX only when
+                        # the same opening order's cumulative fills explain it, and
+                        # then VWAP/stop/risk are re-proven (postfill_geometry).
+                        from bot import postfill_geometry
+                        if await postfill_geometry.on_exposure_increase(self, _pos_local, _qty_ex) \
+                                != postfill_geometry.UNCONFIRMED:
+                            continue
                     if _qty_local > 0 and _qty_ex > 0:
                         _div = abs(_qty_local - _qty_ex) / max(_qty_local, _qty_ex)
                         if _div > 0.02:      # mesma tolerância do IntegrityGuard
@@ -1366,6 +1482,34 @@ class TradingEngine:
 
                 direction = "LONG" if side == "Buy" else "SHORT"
 
+                # ══════════════════════════════════════════════════
+                # NOVO-F013A-1 — TIMEOUT ADOPTION OF A KNOWN LINEAGE
+                #
+                # A posição pertence à opening order que acabou de dar
+                # timeout: a proteção nativa (st-orders) dessa lineage é a
+                # autoridade. Timeout não é sinal de mercado — nunca troca
+                # o stop técnico por ATR/liquidação.
+                # (INV-TIMEOUT-GEOMETRY-001 / INV-NO-FALLBACK-STRATEGY-001)
+                # ══════════════════════════════════════════════════
+                _timeout_ctx = (getattr(self, "_timeout_adoptions", None) or {}).get(sym)
+                if _timeout_ctx and not self.paper_trade:
+                    await self._adopt_timeout_lineage(sym, p, direction, ep, upnl, _timeout_ctx)
+                    continue
+
+                # Origem desconhecida: uma proteção condicional já ativa na
+                # exchange nunca é substituída por uma estimativa.
+                _conditional_sl = None
+                if sl_existente <= 0 and not self.paper_trade:
+                    try:
+                        from bot.conditional_stop_protection import conditional_stop_confirmed
+                        from bot import exit_geometry_durability as _egd
+                        _protected, _ev = await conditional_stop_confirmed(self.client, p)
+                        if _protected and _ev != "inline_stop":
+                            _conditional_sl = await _egd._exchange_stop(self.client, sym, direction)
+                    except Exception as _ce:
+                        log.error(f"RECONCILE {sym}: leitura de proteção condicional falhou: {_ce}")
+                        _conditional_sl = None
+
                 # Preço de entrada vem da EXCHANGE (ep), nunca do ticker —
                 # exigência explícita da correção. SL/TP: usa o que já
                 # está na exchange se existir; caso contrário, calcula
@@ -1374,6 +1518,8 @@ class TradingEngine:
                 atr_est = ep * 0.007
                 if sl_existente > 0:
                     sl = sl_existente
+                elif _conditional_sl:
+                    sl = _conditional_sl
                 elif direction == "LONG":
                     sl = max(liq * 1.02, ep - atr_est * 1.5) if liq > 0 else ep - atr_est * 1.5
                 else:
@@ -1396,6 +1542,7 @@ class TradingEngine:
 
                 sig = Signal(sym, direction, ep, sl, tp, 0.75, "Reconciled orphan", 75)
                 pos = Position(sig, _base_qty)
+                pos.initial_sl = None   # Q-01: rebuilt from exchange; real initial risk unknown
                 pos.pnl = upnl
                 cur = float(p.get("markPrice", ep))
                 pos.update_pnl(cur)
@@ -1408,7 +1555,11 @@ class TradingEngine:
                 )
 
                 # ── Proteção: só marca protegida se a exchange confirmar ──
-                if sl_existente > 0:
+                if _conditional_sl:
+                    self._unprotected_symbols.discard(sym)
+                    log.info(f"✓ RECONCILE {sym}: proteção condicional já ativa "
+                             f"(${_conditional_sl:.6f}) — nenhum stop estimado enviado")
+                elif sl_existente > 0:
                     # A exchange já tinha um stop — nada a enviar, só
                     # confirmar que a marcação de risco está correta.
                     self._unprotected_symbols.discard(sym)
@@ -1566,6 +1717,7 @@ class TradingEngine:
 
                         sig = Signal(sym, direction, ep, sl, tp, 0.75, "sync exchange", 75)
                         pos = Position(sig, _base_sz)
+                        pos.initial_sl = None   # Q-01: rebuilt from exchange; real initial risk unknown
                         pos.pnl = float(bp.get("unrealisedPnl", 0))
                         cur = float(bp.get("markPrice", ep))
                         pos.update_pnl(cur)
@@ -1573,6 +1725,16 @@ class TradingEngine:
                         log.info(f"📥 Posição externa carregada: {sym} {direction}")
 
         except Exception as e:
+            # F-014: no snapshot authority -> no close inference; local
+            # positions stay managed with their last known quantity.
+            from bot.position_snapshot import PositionSnapshotUnconfirmed
+            _unconfirmed = isinstance(e, PositionSnapshotUnconfirmed)
+            for _sym, _pos in (list(self.positions.items()) if _unconfirmed else []):
+                log.critical(
+                    "[POSITION_CLOSE_INFERENCE_BLOCKED] symbol=%s source=_sync_positions "
+                    "reason=%s state=UNKNOWN last_known_qty=%s action=KEEP_MANAGED",
+                    _sym, type(e).__name__, getattr(_pos, "qty", "?"),
+                )
             log.error(f"_sync_positions: {e}")
 
     # ── Trailing stop DESATIVADO ────────────────────────────────
@@ -1817,8 +1979,9 @@ class TradingEngine:
                 # TP1 = entry ± distância do SL (1:1 R:R)
                 # RISK-2: adiciona custo estimado de funding (8h × 0.01% = 0.08%)
                 # para garantir que partial TP seja genuinamente lucrativo
-                risk_dist    = abs(pos.entry - pos.sl)
-                if risk_dist <= 0:
+                from bot.exit_geometry import initial_risk_per_unit
+                risk_dist    = initial_risk_per_unit(pos)   # Q-01: 1R inicial
+                if risk_dist is None:
                     continue
                 funding_cost = pos.entry * 0.0001 * 3  # 3 períodos de 8h = 0.03%
                 tp1_long  = pos.entry + risk_dist + funding_cost
@@ -1866,8 +2029,16 @@ class TradingEngine:
                 # Mover SL para breakeven — verificado.
                 # Sem confirmação, a posição restante ficaria com o stop
                 # original enquanto o bot a trataria como protegida.
-                _be = await self.client.set_sl(sym, pos.entry)
-                if not _be:
+                # Q-01C: BE é piso, nunca afrouxa um stop melhor (trailing).
+                from bot.stop_monotonic import current_stop, decide_stop, log_decision
+                _cur_sl = current_stop(pos)
+                _dec = decide_stop(
+                    pos.direction, _cur_sl, pos.entry,
+                    tick_size=(self.instruments or {}).get(sym, {}).get("tickSize"),
+                    market_price=cur)
+                log_decision(sym, pos.direction, _cur_sl, pos.entry, _dec, "core_partial_break_even")
+                _be = await self.client.set_sl(sym, pos.entry) if _dec.replace else False
+                if _dec.replace and not _be:
                     log.error(
                         f"🚨 {sym}: TP parcial executado mas SL NÃO moveu "
                         f"para break-even (${pos.entry:.4f}) — restante "
@@ -1880,8 +2051,9 @@ class TradingEngine:
                 pnl_net = pnl_partial - fee_p
 
                 pos.tp1_hit     = True
-                pos.sl          = pos.entry   # SL no breakeven
-                pos.trailing_sl = pos.entry
+                if _be:                       # SL no breakeven só se aplicado
+                    pos.sl          = pos.entry
+                    pos.trailing_sl = pos.entry
                 pos.qty         = pos.qty - partial_qty   # atualiza qty restante
 
                 log.info(
@@ -1916,50 +2088,62 @@ class TradingEngine:
                     continue
                 pos.update_pnl(cur)
 
-                # Calcula novo SL via método da Position
-                new_sl = pos.calc_trailing_sl()
-                if new_sl is None:
+                # F-013A — trailing and the post-fill recheck mutate the same
+                # geometry (stop / qty / VWAP): serialized per position, and a
+                # recheck in progress is never raced (skip this cycle).
+                from bot import postfill_geometry
+                _glock = postfill_geometry.geometry_lock(pos)
+                if _glock.locked():
                     continue
+                async with _glock:
+                    # Calcula novo SL via método da Position
+                    new_sl = pos.calc_trailing_sl()
+                    if new_sl is None:
+                        continue
 
-                # Só move se o SL melhorou (LONG: sobe, SHORT: desce)
-                improved = (
-                    (pos.direction == "LONG"  and new_sl > pos.trailing_sl) or
-                    (pos.direction == "SHORT" and new_sl < pos.trailing_sl)
-                )
-                if not improved:
-                    continue
+                    # Só move se o SL melhorou (LONG: sobe, SHORT: desce), após
+                    # quantização por tick (Q-01C: sem regressão e sem churn).
+                    from bot.stop_monotonic import current_stop, decide_stop, log_decision
+                    _cur_sl = current_stop(pos)
+                    _dec = decide_stop(
+                        pos.direction, _cur_sl, new_sl,
+                        tick_size=(getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize"),
+                        market_price=cur)
+                    log_decision(sym, pos.direction, _cur_sl, new_sl, _dec, "trailing", quiet_skip=True)
+                    if not _dec.replace:
+                        continue
 
-                old_sl = pos.trailing_sl
+                    old_sl = pos.trailing_sl
 
-                # RISCO CORRIGIDO: o estado interno era atualizado SEM
-                # verificar se a exchange aceitou o novo stop.
-                #
-                # Se set_sl falhasse, o bot passava a acreditar que o stop
-                # estava mais apertado do que realmente estava — calculando
-                # risco, break-even e trailing sobre um valor fictício.
-                # Numa reversão, a perda real seria maior que a esperada.
-                _ok = await self.client.set_sl(sym, new_sl)
-                if not _ok:
-                    log.error(
-                        f"🚨 [{sym}] Trailing FALHOU: exchange não aceitou "
-                        f"SL {new_sl:.6f} — mantendo estado em {old_sl:.6f}. "
-                        f"O stop real continua no valor anterior."
+                    # RISCO CORRIGIDO: o estado interno era atualizado SEM
+                    # verificar se a exchange aceitou o novo stop.
+                    #
+                    # Se set_sl falhasse, o bot passava a acreditar que o stop
+                    # estava mais apertado do que realmente estava — calculando
+                    # risco, break-even e trailing sobre um valor fictício.
+                    # Numa reversão, a perda real seria maior que a esperada.
+                    _ok = await self.client.set_sl(sym, new_sl)
+                    if not _ok:
+                        log.error(
+                            f"🚨 [{sym}] Trailing FALHOU: exchange não aceitou "
+                            f"SL {new_sl:.6f} — mantendo estado em {old_sl:.6f}. "
+                            f"O stop real continua no valor anterior."
+                        )
+                        continue
+
+                    pos.trailing_sl = new_sl
+                    pos.sl          = new_sl   # mantém sl e trailing_sl sincronizados
+
+                    if self.paper_trade and self._durable_state_enforced:
+                        await durable.persist_paper_runtime(
+                            self, f"trailing_sl:{sym}", strict=True
+                        )
+
+                    log.info(
+                        f"🔒 [{sym}] Trailing SL: {old_sl:.6f} → {new_sl:.6f} "
+                        f"| preço={cur:.6f} pnl=${pos.pnl:.2f} "
+                        f"(ativo={pos.trailing_active})"
                     )
-                    continue
-
-                pos.trailing_sl = new_sl
-                pos.sl          = new_sl   # mantém sl e trailing_sl sincronizados
-
-                if self.paper_trade and self._durable_state_enforced:
-                    await durable.persist_paper_runtime(
-                        self, f"trailing_sl:{sym}", strict=True
-                    )
-
-                log.info(
-                    f"🔒 [{sym}] Trailing SL: {old_sl:.6f} → {new_sl:.6f} "
-                    f"| preço={cur:.6f} pnl=${pos.pnl:.2f} "
-                    f"(ativo={pos.trailing_active})"
-                )
             except Exception as e:
                 log.error(f"_apply_trailing_stops {sym}: {e}")
 
@@ -1976,8 +2160,11 @@ class TradingEngine:
             return await check(self)
         for sym, pos in list(self.positions.items()):
             try:
-                risk_dist   = abs(pos.entry - pos.sl)   # distância SL original
-                if risk_dist <= 0:
+                # Q-01: distância do SL ORIGINAL (initial_sl), não do SL atual
+                # (após break-even |entry - sl| = 0 e o 2R nunca disparava).
+                from bot.exit_geometry import initial_risk_per_unit
+                risk_dist   = initial_risk_per_unit(pos)
+                if risk_dist is None:
                     continue
 
                 price = pos.current_price or pos.entry
@@ -3115,7 +3302,8 @@ class TradingEngine:
                             await durable.persist_orders(
                                 self, "ambiguous_dispatch", strict=False
                             )
-                            durable._block(self, "orders")
+                            durable._block(self, durable.ORDERS_UNRESOLVED,
+                                           source="ambiguous_dispatch")
                         break
 
                     _oid_for_registry = _order.get("orderId", "") if _order else ""
@@ -3294,10 +3482,36 @@ class TradingEngine:
                         # registrada com o entry price REAL da exchange
                         # (nunca ticker) e recebe SL/TP imediatamente.
                         # ══════════════════════════════════════════════
+                        _adoptions = dict(getattr(self, "_timeout_adoptions", None) or {})
+                        _adoptions[sig.symbol] = {
+                            "order_id": _oid_real,
+                            "client_oid": (_order or {}).get("clientOid", "") or "",
+                            "direction": sig.direction, "planned_entry": sig.entry,
+                            "planned_sl": sig.sl, "planned_tp": sig.tp,
+                            "status": (_fill_check.get("status") or {}),
+                        }
+                        self._timeout_adoptions = _adoptions
                         try:
                             _ainda_desprotegidos = await self._reconcile_exchange_positions(
                                 only_symbol=sig.symbol
                             )
+                            if sig.symbol in self.positions and not self.paper_trade:
+                                # F-013A — the position adopted after a fill timeout
+                                # IS this opening order (partial so far): it enters
+                                # the post-fill pipeline (cumulative VWAP, active
+                                # stop, F-003 budget) instead of living with an
+                                # orphan geometry and initial_sl=None forever.
+                                from bot import postfill_geometry
+                                _adopted = self.positions[sig.symbol]
+                                _native = getattr(_adopted, "_native_protection", None)
+                                await postfill_geometry.adopt_after_timeout(
+                                    self, _adopted,
+                                    fill_status=(_fill_check.get("status") or {}),
+                                    order_id=_oid_real, planned_entry=sig.entry,
+                                    planned_sl=(getattr(_native, "native_sl", None) or sig.sl),
+                                    planned_tp=(getattr(_native, "native_tp", None) or sig.tp),
+                                    client_oid=(_order or {}).get("clientOid", "") or "",
+                                )
                             if sig.symbol in self.positions:
                                 try:
                                     _managed.transition(
@@ -3319,12 +3533,15 @@ class TradingEngine:
                                 f"_reconcile_exchange_positions falhou para "
                                 f"{sig.symbol}: {_re}"
                             )
+                        finally:
+                            (getattr(self, "_timeout_adoptions", None) or {}).pop(sig.symbol, None)
                         if self._durable_state_enforced:
                             await durable.persist_orders(
                                 self, "fill_timeout_reconcile", strict=False
                             )
                             if sig.symbol not in self.positions:
-                                durable._block(self, "orders")
+                                durable._block(self, durable.ORDERS_UNRESOLVED,
+                                               source="fill_timeout_reconcile")
                         last_exc = RuntimeError(
                             f"ordem {_oid_real} não confirmada como FILLED"
                         )
@@ -3396,43 +3613,17 @@ class TradingEngine:
                 return
 
             # ══════════════════════════════════════════════════════
-            # P1 (Auditoria forense final) — PREÇO DE EXECUÇÃO
+            # F-013 — GEOMETRIA PÓS-FILL ÚNICA
             #
-            # GAP ENCONTRADO: wait_for_fill() já consulta
-            # GET /api/v1/orders/{orderId}, que a KuCoin responde com
-            # dealSize/dealValue (de onde dá para derivar o preço médio
-            # REAL de execução). O código descartava esse dado e usava
-            # o ticker público em cache como aproximação — uma fonte
-            # menos precisa quando já havia uma mais precisa disponível
-            # na mesma resposta que acabara de ser consultada.
-            #
-            # Prioridade: avgDealPrice/dealValue-dealSize (dado real da
-            # ordem) > ticker em cache (aproximação de mercado).
+            # O sinal NÃO é mais deslocado pelo delta do fill: o stop nativo
+            # já enviado à KuCoin permanecia no nível original enquanto a
+            # Position nascia com SL/TP deslocados (duas geometrias). O
+            # ticker em cache nunca é prova de fill (INV-FILL-AUTHORITY-001).
+            # Em LIVE a Position nasce UNCONFIRMED (initial_sl=None, saídas
+            # por R fail-closed) e postfill_geometry a reconcilia: fill
+            # autoritativo -> stop ativo na exchange -> risco F-003.
             # ══════════════════════════════════════════════════════
-            try:
-                _fill = 0.0
-                _st = _fill_check.get("status", {}) or {}
-                _deal_size  = float(_st.get("dealSize", 0)  or 0)
-                _deal_value = float(_st.get("dealValue", 0) or 0)
-                if _deal_size > 0 and _deal_value > 0:
-                    _fill = _deal_value / _deal_size   # preço médio real
-                if _fill <= 0:
-                    _tk = self.client.get_cached_ticker(sig.symbol) or {}
-                    _fill = float(_tk.get("lastPrice", 0) or 0)
-                if _fill > 0:
-                    _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
-                    if _slip_pct > 0.05:
-                        log.warning(
-                            f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
-                            f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
-                        )
-                    # Desloca SL/TP na mesma proporção para preservar o R:R
-                    _delta = _fill - sig.entry
-                    sig.entry += _delta
-                    sig.sl    += _delta
-                    sig.tp    += _delta
-            except Exception as e:
-                log.debug(f"fill price {sig.symbol}: {e}")
+            _planned_entry, _planned_sl, _planned_tp = sig.entry, sig.sl, sig.tp
 
             # EXEC-01: `qty` aqui vem de RiskManager.size() e JÁ está em
             # UNIDADE BASE — NÃO converter. Este é o caminho de origem
@@ -3441,6 +3632,14 @@ class TradingEngine:
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
+            if not self.paper_trade:
+                from bot import postfill_geometry
+                await postfill_geometry.reconcile_after_open(
+                    self, pos, fill_status=(_fill_check.get("status") or {}),
+                    order_id=_oid_real, planned_entry=_planned_entry,
+                    planned_sl=_planned_sl, planned_tp=_planned_tp,
+                    client_oid=(_order or {}).get("clientOid", "") or "",
+                )
             # Diagnostic filled-position count only. Submission was consumed
             # before sending, including every ambiguous/error path.
             if self.pilot.enabled:
@@ -3479,10 +3678,12 @@ class TradingEngine:
                     )
                 else:
                     trade_id = await db.save_trade_open(
-                        sig.symbol, side, sig.entry, qty,
+                        sig.symbol, side, pos.entry, pos.qty,
                         cfg.LEVERAGE, pre_score["total"],
                         score_features=_feats,
-                        sl=sig.sl,             # ITEM 4: define 1R do trade
+                        # ITEM 4 / F-013: 1R from the CONFIRMED initial stop;
+                        # while unconfirmed, the stop actually sent natively.
+                        sl=pos.initial_sl if pos.initial_sl is not None else pos.sl,
                         direction=sig.direction,
                     )
             except db.PersistenceError as exc:
@@ -3633,6 +3834,7 @@ class TradingEngine:
 
                 sig = Signal(sym, direction, ep, sl, tp, 0.75, "Startup sync", 75)
                 pos = Position(sig, _base_size)
+                pos.initial_sl = None   # Q-01: rebuilt from exchange; real initial risk unknown
                 pos.pnl = upnl
                 cur = float(p.get("markPrice", ep))
                 pos.update_pnl(cur)

@@ -17,7 +17,8 @@ class ConfirmedRRTests(unittest.IsolatedAsyncioTestCase):
             p = patch('bot.confirmed_rr_exit.db.' + name, AsyncMock(side_effect=fn))
             p.start()
             self.addCleanup(p.stop)
-        self.position = SimpleNamespace(entry=100, sl=99, current_price=103,
+        # Q-01: a Position always carries its immutable initial stop.
+        self.position = SimpleNamespace(entry=100, sl=99, initial_sl=99, current_price=103,
             qty=1, direction='LONG', _forensic_lineage={'order_id': 'opening-1'})
         self.client = SimpleNamespace(build_client_oid=Mock(return_value='unique-1'),
             place_order=AsyncMock(return_value={'orderId': 'exit-1'}),

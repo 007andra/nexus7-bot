@@ -14,6 +14,12 @@ class PilotCounterTests(PilotFixture):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.client.place_order = AsyncMock(return_value={'orderId': 'mock'})
+        # This suite counts pilot submissions with a client that has no exchange;
+        # F-013 post-fill exchange reconciliation is isolated (own tests cover it).
+        from unittest.mock import patch
+        patcher = patch("bot.postfill_geometry.reconcile_after_open", AsyncMock(return_value="UNCONFIRMED"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.client.wait_for_fill = AsyncMock(
             return_value={
                 'filled': True,
@@ -152,8 +158,14 @@ class PilotCounterTests(PilotFixture):
         session.post.return_value = LostResponse()
         self.client._session = session
         self.client._execution_ownership = object()
+        # READY_FOR_NEW_ENTRIES is enforced at the transport boundary (F-002).
+        ready = ValidExecutionTestContext(self.client, self.engine.instruments).engine
+        ready._execution_ownership_valid = True
         try:
-            with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()):
+            # Isolates lost-response handling with a synthetic body; the F-003
+            # transport barrier is covered by tests/test_risk_budget_sizing.py.
+            with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()), \
+                    patch("bot.risk_budget.assert_transport_dispatch"):
                 result = await self.client._post(
                     '/api/v1/orders', {'clientOid': 'offline'}, single_attempt=True
                 )

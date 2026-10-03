@@ -23,5 +23,5 @@ def durable_analysis_blocker(engine):
     still treated as analysis blockers.
     """
     errors = set(getattr(engine, "_durable_state_errors", set()) or set())
-    hard = sorted(e for e in errors if e in {"database", "orders", "paper"})
+    hard = sorted(e for e in errors if e in {"database", "orders", "orders_unresolved", "orders_restore", "paper"})
     return hard

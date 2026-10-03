@@ -13,8 +13,54 @@ the read-only conditional-stop verifier. This prevents a protected position
 from being emergency-closed merely because ``position.stopLoss`` is zero.
 """
 import asyncio
+from decimal import Decimal
 
-from bot.conditional_stop_protection import conditional_stop_confirmed
+from bot.conditional_stop_protection import _instrument_info, conditional_stop_confirmed
+from bot.quantity import base_to_contracts, contracts_to_base, number, quantity_rules
+
+
+def emergency_close_quantity(position: dict, info) -> dict:
+    """Resolve an emergency full-close quantity with explicit units.
+
+    INV-EXEC-UNITS-002: ``position["size"]`` is interpreted only through
+    ``sizeUnit`` (raw KuCoin rows carry no label and are native CONTRACTS;
+    ``KuCoinPositionUnitAdapter`` rows are BASE_ASSET with ``sizeContracts``).
+    Returns ``base_qty`` for ``place_order(qty=...)`` (BASE ASSET) plus the
+    contract counts. INV-EXEC-UNITS-001: the normalized close request may never
+    exceed the open contracts. Any ambiguity raises ValueError (fail closed).
+    """
+    if not isinstance(info, dict):
+        raise ValueError("instrument metadata unavailable")
+    multiplier, _, _, _ = quantity_rules(info)
+    unit = str(position.get("sizeUnit") or "CONTRACTS").strip().upper()
+    raw = position.get("size")
+    if raw is None or isinstance(raw, bool):
+        raise ValueError("position size missing")
+    if unit == "CONTRACTS":
+        open_contracts = number(raw, positive=True)
+        base_qty = contracts_to_base(open_contracts, info)
+    elif unit == "BASE_ASSET":
+        base_dec = number(raw, positive=True)
+        if position.get("sizeContracts") is not None:
+            open_contracts = number(position["sizeContracts"], positive=True)
+        else:
+            open_contracts = base_dec / multiplier
+        if open_contracts != open_contracts.to_integral_value():
+            raise ValueError("position contracts are not integral")
+        if Decimal(str(contracts_to_base(open_contracts, info))) != base_dec:
+            raise ValueError("position base size inconsistent with contracts")
+        base_qty = float(base_dec)
+    else:
+        raise ValueError(f"unsupported sizeUnit={unit!r}")
+    request_contracts = Decimal(base_to_contracts(base_qty, info))
+    if request_contracts <= 0 or request_contracts > open_contracts:
+        raise ValueError(
+            f"reduce request {request_contracts} contracts exceeds open {open_contracts}"
+        )
+    return {
+        "unit": unit, "base_qty": base_qty, "multiplier": float(multiplier),
+        "open_contracts": int(open_contracts), "request_contracts": int(request_contracts),
+    }
 
 
 def install(TradingEngine, kucoin_mod, log):
@@ -68,7 +114,8 @@ def install(TradingEngine, kucoin_mod, log):
                 try:
                     from bot import durable_execution as durable
                     if getattr(self, "_durable_state_enforced", False):
-                        durable._block(self, "orders")
+                        durable._block(self, durable.PROTECTION_UNCONFIRMED,
+                                       source="protection_postcondition")
                 except Exception as block_exc:
                     log.error(
                         "[PROTECTION_POSTCONDITION] %s durable block failed: %s",
@@ -99,7 +146,8 @@ def install(TradingEngine, kucoin_mod, log):
                     try:
                         from bot import durable_execution as durable
                         if getattr(self, "_durable_state_enforced", False):
-                            durable._block(self, "orders")
+                            durable._block(self, durable.PROTECTION_UNCONFIRMED,
+                                           source="protection_postcondition")
                     except Exception as block_exc:
                         log.error(
                             "[PROTECTION_POSTCONDITION] %s durable block failed: %s",
@@ -120,13 +168,17 @@ def install(TradingEngine, kucoin_mod, log):
         async def _guard_naked_positions_with_conditional_protection(self):
             if getattr(self, "paper_trade", False):
                 return
-            try:
-                positions = await self.client.get_positions()
-            except Exception as exc:
-                log.debug("_guard_naked_positions: %s", exc)
+            # NOVO-01: guard every VALID row even when another row is malformed;
+            # UNKNOWN symbols are never stop-attached nor emergency-closed.
+            from bot.position_snapshot import read_for_risk_reduction
+            view = await read_for_risk_reduction(self.client, source="naked_guard")
+            if not view.readable:
                 return
+            for sym in view.unknown_symbols:
+                log.critical("[RISK_REDUCTION_UNKNOWN_SKIPPED] stage=naked_guard symbol=%s "
+                             "reason=row_rejected mutation=NONE", sym)
 
-            for p in positions:
+            for p in view.rows:
                 try:
                     sym = p.get("symbol", "")
                     if (getattr(self, "_pilot_external_position_guard_patched", False)
@@ -177,10 +229,29 @@ def install(TradingEngine, kucoin_mod, log):
                     # Keep the original safety behavior for a genuinely naked
                     # position: if protection cannot be confirmed, close it.
                     log.critical("🚨 %s: falha ao reaplicar SL — FECHANDO posição", sym)
+                    try:
+                        info = _instrument_info(self.client, sym) or (
+                            getattr(self, "instruments", None) or {}
+                        ).get(sym)
+                        close = emergency_close_quantity(p, info)
+                    except (ValueError, ArithmeticError, KeyError, TypeError) as exc:
+                        log.critical(
+                            "[EMERGENCY_CLOSE_UNITS] symbol=%s result=BLOCK reason=%s "
+                            "size=%r sizeUnit=%r exchange_dispatch=NONE",
+                            sym, exc, p.get("size"), p.get("sizeUnit"),
+                        )
+                        continue
+                    log.critical(
+                        "[EMERGENCY_CLOSE_UNITS] symbol=%s reason=naked_position unit=%s "
+                        "open_contracts=%s multiplier=%s base_qty=%s request_contracts=%s "
+                        "reduceOnly=true",
+                        sym, close["unit"], close["open_contracts"], close["multiplier"],
+                        close["base_qty"], close["request_contracts"],
+                    )
                     res = await self.client.place_order(
                         symbol=sym,
                         side="Sell" if side == "Buy" else "Buy",
-                        qty=size, sl=0, tp=0,
+                        qty=close["base_qty"], sl=0, tp=0,
                         instruments=self.instruments,
                         reduce_only=True,
                     )

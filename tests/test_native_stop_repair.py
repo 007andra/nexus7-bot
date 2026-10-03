@@ -108,11 +108,18 @@ class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
         c.get_stop_orders = AsyncMock(side_effect=lambda symbol: list(accepted))
         self.assertTrue(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
 
-        accepted[0]["stopPrice"] = "7.3021"
+        # Drift to the LOOSER side is not equivalent and must be repaired.
+        accepted[0]["stopPrice"] = "7.2979"
         c._post.reset_mock()
         c._post = AsyncMock(return_value={"orderId": "replacement"})
         self.assertFalse(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
         c._post.assert_awaited_once()
+
+        # Q-01C: drift to the MORE protective side is never loosened back.
+        accepted[0]["stopPrice"] = "7.3021"
+        c._post = AsyncMock(return_value={"orderId": "replacement"})
+        self.assertTrue(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
+        c._post.assert_not_awaited()
 
     async def test_acknowledgement_without_readback_fails(self):
         c=self.client()

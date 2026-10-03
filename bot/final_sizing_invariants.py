@@ -1,52 +1,20 @@
-"""Final LIVE pilot sizing authority.
+"""Final LIVE pilot sizing authority (F-003: stop-loss risk budget).
 
-Operator policy owns quantity: 50% of freshly authenticated available
-collateral is used as initial margin at configured leverage. RiskManagerV3 is
-mandatory as a fail-closed validation gate, but its numeric recommendation
-cannot silently shrink an otherwise valid operator target.
+    TECHNICAL STOP -> RISK BUDGET (equity x MAX_RISK_PCT) -> CONTRACTS (floor)
+    -> MARGIN CEILING (available x MAX_MARGIN_PCT) -> OPEN-RISK CAP
+    -> FINAL INVARIANT -> authorization carried to the transport boundary.
+
+``RiskManagerV3`` (through ``ProfessionalRiskAdapter.size_detail``) is the only
+function that turns a risk budget into a maximum quantity. This wrapper adds no
+target of its own: it can only accept that quantity or refuse the trade. There
+is no margin target; margin is a ceiling. NO TRADE is a valid result.
 """
 from __future__ import annotations
 
 import math
-from decimal import Decimal, ROUND_FLOOR
 
 from bot.config import cfg
 from bot.quantity import quantity_rules
-
-MARGIN_FRACTION = 0.50
-
-
-def _select_final_quantity(*, target_qty: float, risk_qty: float) -> float:
-    """Return operator target when both target and risk validation are valid."""
-    values = (float(target_qty), float(risk_qty))
-    if any(not math.isfinite(v) or v <= 0 for v in values):
-        return 0.0
-    return float(target_qty)
-
-
-def _operator_target_quantity(info: dict, price: float, available: float, leverage: float) -> float:
-    """Derive the 50%-margin target directly from fresh collateral.
-
-    This deliberately does not depend on any earlier legacy sizing wrapper.
-    Native KuCoin contract lots are floored so rounding can never consume more
-    than the operator's 50% initial-margin allocation.
-    """
-    price_d = Decimal(str(price))
-    available_d = Decimal(str(available))
-    leverage_d = Decimal(str(leverage))
-    if any(not v.is_finite() or v <= 0 for v in (price_d, available_d, leverage_d)):
-        return 0.0
-
-    multiplier, lot, minimum, min_notional = quantity_rules(info)
-    target_margin = available_d * Decimal(str(MARGIN_FRACTION))
-    target_notional = target_margin * leverage_d
-    contracts = target_notional / (price_d * multiplier)
-    contracts = (contracts / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
-    if contracts < minimum:
-        return 0.0
-    if contracts * multiplier * price_d < min_notional:
-        return 0.0
-    return float(contracts * multiplier)
 
 
 def install(engine_module, pilot_cap, log) -> None:
@@ -55,7 +23,13 @@ def install(engine_module, pilot_cap, log) -> None:
 
     previous_minimum = engine_module.minimum_base_quantity
 
-    def _final_operator_authoritative_quantity(info, price):
+    def _reject(symbol, reason, **fields):
+        extra = " ".join(f"{k}={v}" for k, v in fields.items())
+        log.critical("[RISK_BUDGET_REJECTED] symbol=%s reason=%s %s", symbol, reason, extra)
+        pilot_cap._PILOT_FINAL_QTY.set(0.0)
+        return 0.0
+
+    def _final_risk_authoritative_quantity(info, price):
         engine = pilot_cap._PILOT_ENGINE.get()
         symbol = pilot_cap._PILOT_SYMBOL.get()
         if engine is None or not symbol:
@@ -65,100 +39,77 @@ def install(engine_module, pilot_cap, log) -> None:
         ):
             return previous_minimum(info, price)
 
+        from bot import risk_budget
+        signal = pilot_cap._PILOT_SIGNAL.get()
         try:
             price_f = float(price)
-            available = float(getattr(engine, "_pilot_available_balance", 0.0) or 0.0)
             leverage = float(cfg.LEVERAGE)
-            target_qty = _operator_target_quantity(info, price_f, available, leverage)
-        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
-            log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=context_%s",
-                symbol, type(exc).__name__,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        if any(not math.isfinite(v) or v <= 0 for v in (target_qty, price_f, available, leverage)):
-            log.critical("[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=invalid_context", symbol)
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
+            direction = str(getattr(signal, "direction", "")).upper()
+            stop = float(getattr(signal, "sl"))
+            multiplier, _, _, _ = quantity_rules(info)
+            open_pct, _ = risk_budget.configured_risk_limits()
+            if direction not in ("LONG", "SHORT") or not all(
+                    math.isfinite(v) and v > 0 for v in (price_f, leverage, stop)):
+                raise ValueError("invalid_context")
+        except (KeyError, TypeError, ValueError, ArithmeticError, AttributeError,
+                risk_budget.RiskBudgetRefused) as exc:
+            return _reject(symbol, f"context_{getattr(exc, 'reason', type(exc).__name__)}")
 
         try:
-            risk_qty = float(engine.risk.size(
-                symbol, price_f, engine.instruments, open_positions=engine.positions,
-            ))
+            sizing, risk_pct, cost = engine.risk.size_detail(
+                symbol, price_f, engine.instruments)
+            equity = float(engine.risk.professional_snapshot.capital.equity)
+        except risk_budget.RiskBudgetRefused as exc:
+            return _reject(symbol, exc.reason)
         except Exception as exc:
-            log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=risk_validation_%s",
-                symbol, type(exc).__name__,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
+            return _reject(symbol, f"risk_sizing_{type(exc).__name__}")
 
-        final_qty = _select_final_quantity(target_qty=target_qty, risk_qty=risk_qty)
-        if final_qty <= 0:
-            log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=invalid_quantity target_qty=%.12g risk_validation_qty=%.12g",
-                symbol, target_qty, risk_qty,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
+        if sizing.qty <= 0:
+            return _reject(symbol, sizing.rejection_reason or sizing.binding_constraint,
+                           risk_budget=f"{sizing.risk_budget:.6f}",
+                           stop_pct=f"{sizing.stop_distance_pct:.5f}")
+        contracts = round(float(sizing.qty) / float(multiplier))
+        if not math.isclose(contracts * float(multiplier), float(sizing.qty),
+                            rel_tol=1e-9, abs_tol=1e-12) or contracts <= 0:
+            return _reject(symbol, "quantity_not_integral_contracts")
 
-        target_margin = available * MARGIN_FRACTION
-        target_notional = target_margin * leverage
-        final_margin = (final_qty * price_f) / leverage
-        tolerance = max(1e-9, target_margin * 1e-6)
-        if not math.isfinite(final_margin) or final_margin > target_margin + tolerance:
-            log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=margin_cap_exceeded final_margin=%.12g target_margin=%.12g",
-                symbol, final_margin, target_margin,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        signal = None
-        cost_fraction = float("nan")
-        setup_id = "UNKNOWN"
         try:
-            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
-            signal = pilot_cap._PILOT_SIGNAL.get()
-            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
-            setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
-            validate(
-                final_qty, price_f, signal.sl, signal.direction, leverage,
-                cost_fraction,
-            )
-        except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
-            emit_telemetry(
-                log, symbol=symbol, setup_id=setup_id,
-                stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
-                stop=getattr(signal, "sl", float("nan")),
-                direction=getattr(signal, "direction", "UNKNOWN"),
-                leverage=leverage, cost_fraction=cost_fraction, result="BLOCK",
-                specific_reason=reason_from_exception(exc),
-                risk_v3_advisory_qty=risk_qty,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-        emit_telemetry(
-            log, symbol=symbol, setup_id=setup_id,
-            stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
-            stop=signal.sl, direction=signal.direction, leverage=leverage,
-            cost_fraction=cost_fraction, result="PASS",
-            specific_reason="within_50pct_entry_margin",
-            risk_v3_advisory_qty=risk_qty,
-        )
+            metrics = risk_budget.assert_projected_loss_within_budget(
+                symbol=symbol, contracts=contracts, multiplier=multiplier, entry=price_f,
+                stop=stop, direction=direction, cost_fraction=cost, equity=equity,
+                risk_pct=risk_pct, stage="FINAL_SIZING", leverage=leverage)
+            reserved, total = risk_budget.assert_open_risk_within_cap(
+                engine, symbol=symbol, proposed=equity * risk_pct, equity=equity,
+                risk_pct=risk_pct, open_pct=open_pct)
+        except risk_budget.RiskBudgetRefused as exc:
+            return _reject(symbol, exc.reason)
 
-        pilot_cap._PILOT_FINAL_QTY.set(final_qty)
+        qty = contracts * float(multiplier)
+        risk_budget.authorize(risk_budget.RiskAuthorization(
+            symbol=symbol, side="buy" if direction == "LONG" else "sell",
+            direction=direction, contracts=contracts, multiplier=float(multiplier),
+            entry=price_f, stop=stop, cost_fraction=cost, equity=equity,
+            risk_pct=risk_pct, risk_budget=equity * risk_pct,
+            projected_loss=metrics["projected_loss"], reserved_before=reserved,
+            leverage=leverage))
+        pilot_cap._PILOT_FINAL_QTY.set(qty)
         log.warning(
-            "[FINAL_SIZING_INVARIANT] symbol=%s result=PASS target_qty=%.12g risk_validation_qty=%.12g final_qty=%.12g target_margin=%.6f target_notional=%.6f final_margin=%.6f margin_pct=50.00%% leverage=%.0fx authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE",
-            symbol, target_qty, risk_qty, final_qty, target_margin, target_notional, final_margin, leverage,
+            "[RISK_SIZING] symbol=%s result=PASS equity=%.6f risk_pct=%.4f risk_budget=%.6f "
+            "entry=%.10g stop=%.10g stop_pct=%.5f cost_fraction=%.5f final_contracts=%s "
+            "notional=%.6f margin=%.6f projected_loss=%.6f projected_loss_pct=%.5f "
+            "aggregate_reserved_pct=%.5f leverage=%.0fx binding=%s authority=RISK_BUDGET_V3",
+            symbol, equity, risk_pct, equity * risk_pct, price_f, stop,
+            metrics["stop_pct"], cost, contracts, metrics["notional"], metrics["margin"],
+            metrics["projected_loss"], metrics["projected_loss_pct"], total / equity,
+            leverage, sizing.binding_constraint,
         )
-        return final_qty
+        return qty
 
-    engine_module.minimum_base_quantity = _final_operator_authoritative_quantity
+    engine_module.minimum_base_quantity = _final_risk_authoritative_quantity
     engine_module._final_sizing_invariants_installed = True
     log.critical(
-        "[FINAL_SIZING_INVARIANT] installed=true operator_margin_target=50pct_available sizing_authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE configured_leverage_unchanged=true fail_closed=true"
+        "[FINAL_SIZING_INVARIANT] installed=true sizing_authority=RISK_BUDGET_V3 "
+        "risk_pct=%s open_risk_cap=%s margin_role=CEILING leverage_role=MARGIN_ONLY "
+        "configured_leverage_unchanged=true fail_closed=true",
+        cfg.MAX_RISK_PCT, cfg.MAX_OPEN_RISK_PCT,
     )

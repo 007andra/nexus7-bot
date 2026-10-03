@@ -43,7 +43,10 @@ async def check(engine):
             if state is not None and (not isinstance(state, dict) or state.get('idem') != idem or not state.get('client_oid')):
                 raise ValueError('invalid durable RR exit')
             if state is None:
-                distance = abs(entry - stop)
+                # Q-01: 2R is measured on the initial risk; after BE the current
+                # stop distance is 0 and the exit could never fire.
+                from bot.exit_geometry import initial_risk_per_unit
+                distance = initial_risk_per_unit(position) or 0.0
                 profit = price - entry if position.direction == 'LONG' else entry - price
                 if distance <= 0 or profit < 2 * distance:
                     continue
@@ -83,6 +86,12 @@ async def check(engine):
             if any(abs(v) > 0 for v in sizes):
                 log.warning('[RR_EXIT_PENDING] symbol=%s residual_position=true local_position_retained=true', symbol)
                 continue
+            # NOVO-02: fill confirmed + exchange flat => lineage terminal now.
+            try:
+                from bot import trade_lifecycle
+                await trade_lifecycle.terminalize_positions({symbol: position}, positions, 'rr_exit_flat')
+            except Exception as exc:
+                log.error('[TRADE_LINEAGE_TERMINAL_FAILED] symbol=%s stage=rr_exit error=%s', symbol, type(exc).__name__)
             # One accounting owner handles exchange-flat positions and attaches
             # opening lineage. Do not manufacture a trade from the trigger mark.
             await engine._sync_positions()

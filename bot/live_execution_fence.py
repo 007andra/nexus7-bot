@@ -1,7 +1,7 @@
 """Distributed ownership fence for LIVE order dispatch.
 
 This hardening does not change strategy, entry eligibility, leverage, sizing,
-stop geometry or the operator's 50%-margin policy. It only prevents two
+stop geometry or the F-003 risk-budget sizing. It only prevents two
 simultaneous process instances from both dispatching LIVE entry orders.
 
 PostgreSQL session advisory locks are used deliberately: ownership follows the

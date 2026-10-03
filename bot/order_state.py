@@ -137,6 +137,21 @@ class ManagedOrder:
             )
             return
 
+        if "filled_qty" in info and info["filled_qty"] is not None:
+            # INV-ORDER-FILL-001 (unit-free part): cumulative fills are finite,
+            # non-negative and never decrease.
+            try:
+                new_filled = float(info["filled_qty"])
+            except (TypeError, ValueError):
+                raise InvalidTransition(f"{self.symbol}: filled_qty inválido")
+            if not math.isfinite(new_filled) or new_filled < 0:
+                raise InvalidTransition(f"{self.symbol}: filled_qty não finito/negativo")
+            if new_filled + 1e-12 < float(self.filled_qty or 0):
+                raise InvalidTransition(
+                    f"{self.symbol} [{self.client_oid[:8]}]: filled_qty regrediria "
+                    f"({self.filled_qty} -> {new_filled})"
+                )
+
         permitidos = TRANSICOES.get(self.state, set())
         if novo not in permitidos:
             raise InvalidTransition(
@@ -292,8 +307,21 @@ class OrderRegistry:
     def index_order_id(self, order_id: str, client_oid: str):
         """Registra o vínculo order_id -> client_oid assim que a
         exchange retorna o orderId (dentro de place_order)."""
-        if order_id and client_oid:
-            self._by_order_id[order_id] = client_oid
+        if not (order_id and client_oid):
+            return False
+        bound = self._by_order_id.get(order_id)
+        order = self._orders.get(client_oid)
+        if (bound and bound != client_oid) or (
+                order is not None and order.order_id and order.order_id != order_id):
+            # INV-ORDER-IDENTITY-001: never rebind an orderId to another order.
+            log.warning(
+                "[ORDER_EVENT_IDENTITY_REJECTED] source=REGISTRY reason=order_id_rebind "
+                "orderId=%s bound_clientOid=%s requested_clientOid=%s mutation=NONE",
+                order_id, bound or "?", client_oid,
+            )
+            return False
+        self._by_order_id[order_id] = client_oid
+        return True
 
     def snapshot(self) -> list:
         return [order.to_record() for order in self._orders.values()]

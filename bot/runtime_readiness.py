@@ -55,8 +55,48 @@ def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
       protection_system_ready=bool(getattr(engine,"_protection_system_ready", False)),
     )
 
+class EntryReadinessRefused(RuntimeError):
+    """OPEN_NEW_RISK refused by the canonical readiness authority."""
+    def __init__(self, message="READY_FOR_NEW_ENTRIES=false", blockers=()):
+        super().__init__(message)
+        self.blockers = tuple(blockers)
+
 def assert_ready_for_new_entries(engine):
     snap=runtime_readiness(engine)
     if not snap.ready_for_new_entries:
-        raise RuntimeError("READY_FOR_NEW_ENTRIES=false")
+        blockers = [name for name, value in snap.__dict__.items() if value is not True]
+        # F-010 observability: name each causal durable reason behind the flag.
+        blockers += [f"durable:{reason}" for reason in
+                     sorted(getattr(engine, "_durable_state_errors", None) or ())]
+        raise EntryReadinessRefused("READY_FOR_NEW_ENTRIES=false", blockers)
     return snap
+
+def assert_entry_dispatch_ready(client, *, stage, symbol="", side="", client_oid=""):
+    """INV-LIVE-READINESS-001 boundary check for every LIVE new-entry dispatch.
+
+    Delegates to assert_ready_for_new_entries (single source of truth). A
+    missing engine or any evaluation error fails closed. Reduce-only exits and
+    protection orders must not call this.
+    """
+    engine = getattr(client, "_engine", None)
+    try:
+        if engine is None:
+            raise EntryReadinessRefused(
+                "READY_FOR_NEW_ENTRIES=false: execution engine unavailable", ("engine",)
+            )
+        return assert_ready_for_new_entries(engine)
+    except Exception as exc:
+        refused = exc if isinstance(exc, EntryReadinessRefused) else EntryReadinessRefused(
+            "READY_FOR_NEW_ENTRIES=false: readiness evaluation failed",
+            (f"evaluation_error:{type(exc).__name__}",),
+        )
+        from bot.logger import log
+        log.critical(
+            "[ENTRY_READINESS_GATE] result=BLOCK stage=%s symbol=%s side=%s "
+            "client_oid=%s blockers=%s mode=LIVE exchange_dispatch=NONE",
+            stage, symbol or "?", side or "?", client_oid or "?",
+            ",".join(refused.blockers) or "unknown",
+        )
+        if refused is exc:
+            raise
+        raise refused from exc

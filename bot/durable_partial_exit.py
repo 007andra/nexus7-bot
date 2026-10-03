@@ -6,12 +6,19 @@ from decimal import Decimal, ROUND_DOWN
 from bot import database as db
 from bot.confirmed_rr_exit import identity, _persist
 from bot.conditional_stop_protection import _instrument_info, _to_base_size
+from bot.exit_geometry import initial_risk_per_unit, log_geometry
+from bot.stop_monotonic import (
+    EQUAL_AFTER_ROUNDING, WORSE, current_stop, decide_stop, log_decision,
+)
 from bot.logger import log
 from bot.quantity import quantity_rules, validate_base_quantity
 
 
 async def check(engine):
     engine._pending_partial_symbols = set()
+    # Q-01B: keep the durable exit geometry (peak / partial state) current.
+    from bot import exit_geometry_durability
+    await exit_geometry_durability.sync(engine)
     for symbol, pos in list(engine.positions.items()):
         try:
             key, idem = identity(symbol, pos)
@@ -30,7 +37,10 @@ async def check(engine):
                 if pos.direction not in ('LONG', 'SHORT'):
                     raise ValueError('invalid partial direction')
                 profit = price-entry if pos.direction == 'LONG' else entry-price
-                if abs(entry-stop) <= 0 or profit < abs(entry-stop) + entry*0.0003:
+                # Q-01 INV-INITIAL-RISK-001: 1R is the trade's initial risk, not
+                # the current (possibly trailed) stop distance. Unknown -> skip.
+                risk = initial_risk_per_unit(pos)
+                if risk is None or profit < risk + entry*0.0003:
                     continue
                 info = engine.instruments[symbol]
                 multiplier, lot, _, _ = quantity_rules(info)
@@ -83,19 +93,45 @@ async def check(engine):
                 if not math.isfinite(remaining) or (raw_size > 0 and remaining <= 0):
                     raise ValueError('invalid residual')
             pos.tp1_hit = True
+            # NOVO-02: credit the BGX reduction (capped by the BGX order size).
+            try:
+                from bot import trade_lifecycle
+                await trade_lifecycle.record_reduction(pos, remaining, state.get('qty'), 'partial_fill')
+            except Exception as exc:
+                log.error('[TRADE_LINEAGE_REDUCE_FAILED] symbol=%s error=%s', symbol, type(exc).__name__)
             if remaining == 0:
                 await engine._sync_positions()
                 engine._pending_partial_symbols.discard(symbol)
                 continue
             pos.qty = remaining
+            log_geometry(pos, 'PARTIAL_EXIT_STATE', closed_qty=state.get('qty'), tp1_hit=True)
+            # Q-01B: real residual + tp1 + peak persisted as one record.
+            from bot import exit_geometry_durability
+            try:
+                await exit_geometry_durability.persist(pos, 'partial_fill')
+            except Exception as exc:
+                log.error('[EXIT_GEOMETRY_PERSIST_FAILED] symbol=%s stage=partial error=%s',
+                          symbol, type(exc).__name__)
             if state.get('protected') is not True:
-                engine._unprotected_symbols.add(symbol)
-                if await engine.client.set_sl(symbol, pos.entry) is not True:
+                # Q-01C INV-STOP-MONOTONIC-001: break-even is a floor. A stop
+                # already at or beyond BE (e.g. trailed) is kept, no exchange call.
+                current = current_stop(pos)
+                decision = decide_stop(
+                    pos.direction, current, pos.entry,
+                    tick_size=(_instrument_info(engine.client, symbol) or {}).get('tickSize'),
+                    market_price=pos.current_price)
+                log_decision(symbol, pos.direction, current, pos.entry, decision, 'partial_break_even')
+                if decision.replace:
+                    engine._unprotected_symbols.add(symbol)
+                    if await engine.client.set_sl(symbol, pos.entry) is not True:
+                        continue
+                    pos.sl = pos.entry
+                    pos.trailing_sl = pos.entry
+                elif decision.reason not in (WORSE, EQUAL_AFTER_ROUNDING):
+                    engine._unprotected_symbols.add(symbol)   # BE not provable yet: retry
                     continue
                 state['protected'] = True
                 await _persist(key, state)
-                pos.sl = pos.entry
-                pos.trailing_sl = pos.entry
                 engine._unprotected_symbols.discard(symbol)
             engine._pending_partial_symbols.discard(symbol)
         except Exception as exc:

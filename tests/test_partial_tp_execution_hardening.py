@@ -58,7 +58,7 @@ hardening.install(Engine, Client, 0.0006, Log())
 
 def pos():
     return SimpleNamespace(
-        tp1_hit=False, current_price=101.1, entry=100.0, sl=99.0,
+        tp1_hit=False, current_price=101.1, entry=100.0, sl=99.0, initial_sl=99.0,
         direction="LONG", qty_original=10.0, qty=10.0, trailing_sl=99.0,
     )
 

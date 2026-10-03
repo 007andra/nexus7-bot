@@ -115,7 +115,7 @@ class RuntimeContractGuardTests(unittest.TestCase):
         self.assertIn("RiskManager.can_open", source)
         self.assertIn("RiskManagerV3.can_open", source)
         self.assertIn("_final_sizing_invariants_installed", source)
-        self.assertIn("sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap", source)
+        self.assertIn("sizing_authority=RISK_BUDGET_V3 margin_role=CEILING", source)
         self.assertIn("entry_authorization_unchanged=true", source)
 
     def test_guard_covers_live_execution_chain(self):

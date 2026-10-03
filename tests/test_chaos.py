@@ -42,6 +42,15 @@ async def run():
     await c.load_instruments()
     inst = c.get_instruments()
 
+    # Legacy non-composed client (entry + separate stop) driving WS chaos; the
+    # F-003 transport barrier (native stop + risk authorization) is covered by
+    # tests/test_risk_budget_sizing*.py, so it is isolated here explicitly.
+    from unittest.mock import patch as _patch
+    with _patch("bot.risk_budget.assert_transport_dispatch"):
+        await _run_scenarios(c, e, inst, ValidExecutionTestContext, IntegrityGuard, runner)
+
+
+async def _run_scenarios(c, e, inst, ValidExecutionTestContext, IntegrityGuard, runner):
     async with ValidExecutionTestContext(c, inst):
         # ─────────── A — WS CAI COM POSIÇÃO ABERTA ───────────
         print("\n═══ A — WS cai durante posição aberta ═══")

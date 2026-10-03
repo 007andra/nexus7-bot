@@ -56,53 +56,25 @@ class OperatorRuntimePolicyTests(unittest.TestCase):
             if previous_override is not None:
                 os.environ[policy.RISK_OVERRIDE_ENV] = previous_override
 
-    def test_live_pilot_target_is_fifty_percent_available_margin(self):
+    def test_operator_policy_no_longer_owns_live_sizing(self):
+        # F-003: the 50%-available margin target was removed; sizing authority is
+        # the stop-loss risk budget in final_sizing_invariants.
         from bot import engine as engine_module
         from bot import operator_runtime_policy as policy
-        from bot import pilot_risk_cap_hardening as pilot_cap
 
-        old_leverage = cfg.LEVERAGE
-        original_minimum = engine_module.minimum_base_quantity
-        original_marker = getattr(engine_module, "_operator_margin_sizing_installed", False)
+        self.assertFalse(hasattr(policy, "_install_margin_sizing"))
+        self.assertFalse(hasattr(policy, "MARGIN_FRACTION"))
+        before = engine_module.minimum_base_quantity
 
-        risk = SimpleNamespace(size=lambda *args, **kwargs: 0.01)
-        fake_engine = SimpleNamespace(
-            paper_trade=False,
-            pilot=SimpleNamespace(enabled=True),
-            _pilot_available_balance=20.0,
-            risk=risk,
-            instruments={},
-            positions={},
-        )
-        info = {
-            "multiplier": "0.01",
-            "lotSize": "1",
-            "minQty": "1",
-            "minNotional": "0",
-        }
+        class Engine:
+            async def run(self):
+                return None
 
-        try:
-            cfg.LEVERAGE = 50
-            engine_module._operator_margin_sizing_installed = False
-            policy._install_margin_sizing(_Log())
-            token_engine = pilot_cap._PILOT_ENGINE.set(fake_engine)
-            token_symbol = pilot_cap._PILOT_SYMBOL.set("TESTUSDT")
-            token_qty = pilot_cap._PILOT_FINAL_QTY.set(None)
-            try:
-                qty = engine_module.minimum_base_quantity(info, 100.0)
-                # available=20; 50% margin=10; 50x => target notional=500;
-                # qty=5 @ $100 => $500 notional => $10 initial margin.
-                self.assertAlmostEqual(qty, 5.0)
-                self.assertAlmostEqual((qty * 100.0) / cfg.LEVERAGE, 10.0)
-                self.assertAlmostEqual(pilot_cap._PILOT_FINAL_QTY.get(), 5.0)
-            finally:
-                pilot_cap._PILOT_FINAL_QTY.reset(token_qty)
-                pilot_cap._PILOT_SYMBOL.reset(token_symbol)
-                pilot_cap._PILOT_ENGINE.reset(token_engine)
-        finally:
-            cfg.LEVERAGE = old_leverage
-            engine_module.minimum_base_quantity = original_minimum
-            engine_module._operator_margin_sizing_installed = original_marker
+            def _update_balance(self):
+                return None
+
+        policy.install(Engine, _Log())
+        self.assertIs(engine_module.minimum_base_quantity, before)
 
     def test_exit_min_hold_defaults_to_ninety_minutes(self):
         from bot.exit_policy_telemetry import _min_hold_remaining

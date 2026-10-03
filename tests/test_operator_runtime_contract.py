@@ -9,15 +9,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class OperatorRuntimeContractTests(unittest.TestCase):
-    def test_live_operator_contract_remains_50x_and_50pct(self):
-        """Hardening must not silently change the requested LIVE sizing contract."""
+    def test_live_operator_contract_keeps_leverage_and_risk_budget(self):
+        """Configured leverage is respected; sizing is the F-003 risk budget (no margin target)."""
         env = dict(os.environ)
         env["LEVERAGE"] = "50"
         code = (
             "from bot.config import cfg; "
-            "from bot.operator_runtime_policy import MARGIN_FRACTION; "
+            "import bot.operator_runtime_policy as p; "
             "assert cfg.LEVERAGE == 50, cfg.LEVERAGE; "
-            "assert MARGIN_FRACTION == 0.50, MARGIN_FRACTION; "
+            "assert cfg.MAX_RISK_PCT == 0.01 and cfg.MAX_OPEN_RISK_PCT == 0.02; "
+            "assert not hasattr(p, 'MARGIN_FRACTION'); "
             "print('operator contract ok')"
         )
         proc = subprocess.run(

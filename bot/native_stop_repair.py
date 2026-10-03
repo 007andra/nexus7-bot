@@ -93,6 +93,37 @@ def _exact_matches(orders, body, position, instrument_info):
     )
 
 
+def _covers_position(order, position, instrument_info):
+    if order.get("closeOrder") is True:
+        return True
+    position_base = _to_base_size(abs(_number(position.get("size"))),
+                                  position.get("sizeUnit", "CONTRACTS"), instrument_info)
+    covered = _to_base_size(order.get("size", order.get("qty", 0)),
+                            order.get("sizeUnit", "CONTRACTS"), instrument_info)
+    return position_base > 0 and covered + max(1e-12, position_base * 1e-9) >= position_base
+
+
+async def _owned_stop_floor(client, symbol, position_side, order_side, lineage, orders,
+                            position, instrument_info, long):
+    """Most protective active BGX SL of this exact lineage covering the position."""
+    best = None
+    for row in orders or []:
+        try:
+            if not (lifecycle._active(row) and lifecycle.is_bgx_owned(row)
+                    and lifecycle.protection_kind(row, position_side) == "SL"
+                    and _covers_position(row, position, instrument_info)):
+                continue
+            trigger = _number(row.get("stopPrice"))
+            if trigger <= 0 or not await lifecycle.owned_for_lineage(
+                    client, symbol, order_side, "SL", lineage, str(row.get("clientOid") or "")):
+                continue
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if best is None or (trigger > best if long else trigger < best):
+            best = trigger
+    return best
+
+
 async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
     if kucoin_mod.PAPER_TRADE or not kucoin_mod.API_KEY:
         return False
@@ -100,10 +131,18 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
         sl, tp = _number(sl), _number(tp)
         if sl < 0 or tp < 0 or not (sl > 0 or tp > 0):
             return False
-        positions = await client.get_positions()
+        # NOVO-01: protecting a validly identified position is risk reducing;
+        # another symbol's malformed row must not block it. An UNKNOWN target
+        # symbol is never mutated.
+        from bot.position_snapshot import read_for_risk_reduction
+        view = await read_for_risk_reduction(client, source="native_stop_repair")
+        if symbol in view.unknown_symbols:
+            log.critical("[RISK_REDUCTION_UNKNOWN_SKIPPED] stage=stop_repair symbol=%s "
+                         "reason=row_rejected mutation=NONE", symbol)
+            return False
         pos = next(
             (
-                p for p in positions
+                p for p in view.rows
                 if p.get("symbol") == symbol
                 and abs(_number(p.get("size"))) > 0
             ),
@@ -111,6 +150,9 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
         )
         if pos is None:
             return False
+        if not view.authoritative:
+            log.critical("[RISK_REDUCTION_VALID_ROW] stage=stop_repair symbol=%s action=set_stop "
+                         "snapshot_authority=%s", symbol, view.state)
         side = str(pos.get("side", "")).lower()
         if side not in ("buy", "sell", "long", "short"):
             return False
@@ -145,6 +187,25 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     kind,
                 )
                 return False
+
+            if kind == "SL":
+                # Q-01C INV-STOP-MONOTONIC-001 at the exchange boundary: a more
+                # protective owned stop already verified active for this lineage
+                # is never replaced by a looser one (stale local BE, restart,
+                # repair). No new order, no cancellation.
+                from bot.stop_monotonic import WORSE, decide_stop, log_decision
+                floor = await _owned_stop_floor(
+                    client, symbol, side, "sell" if long else "buy", lineage, orders,
+                    pos, instrument_info, long)
+                if floor is not None:
+                    direction = "LONG" if long else "SHORT"
+                    decision = decide_stop(
+                        direction, floor, trigger,
+                        tick_size=(instrument_info or {}).get("tickSize"))
+                    if decision.reason == WORSE:
+                        log_decision(symbol, direction, floor, trigger, decision,
+                                     "native_stop_repair_exchange_floor")
+                        continue
 
             body = dict(
                 symbol=kucoin_mod.to_kucoin(symbol),
