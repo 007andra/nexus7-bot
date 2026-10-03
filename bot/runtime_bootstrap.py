@@ -193,6 +193,13 @@ def install() -> None:
     _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
     _nexus_shadow_research_runtime.install(TradingEngine, _log)
+    if not _exchange.is_kucoin():
+        # SHADOW ONLY: separate /public @bookTicker feed + passive STATIC vs
+        # LIVE_BBO cost comparison. Returns the champion decision unchanged;
+        # never read by any trading path (decision_effect=NONE).
+        from bot import binance as _binance_client
+        from bot import bbo_cost_shadow_runtime as _bbo_cost_shadow_runtime
+        _bbo_cost_shadow_runtime.install(TradingEngine, _binance_client.BinanceClient, _log)
 
     # Runtime-truth stage wrappers are deliberately interleaved with the
     # existing strategy wrapper installation order. Each wrapper records the
