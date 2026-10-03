@@ -114,7 +114,8 @@ class BinanceOOSReplayTests(unittest.TestCase):
                 sha256=("a" if "01-01" in url else "b" if "01-02" in url else "c") * 64,
             )
 
-        def fake_parse(payload, *, source_date):
+        def fake_parse(payload, *, source_date, expected_symbol=None):
+            # The loader now consumes per-archive provenance as well.
             ts = timestamps[source_date]
             return (
                 MetricsObservation(
@@ -136,8 +137,13 @@ class BinanceOOSReplayTests(unittest.TestCase):
             "bot.binance_oos_replay.download_archive_verified",
             side_effect=fake_download,
         ), patch(
-            "bot.binance_oos_replay.parse_metrics_archive",
-            side_effect=fake_parse,
+            "bot.binance_oos_replay.parse_metrics_archive_with_provenance",
+            side_effect=lambda payload, **kw: (
+                fake_parse(payload, **kw),
+                {"symbol": "BTCUSDT", "source_date": kw["source_date"], "convention": "END_LABEL",
+                 "raw_rows": 1, "rows_after_dedup": 1, "exact_duplicates_dropped": 0,
+                 "conflicting_duplicates": 0},
+            ),
         ):
             rows, artifacts = asyncio.run(
                 load_verified_metrics(

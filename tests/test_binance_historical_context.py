@@ -43,18 +43,100 @@ class MetricsArchiveOrderingTests(unittest.TestCase):
         rows = parse_metrics_archive(payload, source_date="2026-03-01")
         self.assertEqual([r.sum_open_interest for r in rows], [101.0, 102.0])
 
-    def test_exact_duplicate_row_is_dropped_with_provenance(self):
-        from bot.binance_historical_context import METRICS_ARCHIVE_PROVENANCE
+    def test_D_exact_duplicate_row_is_dropped_with_provenance(self):
+        from bot.binance_historical_context import parse_metrics_archive_with_provenance
         row = _metrics_row("2026-03-02 00:05:00")
-        rows = parse_metrics_archive(_zip_csv("m.csv", _HEADER + row + row), source_date="2026-03-02")
+        rows, prov = parse_metrics_archive_with_provenance(
+            _zip_csv("m.csv", _HEADER + row + row), source_date="2026-03-02",
+            expected_symbol="BTCUSDT")
         self.assertEqual(len(rows), 1)
-        self.assertEqual(METRICS_ARCHIVE_PROVENANCE["2026-03-02"]["exact_duplicates_dropped"], 1)
+        self.assertEqual(prov, {"symbol": "BTCUSDT", "source_date": "2026-03-02",
+                                "convention": "END_LABEL", "raw_rows": 2, "rows_after_dedup": 1,
+                                "exact_duplicates_dropped": 1, "conflicting_duplicates": 0})
 
-    def test_conflicting_duplicate_fails_closed_with_location(self):
+    def test_E_conflicting_duplicate_fails_closed_with_location(self):
         payload = _zip_csv("m.csv", _HEADER + _metrics_row("2026-03-03 00:05:00", oi="100")
                            + _metrics_row("2026-03-03 00:05:00", oi="999"))
         with self.assertRaisesRegex(ValueError, "conflicting metrics rows.*2026-03-03"):
             parse_metrics_archive(payload, source_date="2026-03-03")
+
+
+def _row(ts, sym, oi="100"):
+    return f"{ts},{sym},{oi},10000,1.1,1.2,1.0,1.05\n"
+
+
+class ArchiveProvenanceTests(unittest.TestCase):
+    """INV-ARCHIVE-PROVENANCE-001."""
+
+    def _parse(self, text, day, sym):
+        from bot.binance_historical_context import parse_metrics_archive_with_provenance
+        return parse_metrics_archive_with_provenance(
+            _zip_csv("m.csv", _HEADER + text), source_date=day, expected_symbol=sym)
+
+    def test_A_B_same_day_btc_and_eth_keep_distinct_provenance(self):
+        from bot.binance_oos_evidence_bundle import metrics_parse_provenance
+        btc_row = _row("2026-01-02 00:05:00", "BTCUSDT")
+        _, btc = self._parse(btc_row + btc_row + _row("2026-01-02 00:10:00", "BTCUSDT"), "2026-01-02", "BTCUSDT")
+        _, eth = self._parse(_row("2026-01-02 00:05:00", "ETHUSDT"), "2026-01-02", "ETHUSDT")
+        bundle = metrics_parse_provenance([
+            {"symbol": "ETHUSDT", "metrics_parse_provenance": [eth]},
+            {"symbol": "BTCUSDT", "metrics_parse_provenance": [btc]},
+        ])
+        self.assertEqual([(a["symbol"], a["source_date"]) for a in bundle["archives"]],
+                         [("BTCUSDT", "2026-01-02"), ("ETHUSDT", "2026-01-02")])
+        self.assertEqual(bundle["archives"][0]["exact_duplicates_dropped"], 1)
+        self.assertEqual(bundle["archives"][1]["exact_duplicates_dropped"], 0)
+        self.assertEqual(bundle["exact_duplicate_rows_dropped"], 1, "total derived from records")
+
+    def test_C_mixed_symbol_archive_fails_closed(self):
+        text = _row("2026-01-02 00:05:00", "BTCUSDT") + _row("2026-01-02 00:10:00", "ETHUSDT")
+        with self.assertRaisesRegex(ValueError, "cross-symbol metrics row"):
+            self._parse(text, "2026-01-02", "BTCUSDT")
+        with self.assertRaisesRegex(ValueError, "cross-symbol metrics row"):
+            self._parse(_row("2026-01-02 00:05:00", "ETHUSDT"), "2026-01-02", "BTCUSDT")
+        with self.assertRaisesRegex(ValueError, "cross-symbol metrics row"):
+            self._parse(text, "2026-01-02", None)     # one archive = one symbol
+
+    def test_duplicate_archive_record_in_bundle_fails_closed(self):
+        from bot.binance_oos_evidence_bundle import metrics_parse_provenance
+        _, btc = self._parse(_row("2026-01-02 00:05:00", "BTCUSDT"), "2026-01-02", "BTCUSDT")
+        with self.assertRaisesRegex(RuntimeError, "duplicate metrics archive provenance"):
+            metrics_parse_provenance([{"metrics_parse_provenance": [btc]},
+                                      {"metrics_parse_provenance": [btc]}])
+
+    def test_F_second_replay_does_not_inherit_first_replay_provenance(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from bot.binance_oos_replay import load_verified_metrics
+        payloads = {"2026-01-02": _zip_csv("m.csv", _HEADER + _row("2026-01-02 00:05:00", "BTCUSDT") * 2),
+                    "2026-01-03": _zip_csv("m.csv", _HEADER + _row("2026-01-03 00:05:00", "BTCUSDT"))}
+
+        async def fake_download(url, *, cache_path=None, timeout_s=30.0):
+            day = url.split("-metrics-")[1][:10]
+            return SimpleNamespace(payload=payloads[day], sha256="f" * 64)
+        with patch("bot.binance_oos_replay.download_archive_verified", side_effect=fake_download):
+            first, second = [], []
+            asyncio.run(load_verified_metrics("BTCUSDT", ["2026-01-02"], provenance_out=first))
+            asyncio.run(load_verified_metrics("BTCUSDT", ["2026-01-03"], provenance_out=second))
+        self.assertEqual([p["source_date"] for p in first], ["2026-01-02"])
+        self.assertEqual([p["source_date"] for p in second], ["2026-01-03"], "no state from replay 1")
+        self.assertEqual(first[0]["exact_duplicates_dropped"], 1)
+        self.assertEqual(second[0]["exact_duplicates_dropped"], 0)
+        self.assertEqual(first[0]["archive_sha256"], "f" * 64)
+        import bot.binance_historical_context as ctx
+        self.assertFalse(hasattr(ctx, "METRICS_ARCHIVE_PROVENANCE"), "no global mutable provenance")
+
+    def test_G_post_shift_dedupe_and_order_use_effective_time(self):
+        # 2026-06-25+: label T is safe at T+5m; ordering/dedupe happen on that.
+        text = (_row("2026-07-01 00:10:00", "BTCUSDT", oi="102")
+                + _row("2026-07-01 00:05:00", "BTCUSDT", oi="101")
+                + _row("2026-07-01 00:05:00", "BTCUSDT", oi="101"))
+        rows, prov = self._parse(text, "2026-07-01", "BTCUSDT")
+        self.assertEqual([r.effective_ts_ms - r.label_ts_ms for r in rows], [300_000, 300_000])
+        self.assertEqual([r.sum_open_interest for r in rows], [101.0, 102.0])
+        self.assertEqual((prov["convention"], prov["exact_duplicates_dropped"]),
+                         ("START_LABEL_SHIFTED_TO_AVAILABILITY", 1))
 
 
 class BinanceHistoricalContextTests(unittest.TestCase):

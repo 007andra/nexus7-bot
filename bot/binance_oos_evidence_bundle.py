@@ -253,19 +253,37 @@ def build_sensitivity_report(symbol_reports: list[dict]) -> dict:
     }
 
 
-def _metrics_parse_provenance() -> dict:
-    from bot.binance_historical_context import METRICS_ARCHIVE_PROVENANCE
-    dropped = {
-        day: int(item.get("exact_duplicates_dropped", 0))
-        for day, item in sorted(METRICS_ARCHIVE_PROVENANCE.items())
-        if int(item.get("exact_duplicates_dropped", 0)) > 0
-    }
+def metrics_parse_provenance(symbol_reports: list[dict]) -> dict:
+    """Per-archive metrics provenance (INV-ARCHIVE-PROVENANCE-001).
+
+    Records come from each replay's own scoped list, one per physical archive,
+    ordered by symbol then source_date. Totals are DERIVED from the records and
+    never replace them. Two records for one (symbol, date) fail closed."""
+    records = []
+    seen: set[tuple[str, str]] = set()
+    for report in symbol_reports:
+        for record in report.get("metrics_parse_provenance") or ():
+            key = (str(record.get("symbol", "")), str(record.get("source_date", "")))
+            if not all(key):
+                raise RuntimeError("metrics provenance record without symbol/date")
+            if key in seen:
+                raise RuntimeError(f"duplicate metrics archive provenance {key}")
+            seen.add(key)
+            records.append(dict(record))
+    records.sort(key=lambda item: (item["symbol"], item["source_date"]))
     return {
-        "archives_parsed": len(METRICS_ARCHIVE_PROVENANCE),
-        "exact_duplicate_rows_dropped": sum(dropped.values()),
-        "dates_with_exact_duplicates": dropped,
-        "conflicting_duplicates": "FAIL_CLOSED",
-        "row_order": "SORTED_BY_EFFECTIVE_TIMESTAMP",
+        "archives": records,
+        "archives_parsed": len(records),
+        "raw_rows_total": sum(int(r.get("raw_rows", 0)) for r in records),
+        "exact_duplicate_rows_dropped": sum(int(r.get("exact_duplicates_dropped", 0)) for r in records),
+        "archives_with_exact_duplicates": [
+            {"symbol": r["symbol"], "source_date": r["source_date"],
+             "exact_duplicates_dropped": int(r["exact_duplicates_dropped"])}
+            for r in records if int(r.get("exact_duplicates_dropped", 0)) > 0
+        ],
+        "conflicting_duplicates": sum(int(r.get("conflicting_duplicates", 0)) for r in records),
+        "conflict_policy": "FAIL_CLOSED",
+        "row_order": "SORTED_BY_EFFECTIVE_TIMESTAMP_AFTER_CAUSAL_NORMALIZATION",
     }
 
 
@@ -356,7 +374,7 @@ async def run(
         "sensitivity": sensitivity,
         "opportunity_ranking": opportunity_ranking,
         "microstructure_review": microstructure_review,
-        "metrics_parse_provenance": _metrics_parse_provenance(),
+        "metrics_parse_provenance": metrics_parse_provenance(reports),
         "manifest": manifest.canonical_dict(),
         "manifest_hash": manifest.fingerprint,
         "dataset_fingerprint": manifest.dataset_fingerprint,

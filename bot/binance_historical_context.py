@@ -16,8 +16,6 @@ from typing import Iterable, Mapping, Sequence
 
 
 _METRICS_SHIFT_DATE = date(2026, 6, 25)
-# Per-archive parse provenance (exact duplicate rows dropped), keyed by date.
-METRICS_ARCHIVE_PROVENANCE: dict[str, dict] = {}
 _BOOK_DEPTH_KNOWN_ISSUE_DATE = date(2026, 9, 3)
 
 
@@ -164,8 +162,29 @@ def parse_metrics_archive(
     payload: bytes,
     *,
     source_date: str,
+    expected_symbol: str | None = None,
 ) -> tuple[MetricsObservation, ...]:
+    """Rows only; see :func:`parse_metrics_archive_with_provenance`."""
+    rows, _provenance = parse_metrics_archive_with_provenance(
+        payload, source_date=source_date, expected_symbol=expected_symbol
+    )
+    return rows
+
+
+def parse_metrics_archive_with_provenance(
+    payload: bytes,
+    *,
+    source_date: str,
+    expected_symbol: str | None = None,
+) -> tuple[tuple[MetricsObservation, ...], dict]:
     """Parse 5m metrics and shift post-2026-06-25 labels to availability time.
+
+    Returns the rows plus the provenance of THIS archive (symbol, date,
+    convention, raw/deduplicated row counts). No module state is written:
+    INV-ARCHIVE-PROVENANCE-001 — each physical archive has its own record,
+    never overwritten by another symbol or date. One archive = one symbol:
+    a row of any other symbol (or of a symbol other than ``expected_symbol``)
+    fails closed.
 
     Before 2026-06-25 the archive label T describes a snapshot/flow ending at T.
     From 2026-06-25 onward observed archive semantics are start-labeled, so row T
@@ -189,12 +208,24 @@ def parse_metrics_archive(
 
     by_effective: dict[int, MetricsObservation] = {}
     duplicates = 0
+    raw_rows = 0
+    archive_symbol = str(expected_symbol).upper() if expected_symbol else None
     convention = (
         "START_LABEL_SHIFTED_TO_AVAILABILITY"
         if src_day >= _METRICS_SHIFT_DATE
         else "END_LABEL"
     )
     for row in reader:
+        raw_rows += 1
+        row_symbol = str(row["symbol"]).upper()
+        if archive_symbol is None:
+            archive_symbol = row_symbol
+        elif row_symbol != archive_symbol:
+            raise ValueError(
+                "cross-symbol metrics row in archive "
+                f"expected={archive_symbol} found={row_symbol} "
+                f"source_date={src_day.isoformat()}"
+            )
         label_ts = _utc_ms(row["create_time"])
         effective_ts = (
             label_ts + 5 * 60 * 1000
@@ -234,12 +265,17 @@ def parse_metrics_archive(
             duplicates += 1
             continue
         by_effective[effective_ts] = observation
-    out = [by_effective[ts] for ts in sorted(by_effective)]
-    METRICS_ARCHIVE_PROVENANCE[src_day.isoformat()] = {
-        "rows": len(out),
+    out = tuple(by_effective[ts] for ts in sorted(by_effective))
+    provenance = {
+        "symbol": archive_symbol or (str(expected_symbol).upper() if expected_symbol else ""),
+        "source_date": src_day.isoformat(),
+        "convention": convention,
+        "raw_rows": raw_rows,
+        "rows_after_dedup": len(out),
         "exact_duplicates_dropped": duplicates,
+        "conflicting_duplicates": 0,
     }
-    return tuple(out)
+    return out, provenance
 
 
 def parse_book_depth_archive(

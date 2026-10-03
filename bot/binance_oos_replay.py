@@ -46,6 +46,7 @@ from bot.binance_historical_context import (
     MetricsTimeline,
     parse_book_depth_archive,
     parse_metrics_archive,
+    parse_metrics_archive_with_provenance,
     shadow_microstructure_context,
 )
 from bot.candidate_trace import ensure_candidate_id
@@ -184,8 +185,12 @@ async def load_verified_metrics(
     *,
     cache_dir: str | Path | None = None,
     concurrency: int = 8,
+    provenance_out: list | None = None,
 ) -> tuple[list[MetricsObservation], tuple[ResearchArtifact, ...]]:
     """Load checksum-verified daily 5m metrics with bounded concurrency.
+
+    ``provenance_out`` (owned by the caller, i.e. scoped to one replay)
+    receives one record per physical archive in date order.
 
     Network completion order never affects the result: merge order follows the
     caller's date sequence, and duplicate effective timestamps fail closed when
@@ -202,9 +207,13 @@ async def load_verified_metrics(
             archive = await download_archive_verified(
                 url, cache_path=_archive_cache_path(cache_dir, url)
             )
-            rows = parse_metrics_archive(
-                archive.payload, source_date=source_date
+            rows, provenance = parse_metrics_archive_with_provenance(
+                archive.payload,
+                source_date=source_date,
+                expected_symbol=str(symbol).upper(),
             )
+            provenance = {**provenance, "source": url,
+                          "archive_sha256": archive.sha256}
             artifact = ResearchArtifact(
                 source=url,
                 dataset="metrics",
@@ -215,15 +224,18 @@ async def load_verified_metrics(
                 first_ts=rows[0].effective_ts_ms if rows else None,
                 last_ts=rows[-1].effective_ts_ms if rows else None,
             )
-            return source_date, rows, artifact
+            return source_date, rows, artifact, provenance
 
     loaded = await asyncio.gather(
         *(load_one(source_date) for source_date in dates)
     )
     by_date = {
         source_date: (rows, artifact)
-        for source_date, rows, artifact in loaded
+        for source_date, rows, artifact, _provenance in loaded
     }
+    if provenance_out is not None:
+        provenance_by_date = {item[0]: item[3] for item in loaded}
+        provenance_out.extend(provenance_by_date[day] for day in dates)
 
     by_ts: dict[int, MetricsObservation] = {}
     artifacts: list[ResearchArtifact] = []
@@ -733,14 +745,17 @@ async def replay_symbol(
     funding, af = await load_verified_funding(
         symbol, months, cache_dir=cache_dir
     )
+    metrics_provenance: list[dict] = []          # scoped to this replay only
     metric_rows, am = await load_verified_metrics(
-        symbol, dates_for_months(months), cache_dir=cache_dir
+        symbol, dates_for_months(months), cache_dir=cache_dir,
+        provenance_out=metrics_provenance,
     )
     metrics_timeline = MetricsTimeline(metric_rows)
     artifacts = a15 + a1h + a4h + af + am
     if len(k15) < 200 or len(k1h) < 60 or len(k4h) < 30:
         return (
-            {"symbol": symbol, "error": "insufficient_history", "candidates": []},
+            {"symbol": symbol, "error": "insufficient_history", "candidates": [],
+             "metrics_parse_provenance": list(metrics_provenance)},
             artifacts,
         )
 
@@ -971,6 +986,7 @@ async def replay_symbol(
     return (
         {
             "symbol": symbol,
+            "metrics_parse_provenance": list(metrics_provenance),
             "candles_15m": len(k15),
             "candles_1h": len(k1h),
             "candles_4h": len(k4h),
