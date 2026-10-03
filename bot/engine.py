@@ -3199,11 +3199,12 @@ class TradingEngine:
             _client_oid = self.client.build_client_oid(
                 sig.symbol, side, qty, _idem
             )
-            # NOVO-F013A-1f — a key that repeats for the SAME unresolved intent
-            # (duplicate submission guard) must never hand a NEW financial
-            # intent the ManagedOrder of a finished trade (same symbol/side/qty
-            # inside the same minute after the previous trade closed). A
-            # terminal previous order with no live position => new generation.
+            # P0 (candidate identity): the candidate id repeats for the same
+            # setup inside its 15-minute formation bucket and across restarts.
+            # It may dedupe the SAME unresolved intent, but a terminal previous
+            # order with no live position is a finished trade: a new financial
+            # intent gets a new generation of the key, never the old clientOid
+            # or ManagedOrder (terminal orders stay in the durable registry).
             _base_idem, _generation = _idem, 0
             _prev = self.orders.get(_client_oid) if hasattr(self.orders, "get") else None
             while (_prev is not None and _prev.state in TERMINAIS
@@ -3214,9 +3215,9 @@ class TradingEngine:
                 _prev = self.orders.get(_client_oid)
             if _generation:
                 log.warning(
-                    "[ORDER_IDENTITY] symbol=%s previous_intent=TERMINAL generation=%s "
-                    "clientOid=%s reason=new_financial_intent_same_minute",
-                    sig.symbol, _generation, _client_oid,
+                    "[ORDER_IDENTITY] symbol=%s candidate_id=%s previous_intent=TERMINAL "
+                    "generation=%s clientOid=%s reason=new_financial_intent_same_candidate",
+                    sig.symbol, _candidate_id, _generation, _client_oid,
                 )
             log.info(
                 "[CANDIDATE_TRACE] candidate_id=%s clientOid=%s symbol=%s "
