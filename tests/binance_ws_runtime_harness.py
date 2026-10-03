@@ -157,9 +157,15 @@ async def _settle(n: int = 20) -> None:
     await asyncio.sleep(0.01)
 
 
+def _non_shadow_connections() -> list:
+    """Connections other than the observation-only BBO cost shadow (/public)."""
+    return [c for c in FakeBinanceWs.connections
+            if not c.url.split("?")[0].endswith("/public/stream")]
+
+
 async def _wait_connections(count: int) -> None:
     for _ in range(400):
-        if len(FakeBinanceWs.connections) >= count:
+        if len(_non_shadow_connections()) >= count:
             await _settle()
             return
         await asyncio.sleep(0.01)
@@ -196,8 +202,8 @@ async def _scenario(name: str) -> dict:
 
     if name == "fresh_public_market_data":
         steps["before_any_frame"] = gate()
-        FakeBinanceWs.connections[-1].push(kline_frame())
-        FakeBinanceWs.connections[-1].push(ticker_frame("NEARUSDT"))
+        _non_shadow_connections()[-1].push(kline_frame())
+        _non_shadow_connections()[-1].push(ticker_frame("NEARUSDT"))
         await _settle()
         steps["after_frames"] = gate()
     elif name == "reconnect":
@@ -205,7 +211,7 @@ async def _scenario(name: str) -> dict:
         health = getattr(client, "market_data_health", None)
         if health is not None:
             health._monotonic = clock
-        conn = FakeBinanceWs.connections[-1]
+        conn = _non_shadow_connections()[-1]
         conn.push(kline_frame())
         await _settle()
         steps["connected_fresh"] = gate()
@@ -213,7 +219,7 @@ async def _scenario(name: str) -> dict:
         await _wait_connections(2)  # real _ws_loop reconnect (1s backoff)
         clock.t += 121.0
         steps["reconnected_no_frame_stale"] = gate()
-        FakeBinanceWs.connections[-1].push(ticker_frame())
+        _non_shadow_connections()[-1].push(ticker_frame())
         await _settle()
         steps["reconnected_first_frame"] = gate()
     else:
@@ -225,7 +231,12 @@ async def _scenario(name: str) -> dict:
         "bootstrap_installed": bool(getattr(builtins, "_nexus_runtime_bootstrap_installed", False)),
         "client_type": f"{type(client).__module__}.{type(client).__qualname__}",
         "engine_client_is_client": engine.client is client,
-        "ws_urls": [c.url.split("?")[0] for c in FakeBinanceWs.connections],
+        # Trading market-data connections. The BBO cost shadow opens a separate,
+        # observation-only /public @bookTicker connection, reported on its own.
+        "ws_urls": [c.url.split("?")[0] for c in FakeBinanceWs.connections
+                    if not c.url.split("?")[0].endswith("/public/stream")],
+        "shadow_ws_urls": [c.url for c in FakeBinanceWs.connections
+                           if c.url.split("?")[0].endswith("/public/stream")],
         "handler_qualname": binance.BinanceClient._handle_ws_message.__qualname__,
         "market_data_reasons": gate(),
         "steps": steps,
