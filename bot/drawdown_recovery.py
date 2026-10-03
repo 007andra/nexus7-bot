@@ -27,6 +27,14 @@ REAUTH_TO_ENV = "LIVE_RECOVERY_REAUTHORIZE_TO_EPISODE_ID"
 REAUTH_REASON_ENV = "LIVE_RECOVERY_REAUTHORIZE_FROM_REASON"
 REAUTH_MAX_DD_ENV = "LIVE_RECOVERY_REAUTHORIZE_MAX_DRAWDOWN"
 REAUTH_RISK_ENV = "LIVE_RECOVERY_REAUTHORIZE_MAX_RISK_PCT"
+
+RELAX_ENV = "LIVE_RECOVERY_REAUTHORIZE_POLICY_RELAXATION"
+RELAX_FROM_ENV = "LIVE_RECOVERY_RELAX_FROM_EPISODE_ID"
+RELAX_TO_ENV = "LIVE_RECOVERY_RELAX_TO_EPISODE_ID"
+RELAX_FROM_MAX_DD_ENV = "LIVE_RECOVERY_RELAX_FROM_MAX_DRAWDOWN"
+RELAX_TO_MAX_DD_ENV = "LIVE_RECOVERY_RELAX_TO_MAX_DRAWDOWN"
+RELAX_RISK_ENV = "LIVE_RECOVERY_RELAX_RISK_PCT"
+
 STATE_KEY = "risk:drawdown_recovery:v1"
 
 
@@ -253,6 +261,85 @@ def _disarmed_reauthorization_binding(
     return True, "durable_reauthorization_binding_valid", audit
 
 
+def _armed_policy_relaxation_binding(
+    policy: RecoveryPolicy,
+    state: dict,
+    old_policy: RecoveryPolicy,
+) -> tuple[bool, str, dict | None]:
+    """Validate one exact operator-authorized ceiling relaxation.
+
+    This path is intentionally limited to an expired ARMED episode whose
+    authenticated drawdown has not worsened. It may raise only the recovery
+    drawdown ceiling; risk_pct may not increase. Source/target episodes and
+    source/target ceilings must match exactly. Any missing or stale binding
+    remains fail-closed.
+    """
+    if os.environ.get(RELAX_ENV, "").strip().lower() != "true":
+        return False, "durable_rollover_policy_relaxed", None
+    if str(state.get("status") or "") != "ARMED":
+        return False, "durable_policy_relaxation_source_status_invalid", None
+
+    from_episode = os.environ.get(RELAX_FROM_ENV, "").strip()
+    to_episode = os.environ.get(RELAX_TO_ENV, "").strip()
+    from_max_dd = _positive_finite(os.environ.get(RELAX_FROM_MAX_DD_ENV))
+    to_max_dd = _positive_finite(os.environ.get(RELAX_TO_MAX_DD_ENV))
+    risk_pct = _positive_finite(os.environ.get(RELAX_RISK_ENV))
+    if (
+        not from_episode
+        or not to_episode
+        or from_max_dd is None
+        or to_max_dd is None
+        or risk_pct is None
+    ):
+        return False, "durable_policy_relaxation_incomplete", None
+
+    if from_episode != str(state.get("episode_id") or ""):
+        return False, "durable_policy_relaxation_source_mismatch", None
+    if to_episode != policy.episode_id:
+        return False, "durable_policy_relaxation_target_mismatch", None
+    if old_policy.max_drawdown is None or old_policy.risk_pct is None:
+        return False, "durable_policy_relaxation_source_policy_invalid", None
+    if policy.max_drawdown is None or policy.risk_pct is None:
+        return False, "durable_policy_relaxation_target_policy_invalid", None
+
+    if not math.isclose(
+        from_max_dd,
+        float(old_policy.max_drawdown),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        return False, "durable_policy_relaxation_source_ceiling_mismatch", None
+    if not math.isclose(
+        to_max_dd,
+        float(policy.max_drawdown),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        return False, "durable_policy_relaxation_target_ceiling_mismatch", None
+    if not math.isclose(
+        risk_pct,
+        float(policy.risk_pct),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        return False, "durable_policy_relaxation_risk_mismatch", None
+    if float(policy.risk_pct) > float(old_policy.risk_pct) + 1e-12:
+        return False, "durable_policy_relaxation_risk_increase_forbidden", None
+    if float(policy.max_drawdown) <= float(old_policy.max_drawdown) + 1e-12:
+        return False, "durable_policy_relaxation_not_relaxed", None
+
+    audit = {
+        "from_episode_id": str(state.get("episode_id") or ""),
+        "to_episode_id": policy.episode_id,
+        "from_status": "ARMED",
+        "authorized_from_max_drawdown": float(old_policy.max_drawdown),
+        "authorized_to_max_drawdown": float(policy.max_drawdown),
+        "authorized_risk_pct": float(policy.risk_pct),
+        "consumed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return True, "durable_policy_relaxation_binding_valid", audit
+
+
 def _decode_state(raw: str | None) -> dict | None:
     if raw is None:
         return None
@@ -347,18 +434,34 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
             return False, "durable_episode_mismatch"
         if float(drawdown) > old_armed_drawdown + 1e-12:
             return False, "durable_rollover_drawdown_worsened"
-        if (
+        risk_relaxed = (
+            float(policy.risk_pct) > float(old_policy.risk_pct) + 1e-12
+        )
+        ceiling_relaxed = (
             float(policy.max_drawdown) > float(old_policy.max_drawdown) + 1e-12
-            or float(policy.risk_pct) > float(old_policy.risk_pct) + 1e-12
-        ):
+        )
+        if risk_relaxed:
             return False, "durable_rollover_policy_relaxed"
+
+        relaxation_audit = None
+        if ceiling_relaxed:
+            relax_ok, relax_reason, relaxation_audit = (
+                _armed_policy_relaxation_binding(policy, state, old_policy)
+            )
+            if not relax_ok:
+                return False, relax_reason
 
         payload = _state_payload(
             policy=policy,
             status="ARMED",
             armed_drawdown=float(drawdown),
             worst_drawdown=float(drawdown),
-            reason="operator_rearmed_after_expiry",
+            reason=(
+                "operator_reauthorized_policy_relaxation"
+                if relaxation_audit is not None
+                else "operator_rearmed_after_expiry"
+            ),
+            reauthorization=relaxation_audit,
         )
         try:
             ok = await save_key_values_atomic_cas(
@@ -370,6 +473,8 @@ async def ensure_durable_episode(drawdown: float, *, strict: bool = True) -> tup
             return False, "durable_rollover_conflict"
         if not ok:
             return False, "durable_rollover_unconfirmed"
+        if relaxation_audit is not None:
+            return True, "durable_reauthorized_policy_relaxation"
         return True, "durable_rearmed_after_expiry"
     if str(state.get("status") or "") != "ARMED":
         return False, "durable_episode_disarmed"
