@@ -42,7 +42,7 @@ from bot.daily_tracker import DailyTracker
 from bot import optimizer as opt
 # ── Fase 3: hardening ─────────────────────────────────────────────
 from bot.integrity import IntegrityGuard, Severity
-from bot.order_state import OrderRegistry, OrderState, InvalidTransition
+from bot.order_state import OrderRegistry, OrderState, InvalidTransition, TERMINAIS
 from bot.pilot import PilotGuard
 from bot.quantity import minimum_base_quantity, validate_base_quantity
 from bot.paper_loss_budget import cap_quantity as cap_paper_quantity
@@ -1390,13 +1390,45 @@ class TradingEngine:
 
                 direction = "LONG" if side == "Buy" else "SHORT"
 
+                # ══════════════════════════════════════════════════
+                # NOVO-F013A-1 — a Binance não traz stopLoss na linha da
+                # posição: sem isto o loader SEMPRE enviava SL/TP estimados
+                # (ATR/liquidação), mesmo com a proteção nativa ativa.
+                # Timeout não é sinal de mercado: a lineage conhecida usa os
+                # próprios níveis; origem desconhecida nunca substitui um stop
+                # condicional já ativo por estimativa.
+                # ══════════════════════════════════════════════════
+                from bot import timeout_adoption as _ta
+                _timeout_ctx = (getattr(self, "_timeout_adoptions", None) or {}).get(sym)
+                _lineage_levels = None
+                _conditional_sl = None
+                if not self.paper_trade:
+                    _tick = (getattr(self, "instruments", None) or {}).get(sym, {}).get("tickSize")
+                    if _timeout_ctx and _timeout_ctx.get("direction") == direction:
+                        _lineage_levels = await _ta.adopt_known_lineage(
+                            self.client, sym, direction, p, _timeout_ctx, _tick, log)
+                    elif _timeout_ctx:
+                        log.critical(
+                            f"🚨 [TIMEOUT_ADOPTION] {sym}: lado da exchange ({direction}) ≠ "
+                            f"opening order ({_timeout_ctx.get('direction')}) — não adotada"
+                        )
+                        self._unprotected_symbols.add(sym)
+                        continue
+                    elif sl_existente <= 0:
+                        _conditional_sl = await _ta.existing_conditional_stop(
+                            self.client, sym, direction)
+
                 # Preço de entrada vem da EXCHANGE (ep), nunca do ticker —
                 # exigência explícita da correção. SL/TP: usa o que já
                 # está na exchange se existir; caso contrário, calcula
                 # um SL conservador baseado na liquidação (mesma fórmula
                 # já usada e validada em _load_existing_positions).
                 atr_est = ep * 0.007
-                if sl_existente > 0:
+                if _lineage_levels is not None:
+                    sl, tp_existente = _lineage_levels[0], _lineage_levels[1]
+                elif _conditional_sl:
+                    sl = _conditional_sl
+                elif sl_existente > 0:
                     sl = sl_existente
                 elif direction == "LONG":
                     sl = max(liq * 1.02, ep - atr_est * 1.5) if liq > 0 else ep - atr_est * 1.5
@@ -1432,7 +1464,18 @@ class TradingEngine:
                 )
 
                 # ── Proteção: só marca protegida se a exchange confirmar ──
-                if sl_existente > 0:
+                if _lineage_levels is not None:
+                    # Lineage conhecida: proteção já reconciliada nos níveis
+                    # originais por timeout_adoption (nunca estimativa).
+                    if _lineage_levels[2]:
+                        self._unprotected_symbols.discard(sym)
+                    else:
+                        self._unprotected_symbols.add(sym)
+                elif _conditional_sl:
+                    self._unprotected_symbols.discard(sym)
+                    log.info(f"✓ RECONCILE {sym}: stop condicional já ativo "
+                             f"(${_conditional_sl:.6f}) — nenhuma estimativa enviada")
+                elif sl_existente > 0:
                     # A exchange já tinha um stop — nada a enviar, só
                     # confirmar que a marcação de risco está correta.
                     self._unprotected_symbols.discard(sym)
@@ -1933,6 +1976,8 @@ class TradingEngine:
         Move o SL na exchange via /v5/position/trading-stop.
         """
         for sym, pos in list(self.positions.items()):
+            if getattr(pos, "_geometry_unproven", False) is True:
+                continue    # Q-01: trailing never runs on an invented geometry
             try:
                 # Atualiza PnL com preço atual
                 cur = pos.current_price
@@ -3142,6 +3187,25 @@ class TradingEngine:
             _client_oid = self.client.build_client_oid(
                 sig.symbol, side, qty, _idem
             )
+            # NOVO-F013A-1f — a key that repeats for the SAME unresolved intent
+            # (duplicate submission guard) must never hand a NEW financial
+            # intent the ManagedOrder of a finished trade (same symbol/side/qty
+            # inside the same minute after the previous trade closed). A
+            # terminal previous order with no live position => new generation.
+            _base_idem, _generation = _idem, 0
+            _prev = self.orders.get(_client_oid) if hasattr(self.orders, "get") else None
+            while (_prev is not None and _prev.state in TERMINAIS
+                   and sig.symbol not in self.positions and _generation < 16):
+                _generation += 1
+                _idem = f"{_base_idem}|g{_generation}"
+                _client_oid = self.client.build_client_oid(sig.symbol, side, qty, _idem)
+                _prev = self.orders.get(_client_oid)
+            if _generation:
+                log.warning(
+                    "[ORDER_IDENTITY] symbol=%s previous_intent=TERMINAL generation=%s "
+                    "clientOid=%s reason=new_financial_intent_same_minute",
+                    sig.symbol, _generation, _client_oid,
+                )
 
             for attempt in range(1, MAX_RETRIES + 1):
                 _managed = None
@@ -3444,10 +3508,26 @@ class TradingEngine:
                         # registrada com o entry price REAL da exchange
                         # (nunca ticker) e recebe SL/TP imediatamente.
                         # ══════════════════════════════════════════════
+                        _adoptions = dict(getattr(self, "_timeout_adoptions", None) or {})
+                        _adoptions[sig.symbol] = {
+                            "order_id": _oid_real,
+                            "client_oid": (_order or {}).get("clientOid", "") or "",
+                            "direction": sig.direction,
+                            "planned_sl": sig.sl, "planned_tp": sig.tp,
+                        }
+                        self._timeout_adoptions = _adoptions
                         try:
                             _ainda_desprotegidos = await self._reconcile_exchange_positions(
                                 only_symbol=sig.symbol
                             )
+                            _adopted = self.positions.get(sig.symbol)
+                            if _adopted is not None and not self.paper_trade:
+                                # F-013 at the adopted position's exchange average:
+                                # same budget authority and stop repair as no-timeout.
+                                from bot import postfill_risk_recheck as _pfg
+                                _geo = await _pfg.reconcile(
+                                    self, sig, _adopted.qty, {}, log, position_fill=_adopted.entry)
+                                _adopted.sl = _adopted.trailing_sl = _geo.sl
                             if sig.symbol in self.positions:
                                 try:
                                     _managed.transition(
@@ -3469,6 +3549,8 @@ class TradingEngine:
                                 f"_reconcile_exchange_positions falhou para "
                                 f"{sig.symbol}: {_re}"
                             )
+                        finally:
+                            (getattr(self, "_timeout_adoptions", None) or {}).pop(sig.symbol, None)
                         if self._durable_state_enforced:
                             await durable.persist_orders(
                                 self, "fill_timeout_reconcile", strict=False
@@ -3596,30 +3678,44 @@ class TradingEngine:
             # Prioridade: avgDealPrice/dealValue-dealSize (dado real da
             # ordem) > ticker em cache (aproximação de mercado).
             # ══════════════════════════════════════════════════════
-            try:
-                _fill = 0.0
-                _st = _fill_check.get("status", {}) or {}
-                _deal_size  = float(_st.get("dealSize", 0)  or 0)
-                _deal_value = float(_st.get("dealValue", 0) or 0)
-                if _deal_size > 0 and _deal_value > 0:
-                    _fill = _deal_value / _deal_size   # preço médio real
-                if _fill <= 0:
-                    _tk = self.client.get_cached_ticker(sig.symbol) or {}
-                    _fill = float(_tk.get("lastPrice", 0) or 0)
-                if _fill > 0:
-                    _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
-                    if _slip_pct > 0.05:
-                        log.warning(
-                            f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
-                            f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
-                        )
-                    # Desloca SL/TP na mesma proporção para preservar o R:R
-                    _delta = _fill - sig.entry
-                    sig.entry += _delta
-                    sig.sl    += _delta
-                    sig.tp    += _delta
-            except Exception as e:
-                log.debug(f"fill price {sig.symbol}: {e}")
+            if not self.paper_trade:
+                # ══════════════════════════════════════════════════
+                # F-013 (Binance) — GEOMETRIA PÓS-FILL ÚNICA
+                #
+                # A proteção nativa já foi instalada na Binance nos níveis
+                # planejados. Deslocar SL/TP localmente pelo delta do fill
+                # (ou pelo ticker) criava duas geometrias. Agora: fill só do
+                # status da ordem; SL/TP locais = proteção na exchange; aperto
+                # (se o orçamento V3 exigir) é feito NA EXCHANGE com readback.
+                # ══════════════════════════════════════════════════
+                from bot import postfill_risk_recheck as _pfg
+                _geo = await _pfg.reconcile(self, sig, qty, _fill_check.get("status") or {}, log)
+                sig.entry, sig.sl, sig.tp = _geo.entry, _geo.sl, _geo.tp
+            else:
+                try:
+                    _fill = 0.0
+                    _st = _fill_check.get("status", {}) or {}
+                    _deal_size  = float(_st.get("dealSize", 0)  or 0)
+                    _deal_value = float(_st.get("dealValue", 0) or 0)
+                    if _deal_size > 0 and _deal_value > 0:
+                        _fill = _deal_value / _deal_size   # preço médio real
+                    if _fill <= 0:
+                        _tk = self.client.get_cached_ticker(sig.symbol) or {}
+                        _fill = float(_tk.get("lastPrice", 0) or 0)
+                    if _fill > 0:
+                        _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
+                        if _slip_pct > 0.05:
+                            log.warning(
+                                f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
+                                f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
+                            )
+                        # Desloca SL/TP na mesma proporção para preservar o R:R
+                        _delta = _fill - sig.entry
+                        sig.entry += _delta
+                        sig.sl    += _delta
+                        sig.tp    += _delta
+                except Exception as e:
+                    log.debug(f"fill price {sig.symbol}: {e}")
 
             # EXEC-01: `qty` aqui vem de RiskManager.size() e JÁ está em
             # UNIDADE BASE — NÃO converter. Este é o caminho de origem

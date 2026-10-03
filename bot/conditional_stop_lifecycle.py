@@ -574,6 +574,17 @@ async def cleanup_flat_symbol(
     if client is None or not await _validate_owner(client):
         return False
 
+    if callable(getattr(client, "cancel_algo_order", None)):
+        # P1-OPEN-1: Binance algo protection (bgx7-) is owned only through the
+        # durable opening-lineage record; never by prefix, never via KuCoin.
+        from bot.binance_stale_protection import VERIFIED, reconcile_symbol
+        try:
+            return await reconcile_symbol(client, symbol, flat_proven=True) == VERIFIED
+        except Exception as exc:
+            log.error("[FLAT_PROTECTION_CLEANUP] symbol=%s status=FAILED error=%s",
+                      symbol, type(exc).__name__)
+            return False
+
     from bot.conditional_stop_protection import read_stop_orders
     before = await read_stop_orders(client, symbol)
     if before is None:

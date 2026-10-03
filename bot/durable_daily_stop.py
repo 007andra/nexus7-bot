@@ -17,7 +17,6 @@ active.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -38,9 +37,10 @@ def state_key(day):
     # Deliberately excludes deployment/commit: a deploy is not a new day.
     # v3 retires the evidence-free v2 namespace without weakening future
     # persistence of legitimately triggered daily stops.
-    scope = '|'.join(os.environ.get(k, '') for k in (
-        'RAILWAY_PROJECT_ID', 'RAILWAY_SERVICE_ID', 'RAILWAY_ENVIRONMENT_ID'))
-    return f'daily_stop_v{STATE_VERSION}:' + hashlib.sha256(scope.encode()).hexdigest()[:24] + ':' + day
+    # NOVO-03: stable financial scope (not Railway IDs); legacy keys are read
+    # by database.load_key_value during migration.
+    from bot.financial_namespace import stable_scope
+    return f'daily_stop_v{STATE_VERSION}:' + stable_scope() + ':' + day
 
 
 def _finite(value, default=None):

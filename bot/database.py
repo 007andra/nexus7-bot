@@ -656,8 +656,32 @@ async def save_key_value(key: str, value: str, *, strict: bool = False):
         return False
 
 
-@_serialized_io
 async def load_key_value(key: str, *, strict: bool = False) -> str:
+    """Load a durable value; NOVO-03: fall back to the previous release's key.
+
+    Financial state moved from Railway-ID scopes to a stable financial scope.
+    When the stable key is absent, the legacy key (same state, previous
+    namespace) is read so an upgrade or a Railway project/environment change
+    never makes a daily stop, HWM peak or exit idempotency disappear."""
+    value = await _load_key_value_raw(key, strict=strict)
+    if value is not None:
+        return value
+    try:
+        from bot.financial_namespace import legacy_key_for
+        legacy = legacy_key_for(key)
+    except Exception:
+        legacy = None
+    if not legacy:
+        return value
+    value = await _load_key_value_raw(legacy, strict=strict)
+    if value is not None:
+        log.warning("[FINANCIAL_NAMESPACE] key_family=%s source=LEGACY_SCOPE migrated_on_next_write=true",
+                    str(key).split(":", 1)[0])
+    return value
+
+
+@_serialized_io
+async def _load_key_value_raw(key: str, *, strict: bool = False) -> str:
     if not _conn:
         if strict:
             raise PersistenceError(f"load_key_value {key}: database unavailable")
