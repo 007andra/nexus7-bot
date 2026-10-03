@@ -127,14 +127,45 @@ the drawdown hard gate (61.58% vs 17%, recovery expired), so no BGX mutation can
 occur between the inventory and the RC deploy; the RC (which carries the same
 inventory) re-proves it at its own startup. No legacy state to migrate.
 
-### #466 blocker (not merged)
-#466 modifies LIVE files (`engine.py`, `strategy.py`, `order_state.py`,
-`professional_risk_adapter.py`, `execution_cost.py`). It replaces the entry
-idempotency key with `candidate:<candidate_id>`; the candidate id is the setup id
-(symbol:direction:entry_type:15-minute bucket), so a new trade of the same setup
-after the previous one closed reuses the previous clientOid → Binance `-4116`
-duplicate → treated as ambiguous → recovered to the OLD order (wrong-order
-identity, P0). It also conflicts textually with `72fa46f`.
+### PR #466 — P0 fixed on its branch; not part of this release
+LIVE-reachable changes in #466 (`3234a8e`): engine, strategy, execution_cost,
+order_state, professional_risk_adapter, nexus_live_cost_calibration,
+nexus_persistence, nexus_validation_observability, binance_exit_forensics.
+All of it is candidate-lineage observability except one thing: the entry
+idempotency key becomes `candidate:<sha(symbol, direction, entry, sl, tp,
+15-min bucket, entry_type, regime, score)>`. The fee constant swap keeps the
+same values (0.0006 / 0.0005). Exit attribution is read-only and wrapped in
+try/except.
+- **P0 (reproduced):** the same setup re-signalled after trade A closed
+  produced A's clientOid (`tests/test_candidate_identity_generation.py` fails
+  on `3234a8e`).
+- **Fix:** `f4bc061` on `feature/nexus-intelligence-core-v1`. A terminal
+  previous order with no live position gets a new generation of the key
+  (terminal orders stay in the durable registry for 7 days, so this survives
+  restarts). An unresolved previous intent keeps the same key. #466 full suite
+  2283/2283.
+- **Decision:** #466 is not integrated into this RC. It adds no protection or
+  risk change and would only widen the release; it ships later as its own PR
+  rebased on the new production head. Its research modules have no LIVE
+  importer.
+
+## 3b. Research (MODEL H, OOS, microstructure)
+| PR | Evidence run (own CI) | Verdict |
+|---|---|---|
+| #465 native market language | Binance OOS workflow (run 7 success; research only) | not promoted |
+| #467 MODEL H OOS | `MODEL H OOS Evidence` | EDGE_SCREEN_FAIL |
+| #468 nested walk-forward recalibration | `MODEL H Recalibration V2` | EDGE_SCREEN_FAIL |
+| #469 V3 multiscale analog transfer | `MODEL H V3 Transfer Evidence` | EDGE_SCREEN_FAIL |
+| #470 V4 invariant cross-sectional | `MODEL H V4 Invariant Transfer Evidence` (strict temporal fencing, fresh-symbol holdout) | EDGE_SCREEN_FAIL |
+| #466 microstructure OOS | no evidence workflow / run | NOT_PROVEN |
+
+All of these PRs only add files, with promotion_authority=false and
+runtime_effect=false. None of them is imported by LIVE code. Verdicts:
+EDGE_PROVEN = NO, MODEL_H_PRODUCTION_READY = NO, MICROSTRUCTURE = NOT_PROVEN.
+None is merged into production; #467–#469 are superseded by #470 (same chain),
+and closing them is the owner's decision. Offline reproduction of the numbers is
+not possible in this environment (no Binance data egress); verdicts come from
+the PRs' own CI artifacts.
 
 ## 4. Release-candidate changes that are LIVE-reachable (Phase 39 inventory)
 
@@ -158,7 +189,7 @@ Changed (all hardening already approved in this audit program):
 - P1-OPEN-1: pre-entry stale-protection gate (one extra read-only GET before
   every opening order; individual DELETE only for owned closed-lineage orders).
 
-## 5. Research (Phases 12–28) — status
+## 5. Research (Phases 12–28) — status (superseded by section 3b)
 
 Structural isolation verified: #465 and #467–#470 only ADD files (no LIVE module
 modified, so no LIVE import path reaches them); no added line calls
