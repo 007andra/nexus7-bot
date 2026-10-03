@@ -1,9 +1,9 @@
 # NEXUS-7 — Master Release Audit (2026-10-02)
 
-Status: **ENGINEERING_RELEASE_READY = NO** — P1-OPEN-1 (stale Binance protective
-algo orders after a close) is fixed in code (see below); deploy remains blocked by
-P1-DEPLOY-1 (venue inventory of legacy, unmapped `bgx7-` algo orders must be read
-before the new fail-closed gate goes live). No merge, no deploy.
+Status: **P0 = 0, P1 = 0 on the release candidate** (P1-OPEN-1 CLOSED, P1-DEPLOY-1
+CLOSED). ENGINEERING_RELEASE_READY remains NO until the remaining master-audit
+phases (PR #466, MODEL H, OOS/microstructure, final RC) are complete. No merge of
+#471, no deploy of the RC.
 
 ## 1. Source of truth (verified from the git DAG, not from summaries)
 
@@ -103,18 +103,29 @@ and gate-removal all killed. Fixture changes (justified): dispatch proof now
 expects the read-only `openAlgoOrders` GET before the single POST; two migration
 fixtures state flat proof / registry ownership explicitly.
 
-### P1-DEPLOY-1 (blocks deploy; operational, fail-closed)
-Algo orders created by the currently deployed release have no registry record.
-If any is still active when the new release starts (open BGX position, or a
-leftover sibling of a closed trade), it is `UNRESOLVED_UNMAPPED_BGX_PROTECTION`:
-entries on that symbol are blocked and, at global flat, the readiness sweep
-blocks all entries until an operator resolves it. Not unsafe (no wrong cancel,
-no naked position) but it can freeze trading after deploy. Required before
-deploy: a read-only `GET /fapi/v1/openAlgoOrders` inventory per configured
-symbol plus open positions, and an operator decision for each active order.
-Venue behavior on flat (auto-cancel of `closePosition` algo orders) was not
-verified read-only in this session (no venue credentials/egress); the fix is
-correct either way (`-2011` -> readback converges).
+### P1-DEPLOY-1 — CLOSED (live account-wide inventory = ZERO)
+Concern: algo orders created by the previously deployed release have no lineage
+record; any still active at migration would be `UNRESOLVED_UNMAPPED_BGX_PROTECTION`
+and freeze entries.
+
+Existing evidence was insufficient: `[PRELIVE_ACCOUNT_EXPOSURE] active_orders`
+counts only `GET /fapi/v1/openOrders` (normal orders); `[BINANCE_LEVERAGE_RECONCILE]
+exposure_clear=True` (account-wide positions + openOrders + openAlgoOrders, 18:57:13Z)
+preceded later drawdown-recovery windows.
+
+Read-only diagnostic PR #472 (`bot/binance_legacy_algo_inventory.py`: three
+account-wide GETs, INCOMPLETE on any failure, no mutation) merged as `9eccaf9` and
+deployed (Railway deployment `d2226efe-4881-44dc-885a-781c2a9587da`, SUCCESS).
+Startup inventory 2026-10-03T00:28:16Z:
+`result=ZERO inventory_complete=true scope=ACCOUNT_WIDE symbols=25 POSITIONS_TOTAL=0
+NORMAL_OPEN_TOTAL=0 ALGO_OPEN_TOTAL=0 BGX7_TOTAL=0 EXTERNAL_TOTAL=0 UNKNOWN_TOTAL=0`;
+every configured symbol FLAT with 0 normal / 0 algo orders. Same deploy:
+`[BINANCE_READINESS] status=PASS ... algo_orders_read=True mutation=false`,
+leverage reconcile `exposure_clear=True changed=0`, ownership/fencing valid,
+`[PRELIVE_ACCOUNT_EXPOSURE] positions=0 active_orders=0`. Entries stay blocked by
+the drawdown hard gate (61.58% vs 17%, recovery expired), so no BGX mutation can
+occur between the inventory and the RC deploy; the RC (which carries the same
+inventory) re-proves it at its own startup. No legacy state to migrate.
 
 ### #466 blocker (not merged)
 #466 modifies LIVE files (`engine.py`, `strategy.py`, `order_state.py`,
