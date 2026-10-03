@@ -26,11 +26,33 @@ def observe_nexus_validation(method):
     async def wrapped(self, sig, *args, **kwargs):
         decision = await method(self, sig, *args, **kwargs)
 
+        # Attach lineage before any post-decision persistence. The outer live
+        # cost wrapper may attach the same id again later; this operation is
+        # deterministic and observational.
+        try:
+            from bot.candidate_trace import attach_decision
+            attach_decision(decision, sig)
+        except Exception as exc:
+            log.debug(
+                "[CANDIDATE_TRACE] decision_attach_failed symbol=%s error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                getattr(sig, "symbol", "UNKNOWN"), type(exc).__name__,
+            )
+
         nexus_zero_observability.observe(decision, log)
 
         try:
             await nexus_persistence.record_decision(sig, decision)
             asyncio.create_task(nexus_persistence.evaluate_pending(self.client))
+            try:
+                from bot import nexus_shadow_drift
+                asyncio.create_task(nexus_shadow_drift.refresh())
+            except Exception as exc:
+                log.debug(
+                    "[NEXUS_SHADOW_DRIFT] schedule_failed error=%s "
+                    "decision_effect=NONE execution_effect=NONE",
+                    type(exc).__name__,
+                )
         except Exception as exc:
             log.debug(
                 "[NEXUS_PERSISTENCE] best_effort_failed error=%s "

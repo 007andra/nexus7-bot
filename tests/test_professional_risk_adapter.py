@@ -91,6 +91,31 @@ class ProfessionalRiskAdapterTests(unittest.TestCase):
         adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=95.0, risk_pct=0.01)
         self.assertEqual(adapter.size("TESTUSDT", 101.0, INSTRUMENTS), 0.0)
 
+    def test_candidate_lineage_survives_risk_plan_and_fresh_recheck(self):
+        adapter = self._adapter()
+        snapshot = SimpleNamespace(
+            symbol="TESTUSDT",
+            taker_fee=0.0006,
+            slippage_allowance=0.001,
+            snapshot_id="cost-1",
+            candidate_id="nx7-candidate",
+        )
+        plan = adapter.set_plan(
+            symbol="TESTUSDT",
+            entry=100.0,
+            stop=98.0,
+            risk_pct=0.01,
+            cost_snapshot=snapshot,
+        )
+        self.assertEqual(plan.candidate_id, "nx7-candidate")
+        qty = adapter.size("TESTUSDT", 100.0, INSTRUMENTS)
+        self.assertGreater(qty, 0.0)
+        allowed, metrics = adapter.validate_fresh_executable_risk(
+            "TESTUSDT", 100.0, qty
+        )
+        self.assertTrue(allowed)
+        self.assertEqual(metrics["candidate_id"], "nx7-candidate")
+
     def test_fresh_executable_risk_preserves_original_monetary_budget(self):
         adapter = self._adapter()
         adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=98.0, risk_pct=0.01)

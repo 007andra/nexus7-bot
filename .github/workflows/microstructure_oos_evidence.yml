@@ -1,0 +1,138 @@
+name: Historical Microstructure OOS Evidence
+
+# Pre-registered evidence run for PR #466 (registered before any result):
+#   window  = 2026-01 .. 2026-08 (largest complete window before the bookDepth
+#             upstream-issue quarantine starting 2026-09-03; no partial month)
+#   symbols = BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT
+#   aggTrades = real candidate-day archives (include_agg_trades=true)
+# The window and inputs are fixed here and must not be changed after results.
+# Same harness as `NEXUS Binance USD-M OOS Research`, which is dispatch-only
+# and not registered on the default branch.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/microstructure_oos_evidence.yml"
+      - "bot/opportunity_ranker.py"
+      - "bot/microstructure_oos.py"
+      - "bot/microstructure_oos_evidence.py"
+      - "bot/research_observation_identity.py"
+      - "bot/research_statistics.py"
+      - "bot/binance_oos_replay.py"
+      - "bot/binance_oos_evidence_bundle.py"
+      - "bot/binance_historical_context.py"
+      - "bot/binance_research_data.py"
+  workflow_dispatch:
+
+jobs:
+  evidence:
+    name: Binance USD-M historical microstructure OOS (aggTrades)
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    permissions:
+      contents: read
+    env:
+      PAPER_TRADE: "true"
+      EXCHANGE: "binance"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+      PYTHONHASHSEED: "0"
+      START_MONTH: "2026-01"
+      END_MONTH: "2026-08"
+      SYMBOLS: "BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT"
+
+    steps:
+      - name: Checkout exact research SHA
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Attest checked-out SHA
+        run: |
+          echo "research_sha=$(git rev-parse HEAD)"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m pip check
+
+      - name: Research integrity tests
+        run: |
+          python -m unittest -v tests.test_binance_research_data tests.test_binance_historical_context tests.test_binance_oos_replay tests.test_binance_oos_evidence_bundle tests.test_microstructure_shadow tests.test_microstructure_oos tests.test_microstructure_oos_evidence tests.test_research_statistics tests.test_opportunity_ranker tests.test_research_observation_identity tests.test_binance_context_closure
+
+      - name: Restore Binance public-data cache
+        uses: actions/cache@v4
+        with:
+          path: artifacts/binance_research_cache
+          key: binance-usdm-micro-oos-${{ env.START_MONTH }}-${{ env.END_MONTH }}-${{ hashFiles('bot/binance_research_data.py', 'bot/binance_historical_context.py') }}
+          restore-keys: |
+            binance-usdm-micro-oos-${{ env.START_MONTH }}-${{ env.END_MONTH }}-
+            binance-usdm-oos-${{ env.START_MONTH }}-${{ env.END_MONTH }}-
+
+      - name: Run checksum-verified evidence bundle with real aggTrades
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r -a SYMBOL_ARGS <<< "$SYMBOLS"
+          python -m bot.binance_oos_evidence_bundle --symbols "${SYMBOL_ARGS[@]}" --start-month "$START_MONTH" --end-month "$END_MONTH" --cache-dir artifacts/binance_research_cache --code-sha "$(git rev-parse HEAD)" --include-agg-trades --output artifacts/nexus_oos_binance_usdm_bundle.json
+
+      - name: Validate methodology and extract microstructure evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("artifacts/nexus_oos_binance_usdm_bundle.json").read_text(encoding="utf-8"))
+          methodology = payload.get("methodology") or {}
+          required = {
+              "venue": "BINANCE_USDM",
+              "source": "data.binance.vision",
+              "archive_checksums_verified": True,
+              "shared_candidate_population": True,
+              "closed_candles_only": True,
+              "historical_clock_frozen": True,
+              "exchange_mutations": False,
+              "runtime_policy_mutations": False,
+              "promotion_authority": False,
+              "agg_trades_mode": "CANDIDATE_DAY_REAL",
+              "agg_trades_interpolation_applied": False,
+          }
+          for key, expected in required.items():
+              if methodology.get(key) != expected:
+                  raise SystemExit(f"methodology mismatch {key}: {methodology.get(key)!r} != {expected!r}")
+          for key in ("manifest_hash", "dataset_fingerprint"):
+              if len(str(payload.get(key, ""))) != 64:
+                  raise SystemExit(f"invalid {key}")
+          ranking = dict(payload.get("opportunity_ranking") or {})
+          ranking.pop("batches", None)
+          ranking.pop("details", None)
+          if ranking.get("population_parity_verified") is not True:
+              raise SystemExit("population parity not verified")
+          print(json.dumps({
+              "window": {"start_month": methodology.get("start_month", None), "end_month": methodology.get("end_month", None)},
+              "manifest_hash": payload.get("manifest_hash"),
+              "dataset_fingerprint": payload.get("dataset_fingerprint"),
+              "methodology": methodology,
+              "opportunity_ranking": ranking,
+              "microstructure_review": payload.get("microstructure_review"),
+              "metrics_parse_provenance": {k: v for k, v in (payload.get("metrics_parse_provenance") or {}).items() if k != "archives"},
+              "evaluation_window": payload.get("evaluation_window"),
+              "context_and_agg_trades_provenance": {k: v for k, v in (payload.get("context_and_agg_trades_provenance") or {}).items() if k != "agg_trades_archives"},
+          }, indent=2, sort_keys=True, default=str))
+          PY
+
+      - name: Upload immutable research evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-microstructure-oos-${{ github.run_id }}
+          path: artifacts/nexus_oos_binance_usdm_bundle.json
+          if-no-files-found: warn
+          retention-days: 30

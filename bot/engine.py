@@ -2703,6 +2703,13 @@ class TradingEngine:
                 ticker=ticker, funding=funding, oi=oi, oi_delta=oi_delta,
                 news_score=news_score,
             )
+            from bot.candidate_trace import attach_decision
+            _candidate_id = attach_decision(decision, sig)
+            log.info(
+                "[CANDIDATE_TRACE] candidate_id=%s symbol=%s stage=NEXUS_DECISION "
+                "decision_effect=NONE execution_effect=NONE",
+                _candidate_id, sig.symbol,
+            )
 
             # nexus_ai.decide executes in a worker thread. Telegram scheduling
             # must happen back on the engine event loop, never inside that
@@ -3183,15 +3190,21 @@ class TradingEngine:
             # P0: chave de idempotência FIXA para todas as tentativas deste
             # sinal. Garante que retries reusem o mesmo clientOid e a
             # exchange rejeite duplicatas.
-            _idem = f"{sig.symbol}_{side}_{qty}_{int(time.time()//60)}"
+            # Stable candidate lineage is also the idempotency namespace:
+            # retries of one setup reuse one clientOid, while distinct setups
+            # cannot collide merely because symbol/side/qty share a minute.
+            from bot.candidate_trace import ensure_candidate_id
+            _candidate_id = ensure_candidate_id(sig)
+            _idem = f"candidate:{_candidate_id}"
             _client_oid = self.client.build_client_oid(
                 sig.symbol, side, qty, _idem
             )
-            # NOVO-F013A-1f — a key that repeats for the SAME unresolved intent
-            # (duplicate submission guard) must never hand a NEW financial
-            # intent the ManagedOrder of a finished trade (same symbol/side/qty
-            # inside the same minute after the previous trade closed). A
-            # terminal previous order with no live position => new generation.
+            # P0 (candidate identity): the candidate id repeats for the same
+            # setup inside its 15-minute formation bucket and across restarts.
+            # It may dedupe the SAME unresolved intent, but a terminal previous
+            # order with no live position is a finished trade: a new financial
+            # intent gets a new generation of the key, never the old clientOid
+            # or ManagedOrder (terminal orders stay in the durable registry).
             _base_idem, _generation = _idem, 0
             _prev = self.orders.get(_client_oid) if hasattr(self.orders, "get") else None
             while (_prev is not None and _prev.state in TERMINAIS
@@ -3202,10 +3215,15 @@ class TradingEngine:
                 _prev = self.orders.get(_client_oid)
             if _generation:
                 log.warning(
-                    "[ORDER_IDENTITY] symbol=%s previous_intent=TERMINAL generation=%s "
-                    "clientOid=%s reason=new_financial_intent_same_minute",
-                    sig.symbol, _generation, _client_oid,
+                    "[ORDER_IDENTITY] symbol=%s candidate_id=%s previous_intent=TERMINAL "
+                    "generation=%s clientOid=%s reason=new_financial_intent_same_candidate",
+                    sig.symbol, _candidate_id, _generation, _client_oid,
                 )
+            log.info(
+                "[CANDIDATE_TRACE] candidate_id=%s clientOid=%s symbol=%s "
+                "side=%s stage=PRE_DISPATCH_IDENTITY",
+                _candidate_id, _client_oid, sig.symbol, side,
+            )
 
             for attempt in range(1, MAX_RETRIES + 1):
                 _managed = None
@@ -3279,6 +3297,10 @@ class TradingEngine:
                     _managed, _ = self.orders.get_or_create(
                         _client_oid, sig.symbol, side, qty
                     )
+                    # Candidate lineage becomes durable in the same record that
+                    # is persisted before any exchange network dispatch.
+                    from bot.candidate_trace import bind_managed_order
+                    bind_managed_order(_managed, sig)
                     try:
                         _managed.transition(OrderState.SUBMITTING, source="REST")
                     except InvalidTransition as _ie:

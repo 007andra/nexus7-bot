@@ -30,6 +30,7 @@ class PlannedRisk:
     taker_fee: float | None = None
     slippage_allowance: float | None = None
     cost_snapshot_id: str = "none"
+    candidate_id: str = "UNKNOWN"
 
     def validate(self) -> "PlannedRisk":
         values = (self.entry, self.stop, self.risk_pct)
@@ -124,6 +125,11 @@ class ProfessionalRiskAdapter:
             ),
             cost_snapshot_id=(
                 "none" if cost_snapshot is None else str(cost_snapshot.snapshot_id)
+            ),
+            candidate_id=(
+                "UNKNOWN"
+                if cost_snapshot is None
+                else str(getattr(cost_snapshot, "candidate_id", "UNKNOWN") or "UNKNOWN")
             ),
         ).validate()
         self._plans[key] = plan
@@ -242,6 +248,7 @@ class ProfessionalRiskAdapter:
             "slippage_pct": slippage,
             "effective_risk_pct": float(state.get("effective_risk_pct", float("nan"))),
             "cost_snapshot_id": str(state.get("cost_snapshot_id", "none")),
+            "candidate_id": str(state.get("candidate_id", "UNKNOWN")),
         }
 
     def size(self, symbol: str, entry: float, instruments: dict,
@@ -302,16 +309,19 @@ class ProfessionalRiskAdapter:
                 "slippage_pct": float(expected_slippage),
                 "effective_risk_pct": float(effective_risk_pct),
                 "cost_snapshot_id": str(plan.cost_snapshot_id),
+                "candidate_id": str(plan.candidate_id),
             }
             log.info(
                 "[RISK_V3_CORE] symbol=%s qty=%.12g risk_budget=%.6f "
                 "projected_stop_loss=%.6f stop_distance_pct=%.6f "
                 "required_margin=%.6f binding=%s taker_bps=%.3f slippage_allowance_bps=%.3f "
-                "cost_snapshot_id=%s cost_purpose=RISK_BUDGET_STRESS decision_effect=NONE",
+                "candidate_id=%s cost_snapshot_id=%s "
+                "cost_purpose=RISK_BUDGET_STRESS decision_effect=NONE",
                 key, sizing.qty, sizing.risk_budget,
                 sizing.projected_stop_loss, sizing.stop_distance_pct,
                 sizing.required_margin, sizing.binding_constraint,
-                fee_rate * 1e4, expected_slippage * 1e4, plan.cost_snapshot_id,
+                fee_rate * 1e4, expected_slippage * 1e4,
+                plan.candidate_id, plan.cost_snapshot_id,
             )
             if float(sizing.qty) <= 0:
                 self._log_sizing_decomposition(

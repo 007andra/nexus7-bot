@@ -20,10 +20,9 @@ import functools
 from dataclasses import dataclass
 
 from bot import execution_cost
-from bot.kucoin_execution_model import (
-    DEFAULT_SLIPPAGE,
-    DEFAULT_TAKER_FEE,
-)
+
+DEFAULT_SLIPPAGE = execution_cost.DEFAULT_SLIPPAGE
+DEFAULT_TAKER_FEE = execution_cost.LEGACY_CONSERVATIVE_TAKER_FEE
 
 
 @dataclass(frozen=True)
@@ -75,7 +74,21 @@ def _attach_cost_context(decision, ctx: NexusCostContext, log) -> bool:
     exact return value and must never fail because observability cannot attach.
     """
     try:
+        if ctx.snapshot is not None:
+            existing = str(getattr(decision, "_bgx_candidate_id", "") or "")
+            if existing and existing != ctx.snapshot.candidate_id:
+                warn = getattr(log, "warning", None)
+                if callable(warn):
+                    warn(
+                        "[CANDIDATE_TRACE] candidate_id_conflict decision=%s "
+                        "cost_snapshot=%s decision_effect=NONE execution_effect=NONE",
+                        existing,
+                        ctx.snapshot.candidate_id,
+                    )
+                return False
         setattr(decision, "_bgx_nexus_cost_context", ctx)
+        if ctx.snapshot is not None:
+            setattr(decision, "_bgx_candidate_id", ctx.snapshot.candidate_id)
         return True
     except (AttributeError, TypeError):
         debug = getattr(log, "debug", None)
@@ -173,6 +186,17 @@ def install(TradingEngine, nexus_ai, log) -> None:
             # therefore carry the exact frozen context as private telemetry.
             # NexusDecision.to_dict()/asdict does not serialize dynamic attrs.
             _attach_cost_context(decision, ctx, log)
+            try:
+                from bot.candidate_trace import attach_decision
+                attach_decision(decision, sig)
+            except Exception as exc:
+                debug = getattr(log, "debug", None)
+                if callable(debug):
+                    debug(
+                        "[CANDIDATE_TRACE] attach_decision_failed symbol=%s error=%s "
+                        "decision_effect=NONE execution_effect=NONE",
+                        ctx.symbol, type(exc).__name__,
+                    )
             return decision
         finally:
             _COST_CONTEXT.reset(token)

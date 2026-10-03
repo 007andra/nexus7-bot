@@ -166,6 +166,51 @@ async def record_decision(sig, decision):
         return None
     approved = bool(_field(decision, "execution_allowed", default=False) is True)
     raw = decision.to_dict() if hasattr(decision, "to_dict") else (decision if isinstance(decision, dict) else {})
+    if isinstance(raw, dict):
+        raw = dict(raw)
+        try:
+            from bot.candidate_trace import candidate_id_from_decision
+            _candidate_id = candidate_id_from_decision(decision)
+            if _candidate_id:
+                raw["_candidate_id"] = _candidate_id
+        except Exception:
+            pass
+        raw["_signal_score"] = _to_float(getattr(sig, "score", None))
+        raw["_signal_regime"] = str(
+            getattr(sig, "regime", "UNKNOWN") or "UNKNOWN"
+        )
+        raw["_signal_entry_type"] = str(
+            getattr(sig, "entry_type", "UNKNOWN") or "UNKNOWN"
+        )
+        try:
+            ctx = getattr(decision, "_bgx_nexus_cost_context", None)
+            snap = getattr(ctx, "snapshot", None)
+            if snap is not None:
+                raw["_cost"] = {
+                    "snapshot_id": str(getattr(snap, "snapshot_id", "") or ""),
+                    "candidate_id": str(getattr(snap, "candidate_id", "") or ""),
+                    "exchange": str(getattr(snap, "exchange", "") or ""),
+                    "taker_fee": _to_float(getattr(snap, "taker_fee", None)),
+                    "entry_slippage": _to_float(
+                        getattr(snap, "entry_slippage", None)
+                    ),
+                    "exit_slippage": _to_float(
+                        getattr(snap, "exit_slippage", None)
+                    ),
+                    "spread_bps": _to_float(getattr(snap, "spread_bps", None)),
+                    "funding_rate": _to_float(
+                        getattr(snap, "funding_rate", None)
+                    ),
+                    "fee_source": str(
+                        getattr(snap, "fee_source", "") or ""
+                    ),
+                    "slippage_source": str(
+                        getattr(snap, "slippage_source", "") or ""
+                    ),
+                    "fallback": bool(getattr(snap, "fallback", False)),
+                }
+        except Exception:
+            pass
     score = _to_float(_field(decision, "setup_quality", "score", "nexus_score"))
     confidence = _to_float(_field(decision, "confidence"))
     regime = str(_field(decision, "regime", default="UNKNOWN") or "UNKNOWN")
@@ -334,6 +379,39 @@ async def recent(limit=50):
     )
     keys = ["decision_id","ts","symbol","side","approved","nexus_score","confidence","regime","entry","sl","tp","rr","reason","shadow_status","shadow_r"]
     return [dict(zip(keys, r)) for r in rows]
+
+
+async def recent_observations(limit=300):
+    """Return recent shadow rows including private telemetry payloads."""
+    limit = max(1, min(int(limit), 1000))
+    rows = await _fetchall(
+        f"SELECT ts,symbol,side,approved,nexus_score,confidence,regime,"
+        f"raw_json,shadow_status,shadow_r FROM nexus_decisions "
+        f"ORDER BY ts DESC LIMIT {limit}"
+    )
+    result = []
+    for row in rows:
+        (
+            ts, symbol, side, approved, nexus_score, confidence, regime,
+            raw_json, shadow_status, shadow_r,
+        ) = row
+        try:
+            raw = json.loads(raw_json) if raw_json else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = {}
+        result.append({
+            "ts": _to_float(ts),
+            "symbol": str(symbol or ""),
+            "side": str(side or ""),
+            "approved": bool(int(approved or 0)),
+            "nexus_score": _to_float(nexus_score),
+            "confidence": _to_float(confidence),
+            "regime": str(regime or "UNKNOWN"),
+            "raw": raw if isinstance(raw, dict) else {},
+            "shadow_status": str(shadow_status or "UNKNOWN"),
+            "shadow_r": _to_float(shadow_r),
+        })
+    return result
 
 
 async def close():
