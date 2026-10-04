@@ -90,6 +90,15 @@ def _protect_drawdown_update(self, bound_update, log, *, source: str):
         finally:
             risk = getattr(self, "risk", None)
             drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
+            try:
+                from bot import reentry_readiness
+                reentry_readiness.emit(self, log)
+            except Exception as exc:
+                log.warning(
+                    "[REENTRY_READINESS_V1] status=UNKNOWN reason=%s "
+                    "authority=OBSERVABILITY_ONLY decision_effect=NONE execution_effect=NONE",
+                    type(exc).__name__,
+                )
             became_inactive = was_active and not bool(getattr(self, "active", False))
             if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
                 if _risk_override_enabled():
