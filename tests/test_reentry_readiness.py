@@ -81,6 +81,8 @@ class ReentryReadinessTests(unittest.TestCase):
             self.assertFalse(row["override"])
             self.assertAlmostEqual(row["required_equity_for_limit"], 18.922921, places=6)
             self.assertAlmostEqual(row["equity_gap_to_limit"], 10.164621, places=6)
+            self.assertEqual(row["required_equity_assumption"], "TRADING_PERFORMANCE_ONLY")
+            self.assertTrue(row["external_capital_flow_preserves_drawdown"])
             self.assertEqual(row["execution_effect"], "NONE")
         finally:
             cfg.MAX_DRAWDOWN, cfg.MAX_RISK_PCT, cfg.MAX_POSITIONS = old

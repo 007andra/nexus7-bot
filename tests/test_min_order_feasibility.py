@@ -101,6 +101,27 @@ def test_ltc_incident_is_blocked_before_nexus_by_min_notional():
     assert float(decision.detail["risk_at_min_valid_qty"]) > float(decision.detail["risk_budget"])
 
 
+def test_historical_atom_20261001_catastrophic_trade_is_blocked_by_reentry_v1():
+    # Exact production setup that opened 570.55 ATOM on 2026-10-01.
+    # Under Re-entry v1, equity * 0.25% cannot fund Binance's minimum
+    # notional once stop distance + round-trip costs are included.
+    decision = _evaluate(
+        "ATOMUSDT",
+        _binance("0.01", "0.01", "5"),
+        1.693,
+        1.70922,
+        equity=19.99813533,
+        risk_pct=0.0025,
+    )
+    assert decision.allowed is False
+    assert decision.reason == "INSUFFICIENT_RISK_BUDGET"
+    assert str(decision.detail["binding"]) == "MIN_NOTIONAL_BINDING"
+    assert abs(float(decision.detail["risk_budget"]) - 0.049995338325) < 1e-12
+    assert abs(float(decision.detail["min_valid_qty"]) - 2.96) < 1e-12
+    assert float(decision.detail["risk_at_min_valid_qty"]) > float(decision.detail["risk_budget"])
+    assert float(decision.detail["rounded_qty"]) < float(decision.detail["min_valid_qty"])
+
+
 def test_exchange_valid_small_order_can_pass_feasibility_without_authorizing_execution():
     decision = _evaluate(
         "DOGEUSDT",

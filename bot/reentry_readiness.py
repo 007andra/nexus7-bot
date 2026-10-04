@@ -106,6 +106,8 @@ def snapshot(engine) -> dict:
         "peak_equity": peak,
         "required_equity_for_limit": required_equity,
         "equity_gap_to_limit": equity_gap,
+        "required_equity_assumption": "TRADING_PERFORMANCE_ONLY",
+        "external_capital_flow_preserves_drawdown": True,
         "recovery_reason": recovery.reason,
         "recovery_authorized": recovery.authorized,
         "override": override,
