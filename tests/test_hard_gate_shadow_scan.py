@@ -329,6 +329,24 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assert_isolated()
 
 
+    async def test_executability_frontier_distinguishes_min_order_and_nexus_rr(self):
+        stage, reason = shadow._executability_frontier(
+            {"capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+             "shadow_min_order_feasible": False, "binding": "MIN_NOTIONAL_BINDING"},
+            pullback_pass=True, funnel=True, decision=decision(False),
+        )
+        self.assertEqual((stage, reason), ("MIN_ORDER", "MIN_NOTIONAL_BINDING"))
+        rr_reject = decision(False)
+        rr_reject.reasoning = ["R:R líquido 1.20 < mínimo líquido 1.60"]
+        stage, reason = shadow._executability_frontier(
+            {"capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+             "shadow_min_order_feasible": True, "binding": "RISK_BUDGET"},
+            pullback_pass=True, funnel=True, decision=rr_reject,
+        )
+        self.assertEqual(stage, "NEXUS_RR")
+        self.assertIn("R:R", reason)
+
+
     async def test_cached_optional_features_use_only_existing_process_caches(self):
         from bot import market_data, market_risk_runtime, execution_cost
         sig = signal("BTCUSDT")
