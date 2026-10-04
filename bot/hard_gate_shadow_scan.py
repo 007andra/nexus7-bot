@@ -508,6 +508,39 @@ async def scan(engine, *, db=None, bbo_views=None):
         from bot.champion_challenger_forward_v1 import build_forward_record
         if db is None:
             from bot import database as db
+
+        # Establish the research epoch baseline before enrolling any candidate
+        # from this scan. Cache-only capital; no exchange I/O and no LIVE effect.
+        try:
+            from bot import risk_epoch_shadow
+            if risk_epoch_shadow.enabled():
+                capital = _confirmed_shadow_capital(engine)
+                if capital is None:
+                    _emit("RISK_EPOCH_SHADOW_V1", {
+                        "status": "CAPITAL_UNCONFIRMED",
+                        "decision_effect": "NONE",
+                        "execution_effect": "NONE",
+                    })
+                else:
+                    await asyncio.wait_for(
+                        risk_epoch_shadow.ensure_epoch(
+                            db,
+                            engine,
+                            start_equity=float(capital[0]),
+                            started_epoch=time.time(),
+                        ),
+                        timeout=2.0,
+                    )
+        except GateCleared:
+            raise
+        except Exception as exc:
+            _emit("RISK_EPOCH_SHADOW_V1", {
+                "status": "BASELINE_ERROR",
+                "error": type(exc).__name__,
+                "decision_effect": "NONE",
+                "execution_effect": "NONE",
+            })
+
         analyzer = Analyzer()  # research-owned instance; no engine/analyzer state
         symbols = tuple(engine.viable_symbols or ())
         minimum = cfg.POST_TARGET_SCORE if getattr(engine, "daily_target_hit", False) else cfg.MIN_ENTRY_SCORE
@@ -655,7 +688,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                         risk_epoch_shadow.snapshot(
                             db, engine, start_equity=float(capital[0])
                         ),
-                        timeout=1.0,
+                        timeout=2.0,
                     )
                     try:
                         log.info("%s", risk_epoch_shadow.format_log(epoch_row))
