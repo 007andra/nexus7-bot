@@ -497,7 +497,8 @@ async def scan(engine, *, db=None, bbo_views=None):
     _RUNNING.add(engine)
     started = time.perf_counter()
     summary = {**initial, **AUTHORITY, "shadow_scan_enabled": True,
-               **dict.fromkeys(("symbols_scanned", "strategy_signals", "pullback_pass",
+               **dict.fromkeys(("symbols_scanned", "strategy_signals", "fresh_candidates",
+                                "dedupe_reused", "pullback_pass", "pullback_blocked",
                                 "min_order_feasible", "nexus_evaluated", "nexus_approved",
                                 "nexus_rejected", "additional_rest_calls_per_scan"), 0)}
     records = []
@@ -543,11 +544,14 @@ async def scan(engine, *, db=None, bbo_views=None):
                         _emit("HARD_GATE_SHADOW_SCAN", {"dedup_read_error": type(exc).__name__, **AUTHORITY})
                     _check(engine)
                     if existing is not None:
+                        summary["dedupe_reused"] += 1
                         records.append(existing)
                         continue
+                    summary["fresh_candidates"] += 1
                     pullback = context.pullback
                     passed = pullback != "BLOCKED"
                     summary["pullback_pass"] += int(passed)
+                    summary["pullback_blocked"] += int(not passed)
                     ticker = deepcopy(engine.client.get_cached_ticker(symbol)) or None
                     snap = _cost(sig, ticker)
                     features = _cached_optional_features(symbol, snap)
