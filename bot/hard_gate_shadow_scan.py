@@ -33,6 +33,8 @@ _MIN_ORDER_UNIVERSE_INTERVAL_S = 300.0
 _MIN_ORDER_UNIVERSE_LAST_EMIT = 0.0
 _MIN_ORDER_CAPITAL_INTERVAL_S = 300.0
 _MIN_ORDER_CAPITAL_LAST_EMIT = 0.0
+_MIN_ORDER_CF_NEXUS_INTERVAL_S = 300.0
+_MIN_ORDER_CF_NEXUS_LAST_EMIT = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -62,6 +64,12 @@ def _bbo_persistence_enabled():
 def _bbo_v3_enabled():
     return os.environ.get(
         "NEXUS_BBO_CALIBRATION_V3", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _counterfactual_nexus_enabled():
+    return os.environ.get(
+        "MIN_ORDER_COUNTERFACTUAL_NEXUS_V1", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -426,6 +434,17 @@ def _production_equivalent_nexus_eligible(minimum_order, *, pullback_pass, funne
     )
 
 
+def _counterfactual_nexus_eligible(minimum_order, *, pullback_pass, funnel):
+    """Research-only branch after a proven MIN_ORDER block."""
+    return (
+        _counterfactual_nexus_enabled()
+        and pullback_pass
+        and funnel
+        and minimum_order.get("capital_source") not in (None, "UNCONFIRMED")
+        and minimum_order.get("shadow_min_order_feasible") is False
+    )
+
+
 def _executability_frontier(minimum_order, *, pullback_pass, funnel, decision):
     """Classify the first blocker in production-equivalent pipeline order."""
     if not pullback_pass:
@@ -741,6 +760,35 @@ async def _maybe_emit_min_order_capital_adequacy(db):
         return None
 
 
+async def _maybe_emit_min_order_counterfactual_nexus(db):
+    """Bounded report for the separate MIN_ORDER-blocked NEXUS study."""
+    global _MIN_ORDER_CF_NEXUS_LAST_EMIT
+    from bot import min_order_counterfactual_nexus_v1 as study
+    if not study.enabled():
+        return None
+    now = time.monotonic()
+    if (_MIN_ORDER_CF_NEXUS_LAST_EMIT > 0.0 and
+            now - _MIN_ORDER_CF_NEXUS_LAST_EMIT < _MIN_ORDER_CF_NEXUS_INTERVAL_S):
+        return None
+    _MIN_ORDER_CF_NEXUS_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(study.snapshot(db), timeout=1.5)
+        log.info("%s", study.format_summary(report))
+        log.info("%s", study.format_top_groups(report))
+        return report
+    except Exception as exc:
+        _emit("MIN_ORDER_COUNTERFACTUAL_NEXUS_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "risk_epoch_traversal_credit": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
 async def scan(engine, *, db=None, bbo_views=None):
     if not enabled():
         return None
@@ -853,6 +901,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                               engine._regime_allows_direction(getattr(sig, "regime", "RANGING"), sig.direction))
                     sig.score = adjusted
                     decision = None
+                    counterfactual_nexus = None
                     _check(engine)
                     if _production_equivalent_nexus_eligible(
                         minimum_order, pullback_pass=passed, funnel=funnel
@@ -862,6 +911,35 @@ async def scan(engine, *, db=None, bbo_views=None):
                         summary["nexus_evaluated"] += 1
                         allowed = getattr(decision, "execution_allowed", False) is True
                         summary["nexus_approved" if allowed else "nexus_rejected"] += 1
+                    elif _counterfactual_nexus_eligible(
+                        minimum_order, pullback_pass=passed, funnel=funnel
+                    ):
+                        from bot import min_order_counterfactual_nexus_v1 as cf_nexus
+                        try:
+                            cf_decision = await _compute(
+                                _decide, sig, klines, ticker, snap, features
+                            )
+                            _check(engine)
+                            counterfactual_nexus = cf_nexus.build_observation(
+                                sig, cf_decision, minimum_order,
+                                captured_epoch=captured,
+                            )
+                            summary["counterfactual_nexus_evaluated"] += 1
+                            cf_allowed = (
+                                getattr(cf_decision, "execution_allowed", False) is True
+                            )
+                            summary[
+                                "counterfactual_nexus_allowed"
+                                if cf_allowed else "counterfactual_nexus_rejected"
+                            ] += 1
+                        except GateCleared:
+                            raise
+                        except Exception as exc:
+                            counterfactual_nexus = cf_nexus.error_observation(
+                                sig, minimum_order, captured_epoch=captured,
+                                error=type(exc).__name__,
+                            )
+                            summary["counterfactual_nexus_errors"] += 1
                     frontier_stage, frontier_reason = _executability_frontier(
                         minimum_order, pullback_pass=passed, funnel=funnel, decision=decision
                     )
@@ -889,6 +967,22 @@ async def scan(engine, *, db=None, bbo_views=None):
                         "frontier_reason": frontier_reason,
                         "cost_snapshot": asdict(snap),
                     }
+                    if counterfactual_nexus is not None:
+                        row["counterfactual_nexus_v1"] = counterfactual_nexus
+                        _emit("MIN_ORDER_COUNTERFACTUAL_NEXUS_V1_CANDIDATE", {
+                            "candidate_id": row["candidate_id"],
+                            "symbol": row["symbol"],
+                            "setup": row["setup"],
+                            "allowed": counterfactual_nexus.get("execution_allowed", False),
+                            "risk_reward": counterfactual_nexus.get("risk_reward"),
+                            "expected_value": counterfactual_nexus.get("expected_value"),
+                            "required_equity": counterfactual_nexus.get(
+                                "required_equity_at_min_qty"
+                            ),
+                            "canonical_nexus_called": False,
+                            "risk_epoch_traversal_credit": False,
+                            **AUTHORITY,
+                        })
                     row["bbo_cost_only_observation"] = _bbo_cost_only_observation(
                         sig, snap, deepcopy((bbo_views or {}).get(symbol)), client=engine.client
                     )
@@ -991,6 +1085,8 @@ async def scan(engine, *, db=None, bbo_views=None):
         await _maybe_emit_min_order_frontier(db)
         _check(engine)
         await _maybe_emit_min_order_capital_adequacy(db)
+        _check(engine)
+        await _maybe_emit_min_order_counterfactual_nexus(db)
         _check(engine)
         await _maybe_emit_min_order_universe_efficiency(db, engine)
         _check(engine)
