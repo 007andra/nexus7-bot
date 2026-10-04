@@ -404,6 +404,52 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assert_isolated()
 
 
+    async def test_min_order_frontier_audit_is_flag_gated_and_bounded(self):
+        from bot import min_order_frontier_audit_v1 as frontier
+        before = shadow._MIN_ORDER_FRONTIER_LAST_EMIT
+        self.addCleanup(setattr, shadow, "_MIN_ORDER_FRONTIER_LAST_EMIT", before)
+        shadow._MIN_ORDER_FRONTIER_LAST_EMIT = 0.0
+        report = {
+            "epoch_id": "REENTRY_V1_20261004_R2",
+            "status": "COLLECTING",
+            "candidates": 16,
+            "feasible": 0,
+            "near_feasible": 2,
+            "structurally_blocked": 14,
+            "unknown": 0,
+            "would_pass_if_stop_narrowed": 12,
+            "exact_margin_context_candidates": 0,
+            "stop_gap_pct": {"mean": 0.4},
+            "required_stop_reduction_pct": {"mean": 30.0},
+            "risk_gap_usdt": {"mean": 0.02},
+        }
+        with patch.object(frontier, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(frontier, "format_summary",
+                          return_value="[MIN_ORDER_FRONTIER_AUDIT_V1] status=COLLECTING"):
+            with patch.dict(os.environ, {"MIN_ORDER_FRONTIER_AUDIT_V1": "false"}):
+                self.assertIsNone(await shadow._maybe_emit_min_order_frontier(self.db))
+                snap.assert_not_awaited()
+            with patch.dict(os.environ, {"MIN_ORDER_FRONTIER_AUDIT_V1": "true"}):
+                self.assertIs(report, await shadow._maybe_emit_min_order_frontier(self.db))
+                snap.assert_awaited_once()
+                self.assertIsNone(await shadow._maybe_emit_min_order_frontier(self.db))
+                snap.assert_awaited_once()
+        self.assert_isolated()
+
+
+    async def test_counterfactual_min_order_persists_exact_margin_context(self):
+        out = await self.run_scan()
+        row = out["candidates"][0]
+        self.assertIn("margin_at_min_qty", row)
+        self.assertIn("margin_cap", row)
+        self.assertIn("required_equity_at_min_qty", row)
+        self.assertIsNotNone(row["margin_at_min_qty"])
+        self.assertIsNotNone(row["margin_cap"])
+        self.assertIsNotNone(row["required_equity_at_min_qty"])
+        self.assert_isolated()
+
+
     async def test_executability_frontier_distinguishes_min_order_and_nexus_rr(self):
         self.assertFalse(shadow._production_equivalent_nexus_eligible(
             {"capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
