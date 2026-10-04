@@ -278,15 +278,15 @@ def _decide(sig, klines, ticker, snap, features):
 
 
 def _executability_frontier(minimum_order, *, pullback_pass, funnel, decision):
-    """Classify the first research-stage blocker without granting authority."""
-    if minimum_order.get("capital_source") == "UNCONFIRMED":
-        return "CAPITAL", "CAPITAL_UNCONFIRMED"
-    if minimum_order.get("shadow_min_order_feasible") is False:
-        return "MIN_ORDER", str(minimum_order.get("binding") or "MINIMUM_ORDER")
+    """Classify the first blocker in production-equivalent pipeline order."""
     if not pullback_pass:
         return "PULLBACK", "PULLBACK_BLOCKED"
     if not funnel:
         return "FUNNEL", "PRODUCTION_EQUIVALENT_FUNNEL_BLOCKED"
+    if minimum_order.get("capital_source") == "UNCONFIRMED":
+        return "CAPITAL", "CAPITAL_UNCONFIRMED"
+    if minimum_order.get("shadow_min_order_feasible") is False:
+        return "MIN_ORDER", str(minimum_order.get("binding") or "MINIMUM_ORDER")
     if decision is None:
         return "NEXUS", "NOT_EVALUATED"
     if getattr(decision, "execution_allowed", False) is True:
