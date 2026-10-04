@@ -1092,6 +1092,53 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assert_isolated()
 
 
+    async def test_threshold_sensitivity_report_is_flag_gated_and_bounded(self):
+        from bot import min_order_counterfactual_threshold_sensitivity_v1 as sensitivity
+        before = shadow._MIN_ORDER_CF_SENSITIVITY_LAST_EMIT
+        self.addCleanup(
+            setattr, shadow, "_MIN_ORDER_CF_SENSITIVITY_LAST_EMIT", before
+        )
+        shadow._MIN_ORDER_CF_SENSITIVITY_LAST_EMIT = 0.0
+        report = {
+            "epoch_id": "REENTRY_V1_20261004_R2",
+            "status": "OUTCOMES_PENDING",
+            "evaluated": 10,
+            "scenarios": [],
+        }
+        with patch.object(sensitivity, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(sensitivity, "format_summary",
+                          return_value="[MIN_ORDER_COUNTERFACTUAL_THRESHOLD_SENSITIVITY_V1] ok"):
+            with patch.dict(
+                os.environ,
+                {"MIN_ORDER_COUNTERFACTUAL_THRESHOLD_SENSITIVITY_V1": "false"},
+            ):
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_counterfactual_threshold_sensitivity(
+                        self.db
+                    )
+                )
+                snap.assert_not_awaited()
+            with patch.dict(
+                os.environ,
+                {"MIN_ORDER_COUNTERFACTUAL_THRESHOLD_SENSITIVITY_V1": "true"},
+            ):
+                self.assertIs(
+                    report,
+                    await shadow._maybe_emit_min_order_counterfactual_threshold_sensitivity(
+                        self.db
+                    ),
+                )
+                snap.assert_awaited_once()
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_counterfactual_threshold_sensitivity(
+                        self.db
+                    )
+                )
+                snap.assert_awaited_once()
+        self.assert_isolated()
+
+
     async def test_logger_concurrent_task_configuration_and_semantics(self):
         from bot.logger import log, shadow_log
         entered, release = threading.Event(), threading.Event()
