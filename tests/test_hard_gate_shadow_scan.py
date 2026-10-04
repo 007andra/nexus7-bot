@@ -314,6 +314,41 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assert_isolated()
 
 
+    async def test_min_order_counterfactual_nexus_never_counts_as_canonical_traversal(self):
+        blocked = {
+            "counterfactual": True,
+            "counterfactual_risk_pct": 0.0025,
+            "live_risk_authority": "BLOCKED_BY_DRAWDOWN_HARD_GATE",
+            "shadow_min_order_feasible": False,
+            "binding": "MIN_NOTIONAL_BINDING",
+            "risk_budget": 0.02189575,
+            "min_valid_qty": 1.0,
+            "risk_at_min_qty": 0.03,
+            "required_equity_at_min_qty": 12.0,
+            "capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+            "capital_age_ms": 10.0,
+        }
+        with patch.object(shadow, "counterfactual_min_order", return_value=blocked), \
+             patch.dict(os.environ, {"MIN_ORDER_COUNTERFACTUAL_NEXUS_V1": "true"}):
+            out = await self.run_scan()
+        row = out["candidates"][0]
+        self.assertFalse(row["nexus_called"])
+        self.assertFalse(row["nexus_allowed"])
+        self.assertEqual(row["frontier_stage"], "MIN_ORDER")
+        self.assertIn("counterfactual_nexus_v1", row)
+        cf = row["counterfactual_nexus_v1"]
+        self.assertTrue(cf["execution_allowed"])
+        self.assertFalse(cf["canonical_nexus_called"])
+        self.assertFalse(cf["canonical_nexus_allowed"])
+        self.assertFalse(cf["risk_epoch_traversal_credit"])
+        self.assertEqual(out["summary"]["nexus_evaluated"], 0)
+        self.assertEqual(out["summary"]["nexus_approved"], 0)
+        self.assertEqual(out["summary"]["counterfactual_nexus_evaluated"], 1)
+        self.assertEqual(out["summary"]["counterfactual_nexus_allowed"], 1)
+        self.nexus.assert_called_once()
+        self.assert_isolated()
+
+
     async def test_min_order_block_still_collects_bbo_v3_cost_only(self):
         blocked = {
             "counterfactual": True,
@@ -879,6 +914,51 @@ class Proof(unittest.IsolatedAsyncioTestCase):
                 snap.assert_awaited_once()
                 self.assertIsNone(
                     await shadow._maybe_emit_min_order_capital_adequacy(self.db)
+                )
+                snap.assert_awaited_once()
+        self.assert_isolated()
+
+
+    async def test_counterfactual_nexus_report_is_flag_gated_and_bounded(self):
+        from bot import min_order_counterfactual_nexus_v1 as study
+        before = shadow._MIN_ORDER_CF_NEXUS_LAST_EMIT
+        self.addCleanup(setattr, shadow, "_MIN_ORDER_CF_NEXUS_LAST_EMIT", before)
+        shadow._MIN_ORDER_CF_NEXUS_LAST_EMIT = 0.0
+        report = {
+            "epoch_id": "REENTRY_V1_20261004_R2",
+            "status": "COLLECTING_EVALUATIONS",
+            "evaluated": 3,
+            "allowed": 1,
+            "rejected": 2,
+            "errors": 0,
+            "approval_rate": 1 / 3,
+            "avg_risk_reward": 1.5,
+            "avg_expected_value": 0.1,
+            "avg_required_equity": 20.0,
+            "observed_60m": 0,
+            "approved_observed_60m": 0,
+            "approved_60m_avg_gross_return": None,
+            "groups": [],
+        }
+        with patch.object(study, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(study, "format_summary",
+                          return_value="[MIN_ORDER_COUNTERFACTUAL_NEXUS_V1] ok"), \
+             patch.object(study, "format_top_groups",
+                          return_value="[MIN_ORDER_COUNTERFACTUAL_NEXUS_V1_TOP_GROUPS] NONE"):
+            with patch.dict(os.environ, {"MIN_ORDER_COUNTERFACTUAL_NEXUS_V1": "false"}):
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_counterfactual_nexus(self.db)
+                )
+                snap.assert_not_awaited()
+            with patch.dict(os.environ, {"MIN_ORDER_COUNTERFACTUAL_NEXUS_V1": "true"}):
+                self.assertIs(
+                    report,
+                    await shadow._maybe_emit_min_order_counterfactual_nexus(self.db),
+                )
+                snap.assert_awaited_once()
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_counterfactual_nexus(self.db)
                 )
                 snap.assert_awaited_once()
         self.assert_isolated()
