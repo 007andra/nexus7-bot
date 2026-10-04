@@ -372,7 +372,9 @@ class Proof(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_btc_never_inherits_btc_derivatives_cache(self):
         from bot import market_data, market_risk_runtime
-        snap = shadow._cost(signal("SOLUSDT"), self.e.client.ticker)
+        sig = signal("SOLUSDT")
+        sig.candidate_id = "shadow-feature-non-btc-proof"
+        snap = shadow._cost(sig, self.e.client.ticker)
         with patch.object(market_data, "get_market_sentiment", return_value={"score": 0}), \
              patch.object(market_risk_runtime, "snapshot", return_value={
                  "signals": {"funding_rate_pct": 0.03, "open_interest_change_pct": 1.5}
