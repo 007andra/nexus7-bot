@@ -568,6 +568,11 @@ class TradingEngine:
                             from bot.exchange_accounting_evidence import schedule as schedule_accounting
                         schedule_accounting(self)
                     
+                        # Independent, cache-only research. No candidate is handed
+                        # to the LIVE funnel; its authorization below is unchanged.
+                        from bot.hard_gate_shadow_scan import scan_if_enabled
+                        await scan_if_enabled(self)
+
                         if not self.active or getattr(self, 'entries_paused', False) or self.daily_stopped or daily_state_blocked or not daily_pnl_ok:
                             # FIX: logar apenas 1x — não a cada 5s em loop infinito
                             pass   # já logado em _update_daily_pnl, não repetir aqui

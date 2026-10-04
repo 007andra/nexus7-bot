@@ -145,6 +145,9 @@ def install(Analyzer, strategy, log) -> None:
             self, symbol, k15, k1h, k4h,
             min_score=min_score, fee_mult=fee_mult, vol_mult=vol_mult,
         )
+        from bot.hard_gate_shadow_context import active
+        if active():
+            return result
         if result is not None:
             return result
         try:
