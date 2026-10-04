@@ -54,6 +54,7 @@ def _candidate_for_persistence(row):
     stored = deepcopy(row)
     if not _bbo_persistence_enabled():
         stored.pop("bbo_cost_observation", None)
+        stored["bbo_persistence_policy"] = "REDACTED_V2"
     return stored
 
 
@@ -352,10 +353,14 @@ async def existing_candidate(db, candidate_id, *, guard):
         raise ValueError("invalid stored research authority")
     if not _bbo_persistence_enabled() and candidate_id not in _PERSISTENCE_LOGGED:
         _PERSISTENCE_LOGGED.add(candidate_id)
+        policy = str(row.get("bbo_persistence_policy") or "LEGACY_UNKNOWN")
+        stored_bbo_present = "bbo_cost_observation" in row
         _emit("HARD_GATE_SHADOW_PERSISTENCE", {
             "candidate_id": candidate_id,
             "persist_enabled": False,
-            "stored_bbo_present": "bbo_cost_observation" in row,
+            "policy": policy,
+            "stored_bbo_present": stored_bbo_present,
+            "proof_pass": policy == "REDACTED_V2" and not stored_bbo_present,
             "proof_source": "DB_READBACK_DEDUPE",
             **AUTHORITY,
         })
