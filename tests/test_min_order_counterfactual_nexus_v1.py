@@ -28,7 +28,11 @@ def decision(allowed=True):
         risk_reward=1.8,
         expected_value=0.14,
         reasoning=["counterfactual result"],
-        _bgx_score_snapshot={"fusion_confidence": 72, "rr_net": 1.8},
+        _bgx_score_snapshot={
+            "fusion_confidence": 72,
+            "rr_net": 1.8,
+            "ev_pct": 0.14,
+        },
     )
 
 
@@ -65,6 +69,56 @@ class ObservationTests(unittest.TestCase):
         self.assertFalse(row["live_allowed"])
         self.assertEqual(row["decision_effect"], "NONE")
         self.assertEqual(row["execution_effect"], "NONE")
+
+    def test_prefinal_snapshot_overrides_zeroed_post_veto_metrics(self):
+        vetoed = NS(
+            execution_allowed=False,
+            decision="WAIT",
+            confidence=0.0,
+            setup_quality=0.0,
+            risk_reward=0.0,
+            expected_value=0.0,
+            reasoning=[
+                "R:R líquido 1.05 < mínimo líquido 1.60 (bruto exigido: 2.0)"
+            ],
+            _bgx_score_snapshot={
+                "fusion_confidence": 45.36,
+                "rr_net": 1.049,
+                "ev_pct": 0.023,
+            },
+        )
+        row = study.build_observation(
+            signal(), vetoed, minimum_order(), captured_epoch=2000
+        )
+        self.assertAlmostEqual(row["confidence"], 45.36)
+        self.assertAlmostEqual(row["risk_reward"], 1.049)
+        self.assertAlmostEqual(row["expected_value"], 0.023)
+        self.assertEqual(row["reason_category"], "RR_BELOW_MIN")
+        self.assertEqual(row["metric_source"], "SCORE_SNAPSHOT_PRE_VETO")
+        self.assertFalse(row["execution_allowed"])
+        self.assertFalse(row["risk_epoch_traversal_credit"])
+
+    def test_report_normalizes_legacy_zeroed_record_without_rewriting_history(self):
+        raw = payload("legacy", False)
+        obs = raw["counterfactual_nexus_v1"]
+        obs["risk_reward"] = 0.0
+        obs["expected_value"] = 0.0
+        obs["confidence"] = 0.0
+        obs["reason"] = "EV negativo após custos: -0.184% (R:R líquido 0.82)"
+        obs.pop("reason_category", None)
+        obs.pop("metric_source", None)
+        obs["score_snapshot"] = {
+            "fusion_confidence": 15.3,
+            "rr_net": 0.822,
+            "ev_pct": -0.1837,
+        }
+        report = study.build_report([raw])
+        self.assertAlmostEqual(report["avg_risk_reward"], 0.822)
+        self.assertAlmostEqual(report["avg_expected_value"], -0.1837)
+        self.assertEqual(report["rejection_reasons"], {"EV_NEGATIVE": 1})
+        # Source payload remains historical and untouched.
+        self.assertEqual(obs["risk_reward"], 0.0)
+        self.assertEqual(obs["expected_value"], 0.0)
 
     def test_report_keeps_counterfactual_outcomes_separate(self):
         outcomes = [
