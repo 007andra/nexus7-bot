@@ -624,7 +624,8 @@ async def scan(engine, *, db=None, bbo_views=None):
                     row = {
                         **AUTHORITY, "candidate_id": sig.candidate_id,
                         "captured_epoch": captured, "symbol": symbol, "side": sig.direction,
-                        "setup": sig.entry_type, "score": sig.score, "entry": sig.entry,
+                        "setup": sig.entry_type, "regime": getattr(sig, "regime", "UNKNOWN"),
+                        "score": sig.score, "entry": sig.entry,
                         "stop": sig.sl, "target": sig.tp, "pullback_pass": passed,
                         "production_equivalent_pullback_result": pullback,
                         "production_equivalent_funnel_result": funnel,
