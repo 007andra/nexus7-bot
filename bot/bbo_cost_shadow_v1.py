@@ -183,6 +183,7 @@ class ShadowRecord:
     champion_rr_net: float | None
     static_parity: bool | None
     status: str                     # OK | SHADOW_DATA_UNAVAILABLE | BBO_<reason>
+    regime: str = "UNKNOWN"
 
     @property
     def would_change_decision(self) -> bool | None:
@@ -210,7 +211,7 @@ def format_record(r: ShadowRecord) -> str:
     c = r.costs
     return (
         f"[COST_SHADOW_BBO] candidate_id={r.candidate_id} symbol={r.symbol} side={r.side} "
-        f"setup={r.setup} status={r.status} bid={_f(r.bid, 8)} ask={_f(r.ask, 8)} "
+        f"setup={r.setup} regime={r.regime} status={r.status} bid={_f(r.bid, 8)} ask={_f(r.ask, 8)} "
         f"mid={_f(r.mid, 8)} spread_bps={_f(r.spread_bps)} bbo_age_ms={_f(r.bbo_age_ms)} "
         f"bbo_valid={_f(r.bbo_valid)} bbo_reason={r.bbo_reason} "
         f"static_fee_bps={_f(c.static_fee_bps if c else None)} "
