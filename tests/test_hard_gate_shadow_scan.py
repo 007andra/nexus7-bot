@@ -170,6 +170,7 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(out["candidates"]), 1)
         self.assertTrue(out["candidates"][0]["shadow_min_order_feasible"])
         self.assertTrue(out["candidates"][0]["nexus_called"])
+        self.assertEqual(out["candidates"][0]["regime"], "TRENDING_UP")
         self.assert_isolated()
         print("FORCED_NEXUS_APPROVAL_EXECUTION_COUNTERS=" + json.dumps({k: v.call_count for k, v in self.counters.items()}, sort_keys=True))
 
