@@ -277,6 +277,37 @@ def _decide(sig, klines, ticker, snap, features):
         _COST_CONTEXT.reset(token)
 
 
+def _executability_frontier(minimum_order, *, pullback_pass, funnel, decision):
+    """Classify the first research-stage blocker without granting authority."""
+    if minimum_order.get("capital_source") == "UNCONFIRMED":
+        return "CAPITAL", "CAPITAL_UNCONFIRMED"
+    if minimum_order.get("shadow_min_order_feasible") is False:
+        return "MIN_ORDER", str(minimum_order.get("binding") or "MINIMUM_ORDER")
+    if not pullback_pass:
+        return "PULLBACK", "PULLBACK_BLOCKED"
+    if not funnel:
+        return "FUNNEL", "PRODUCTION_EQUIVALENT_FUNNEL_BLOCKED"
+    if decision is None:
+        return "NEXUS", "NOT_EVALUATED"
+    if getattr(decision, "execution_allowed", False) is True:
+        return "SHADOW_APPROVED", "NEXUS_ALLOWED_RESEARCH_ONLY"
+
+    reasoning = list(getattr(decision, "reasoning", None) or [])
+    reason = str(reasoning[-1] if reasoning else "NEXUS_REJECTED")
+    upper = reason.upper()
+    if "R:R" in upper or "RR " in upper:
+        stage = "NEXUS_RR"
+    elif "EV " in upper or "EXPECTED VALUE" in upper:
+        stage = "NEXUS_EV"
+    elif "SCORE" in upper or "THRESHOLD" in upper:
+        stage = "NEXUS_SCORE"
+    elif "DADO" in upper or "DATA" in upper or "QUALIDADE" in upper:
+        stage = "NEXUS_DATA"
+    else:
+        stage = "NEXUS_OTHER"
+    return stage, reason[:240]
+
+
 def _bbo_observation(sig, decision, view, *, client=None):
     # Optional compatibility, no import/runtime dependency on unmerged #494.
     # Pure build only: never uses its shared persistence population or feed start.
@@ -531,6 +562,9 @@ async def scan(engine, *, db=None, bbo_views=None):
                         summary["nexus_evaluated"] += 1
                         allowed = getattr(decision, "execution_allowed", False) is True
                         summary["nexus_approved" if allowed else "nexus_rejected"] += 1
+                    frontier_stage, frontier_reason = _executability_frontier(
+                        minimum_order, pullback_pass=passed, funnel=funnel, decision=decision
+                    )
                     row = {
                         **AUTHORITY, "candidate_id": sig.candidate_id,
                         "captured_epoch": captured, "symbol": symbol, "side": sig.direction,
@@ -550,6 +584,8 @@ async def scan(engine, *, db=None, bbo_views=None):
                         "cached_funding": features["funding"],
                         "cached_oi_delta": features["oi_delta"],
                         "cached_news_score": features["news_score"],
+                        "frontier_stage": frontier_stage,
+                        "frontier_reason": frontier_reason,
                         "cost_snapshot": asdict(snap),
                     }
                     if decision is not None:
@@ -562,6 +598,13 @@ async def scan(engine, *, db=None, bbo_views=None):
                     _emit("SHADOW_CANDIDATE_WHILE_LIVE_BLOCKED", {k: v for k, v in row.items()
                           if k not in {"cost_snapshot", "champion_challenger", "bbo_cost_observation"}})
                     _terminal_observation(row)
+                    _emit("HARD_GATE_SHADOW_FRONTIER", {
+                        "candidate_id": row["candidate_id"], "symbol": row["symbol"],
+                        "side": row["side"], "stage": frontier_stage,
+                        "reason": frontier_reason, "binding": row.get("binding"),
+                        "capital_source": row.get("capital_source"),
+                        **AUTHORITY,
+                    })
                     _check(engine)
                     # Persist in the independent research dataset; failure never
                     # changes LIVE state. Bound IO to keep the engine responsive.
