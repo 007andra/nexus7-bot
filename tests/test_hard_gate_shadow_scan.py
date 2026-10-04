@@ -964,6 +964,75 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assert_isolated()
 
 
+    async def test_counterfactual_validation_report_is_flag_gated_and_bounded(self):
+        from bot import min_order_counterfactual_validation_v1 as validation
+        before = shadow._MIN_ORDER_CF_VALIDATION_LAST_EMIT
+        self.addCleanup(
+            setattr, shadow, "_MIN_ORDER_CF_VALIDATION_LAST_EMIT", before
+        )
+        shadow._MIN_ORDER_CF_VALIDATION_LAST_EMIT = 0.0
+        report = {
+            "epoch_id": "REENTRY_V1_20261004_R2",
+            "status": "COLLECTING_EVALUATIONS",
+            "evaluated": 3,
+            "observed_60m": 1,
+            "target_evaluations": 20,
+            "target_observed_60m": 20,
+            "allowed": {
+                "n": 1, "avg_return": 0.01, "positive_rate": 1.0,
+            },
+            "rejected": {
+                "n": 0, "avg_return": None, "positive_rate": None,
+            },
+            "confusion": {
+                "true_positive": 1,
+                "false_positive": 0,
+                "false_negative": 0,
+                "true_negative": 0,
+                "precision_on_positive_return": 1.0,
+                "positive_capture_rate": 1.0,
+                "missed_positive_rate": 0.0,
+            },
+            "allowed_vs_rejected_mean_return_lift": None,
+            "allowed_vs_rejected_positive_rate_lift": None,
+            "groups": [],
+        }
+        with patch.object(validation, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(validation, "format_summary",
+                          return_value="[MIN_ORDER_COUNTERFACTUAL_VALIDATION_V1] ok"), \
+             patch.object(validation, "format_top_groups",
+                          return_value="[MIN_ORDER_COUNTERFACTUAL_VALIDATION_V1_TOP_GROUPS] NONE"):
+            with patch.dict(
+                os.environ,
+                {"MIN_ORDER_COUNTERFACTUAL_VALIDATION_V1": "false"},
+            ):
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_counterfactual_validation(
+                        self.db
+                    )
+                )
+                snap.assert_not_awaited()
+            with patch.dict(
+                os.environ,
+                {"MIN_ORDER_COUNTERFACTUAL_VALIDATION_V1": "true"},
+            ):
+                self.assertIs(
+                    report,
+                    await shadow._maybe_emit_min_order_counterfactual_validation(
+                        self.db
+                    ),
+                )
+                snap.assert_awaited_once()
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_counterfactual_validation(
+                        self.db
+                    )
+                )
+                snap.assert_awaited_once()
+        self.assert_isolated()
+
+
     async def test_logger_concurrent_task_configuration_and_semantics(self):
         from bot.logger import log, shadow_log
         entered, release = threading.Event(), threading.Event()
