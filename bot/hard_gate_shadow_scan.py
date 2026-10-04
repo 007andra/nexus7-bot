@@ -639,6 +639,55 @@ async def scan(engine, *, db=None, bbo_views=None):
         except Exception as exc:
             _emit("HARD_GATE_SHADOW_SCAN", {"outcome_error": type(exc).__name__, **AUTHORITY})
         _check(engine)
+
+        try:
+            from bot import risk_epoch_shadow
+            if risk_epoch_shadow.enabled():
+                capital = _confirmed_shadow_capital(engine)
+                if capital is None:
+                    _emit("RISK_EPOCH_SHADOW_V1", {
+                        "status": "CAPITAL_UNCONFIRMED",
+                        "decision_effect": "NONE",
+                        "execution_effect": "NONE",
+                    })
+                else:
+                    epoch_row = await asyncio.wait_for(
+                        risk_epoch_shadow.snapshot(
+                            db, engine, start_equity=float(capital[0])
+                        ),
+                        timeout=1.0,
+                    )
+                    try:
+                        log.info("%s", risk_epoch_shadow.format_log(epoch_row))
+                    except Exception:
+                        pass
+                    try:
+                        from bot import reentry_promotion_study, reentry_readiness
+                        promotion = reentry_promotion_study.evaluate(
+                            epoch_row,
+                            reentry_readiness.snapshot(engine),
+                            target_pipeline=20,
+                        )
+                        log.info("%s", reentry_promotion_study.format_log(promotion))
+                    except Exception as exc:
+                        _emit("REENTRY_PROMOTION_STUDY_V1", {
+                            "status": "ERROR",
+                            "error": type(exc).__name__,
+                            "promotion_allowed": False,
+                            "live_allowed": False,
+                            "decision_effect": "NONE",
+                            "execution_effect": "NONE",
+                        })
+        except GateCleared:
+            raise
+        except Exception as exc:
+            _emit("RISK_EPOCH_SHADOW_V1", {
+                "status": "ERROR",
+                "error": type(exc).__name__,
+                "decision_effect": "NONE",
+                "execution_effect": "NONE",
+            })
+        _check(engine)
     except GateCleared:
         summary["shadow_scan_aborted_reason"] = "LIVE_HARD_GATE_CLEARED"
     finally:
