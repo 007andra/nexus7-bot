@@ -187,13 +187,17 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.analyzer.assert_not_called()
 
     async def test_authority_and_degraded_fidelity(self):
-        row = (await self.run_scan())["candidates"][0]
+        from bot import market_data, execution_cost
+        with patch.object(market_data, "get_market_sentiment", side_effect=RuntimeError("no cache")), \
+             patch.object(execution_cost, "cached_taker_fee", return_value=None):
+            row = (await self.run_scan())["candidates"][0]
         for key, value in AUTHORITY.items():
             self.assertEqual(row[key], value)
         self.assertEqual(row["evaluation_context"], "HARD_GATE_SHADOW")
         self.assertEqual(row["evaluation_fidelity"], "DEGRADED")
         self.assertIn("FUNDING", row["missing_features"])
         self.assertIn("OPEN_INTEREST", row["missing_features"])
+        self.assertIn("NEWS_SCORE", row["missing_features"])
         self.assertNotIn("live_executable", row)
 
     async def test_pullback_blocked_candidate_observed_without_nexus(self):
@@ -326,6 +330,85 @@ class Proof(unittest.IsolatedAsyncioTestCase):
     async def test_no_additional_rest_default(self):
         out = await self.run_scan()
         self.assertEqual(out["summary"]["additional_rest_calls_per_scan"], 0)
+        self.assert_isolated()
+
+
+    async def test_executability_frontier_distinguishes_min_order_and_nexus_rr(self):
+        stage, reason = shadow._executability_frontier(
+            {"capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+             "shadow_min_order_feasible": False, "binding": "MIN_NOTIONAL_BINDING"},
+            pullback_pass=True, funnel=True, decision=decision(False),
+        )
+        self.assertEqual((stage, reason), ("MIN_ORDER", "MIN_NOTIONAL_BINDING"))
+        rr_reject = decision(False)
+        rr_reject.reasoning = ["R:R líquido 1.20 < mínimo líquido 1.60"]
+        stage, reason = shadow._executability_frontier(
+            {"capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+             "shadow_min_order_feasible": True, "binding": "RISK_BUDGET"},
+            pullback_pass=True, funnel=True, decision=rr_reject,
+        )
+        self.assertEqual(stage, "NEXUS_RR")
+        self.assertIn("R:R", reason)
+
+
+    async def test_cached_optional_features_use_only_existing_process_caches(self):
+        from bot import market_data, market_risk_runtime, execution_cost
+        sig = signal("BTCUSDT")
+        sig.candidate_id = "shadow-feature-proof"
+        with patch.object(execution_cost, "cached_taker_fee",
+                          return_value=(0.0004, 0.0002, "binance_commission_rate", 10.0)):
+            snap = shadow._cost(sig, self.e.client.ticker)
+        with patch.object(market_data, "get_market_sentiment", return_value={"score": 24}), \
+             patch.object(market_risk_runtime, "snapshot", return_value={
+                 "signals": {"funding_rate_pct": 0.03, "open_interest_change_pct": 1.5}
+             }):
+            features = shadow._cached_optional_features("BTCUSDT", snap)
+        self.assertAlmostEqual(features["funding"], 0.0003)
+        self.assertAlmostEqual(features["oi_delta"], 0.015)
+        self.assertEqual(features["news_score"], 24.0)
+        self.assertNotIn("FUNDING", features["missing_features"])
+        self.assertNotIn("OI_DELTA", features["missing_features"])
+        self.assertNotIn("NEWS_SCORE", features["missing_features"])
+        self.assertNotIn("PRIVATE_FEE", features["missing_features"])
+        self.assertIn("OPEN_INTEREST", features["missing_features"])
+        self.assertEqual(features["evaluation_fidelity"], "CACHE_ENRICHED")
+        self.assert_isolated()
+
+    async def test_non_btc_never_inherits_btc_derivatives_cache(self):
+        from bot import market_data, market_risk_runtime
+        sig = signal("SOLUSDT")
+        sig.candidate_id = "shadow-feature-non-btc-proof"
+        snap = shadow._cost(sig, self.e.client.ticker)
+        with patch.object(market_data, "get_market_sentiment", return_value={"score": 0}), \
+             patch.object(market_risk_runtime, "snapshot", return_value={
+                 "signals": {"funding_rate_pct": 0.03, "open_interest_change_pct": 1.5}
+             }):
+            features = shadow._cached_optional_features("SOLUSDT", snap)
+        self.assertIsNone(features["funding"])
+        self.assertIsNone(features["oi_delta"])
+        self.assertIn("FUNDING", features["missing_features"])
+        self.assertIn("OI_DELTA", features["missing_features"])
+        self.assert_isolated()
+
+    async def test_outcome_processing_is_incremental_and_bounded(self):
+        await self.db._exec(shadow._TABLE)
+        captured = time.time() - 5 * 3600
+        for i in range(12):
+            row = {**AUTHORITY, "candidate_id": f"old-{i}", "captured_epoch": captured + i,
+                   "symbol": "SOLUSDT", "entry": 100.0, "side": "LONG"}
+            await self.db._exec(
+                "INSERT INTO hard_gate_shadow_candidates_v1 "
+                "(candidate_id,captured_epoch,symbol,population,payload) VALUES (?,?,?,?,?)",
+                (row["candidate_id"], row["captured_epoch"], row["symbol"],
+                 "HARD_GATE_SHADOW", json.dumps(row)),
+            )
+        stats = await shadow.observe_outcomes(self.e, self.db, batch_limit=3)
+        count = self.db.conn.execute(
+            "SELECT COUNT(*) FROM hard_gate_shadow_outcomes_v1"
+        ).fetchone()[0]
+        self.assertLessEqual(stats["examined"], 6)
+        self.assertLessEqual(count, 6)
+        self.assertEqual(stats["batch_limit"], 3)
         self.assert_isolated()
 
     async def test_insufficient_cache_no_rest_fallback(self):

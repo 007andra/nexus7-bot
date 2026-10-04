@@ -70,6 +70,21 @@ def fallback_taker_fee() -> float:
     return max(configured_taker_fee(), LEGACY_CONSERVATIVE_TAKER_FEE)
 
 
+def cached_taker_fee(symbol: str):
+    """Return a fresh fee-cache tuple without performing exchange I/O.
+
+    Result is (taker, maker, source, age_s) or None. This accessor exists for
+    research/observability paths that must never trigger an authenticated read.
+    """
+    key = (exchange_name(), str(symbol))
+    now = time.monotonic()
+    cached = _FEE_CACHE.get(key)
+    if not cached or cached[3] <= now:
+        return None
+    age_s = max(0.0, FEE_CACHE_TTL_S - (cached[3] - now))
+    return cached[0], cached[1], cached[2], age_s
+
+
 def static_slippage_rate(symbol: str) -> float:
     """Historical deterministic one-way slippage assumption (majors 1x, alts 2x)."""
     base = _finite(os.environ.get("BACKTEST_SLIPPAGE", DEFAULT_SLIPPAGE), DEFAULT_SLIPPAGE)

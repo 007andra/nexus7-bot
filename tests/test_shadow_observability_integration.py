@@ -227,6 +227,23 @@ class ComposedProof(f.Proof):
         self.assertFalse(any('nexus_bbo_cost_shadow_v1' in sql for sql in self.db.calls))
         self.assert_isolated()
 
+
+    async def test_persist_false_db_readback_telemetry_proves_bbo_absent(self):
+        flags = {**FLAGS, "NEXUS_BBO_COST_SHADOW_PERSIST": "false"}
+        shadow._PERSISTENCE_LOGGED.clear()
+        with patch.dict(os.environ, flags), patch.object(shadow.time, "time", return_value=1791138001):
+            first = await self.run_scan()
+            second = await self.run_scan()
+        self.assertEqual(first['candidates'][0]['candidate_id'], second['candidates'][0]['candidate_id'])
+        proof = [line for line in self.lines if line.startswith('[HARD_GATE_SHADOW_PERSISTENCE]')]
+        self.assertEqual(len(proof), 1)
+        self.assertIn('persist_enabled=false', proof[0])
+        self.assertIn('policy=REDACTED_V2', proof[0])
+        self.assertIn('stored_bbo_present=false', proof[0])
+        self.assertIn('proof_pass=true', proof[0])
+        self.assertIn('proof_source=DB_READBACK_DEDUPE', proof[0])
+        self.assert_isolated()
+
     async def test_persist_false_redacts_legacy_bbo_on_reuse_without_rewriting_history(self):
         flags = {**FLAGS, "NEXUS_BBO_COST_SHADOW_PERSIST": "false"}
         with patch.dict(os.environ, FLAGS):

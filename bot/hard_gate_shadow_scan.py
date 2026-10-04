@@ -21,6 +21,8 @@ from bot.logger import shadow_log as log
 
 # Separate lifecycle state, never attached to TradingEngine or RiskManager.
 _RUNNING = weakref.WeakSet()
+_PERSISTENCE_LOGGED = set()
+_OUTCOME_BATCH_LIMIT = 8
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -52,6 +54,7 @@ def _candidate_for_persistence(row):
     stored = deepcopy(row)
     if not _bbo_persistence_enabled():
         stored.pop("bbo_cost_observation", None)
+        stored["bbo_persistence_policy"] = "REDACTED_V2"
     return stored
 
 
@@ -107,12 +110,17 @@ def _cost(sig, ticker):
     source = "ticker_half_spread_plus_impact"
     if slip is None:
         slip, source = costs.static_slippage_rate(sig.symbol), "static_symbol_fallback"
+    cached_fee = costs.cached_taker_fee(sig.symbol)
+    if cached_fee is None:
+        taker, maker, fee_source = costs.fallback_taker_fee(), None, "hard_gate_cache_miss_fallback"
+    else:
+        taker, maker, fee_source, _ = cached_fee
     snap = costs.ExecutionCostSnapshot(
         snapshot_id=f"hard-gate-cost:{sig.candidate_id}", candidate_id=sig.candidate_id,
         exchange=costs.exchange_name(), symbol=sig.symbol, entry_reference=float(sig.entry),
-        taker_fee=costs.fallback_taker_fee(), maker_fee=None,
+        taker_fee=taker, maker_fee=maker,
         entry_slippage=slip, exit_slippage=slip, spread_bps=spread,
-        fee_source="hard_gate_public_only_fallback", slippage_source=source,
+        fee_source=fee_source, slippage_source=source,
         observed_at=time.time(),
     )
     costs.attach_snapshot(sig, snap)
@@ -197,7 +205,65 @@ def counterfactual_min_order(engine, sig, snap):
     return result
 
 
-def _decide(sig, klines, ticker, snap):
+def _cached_optional_features(symbol, snap):
+    """Reuse only already-populated process caches; never perform I/O."""
+    funding = oi = oi_delta = news_score = None
+    sources = {}
+
+    try:
+        from bot import market_data as mdata
+        sentiment = mdata.get_market_sentiment()
+        if isinstance(sentiment, dict) and sentiment.get("score") is not None:
+            value = float(sentiment["score"])
+            if math.isfinite(value):
+                news_score = value
+                sources["NEWS_SCORE"] = "MARKET_SENTIMENT_CACHE"
+    except Exception:
+        pass
+
+    # The existing market-risk fallback is BTC-specific. Never project BTC
+    # derivatives evidence onto another symbol.
+    if str(symbol).upper() == "BTCUSDT":
+        try:
+            from bot import market_risk_runtime
+            risk = market_risk_runtime.snapshot()
+            signals = risk.get("signals", {}) if isinstance(risk, dict) else {}
+            value = signals.get("funding_rate_pct")
+            if value is not None and math.isfinite(float(value)):
+                funding = float(value) / 100.0
+                sources["FUNDING"] = "MARKET_RISK_CACHE_BTC"
+            value = signals.get("open_interest_change_pct")
+            if value is not None and math.isfinite(float(value)):
+                oi_delta = float(value) / 100.0
+                sources["OI_DELTA"] = "MARKET_RISK_CACHE_BTC"
+        except Exception:
+            pass
+
+    if snap.fee_source in {"binance_commission_rate", "kucoin_actual_fee"}:
+        sources["PRIVATE_FEE"] = snap.fee_source
+
+    missing = []
+    if funding is None:
+        missing.append("FUNDING")
+    if oi is None:
+        missing.append("OPEN_INTEREST")
+    if oi_delta is None:
+        missing.append("OI_DELTA")
+    if news_score is None:
+        missing.append("NEWS_SCORE")
+    if "PRIVATE_FEE" not in sources:
+        missing.append("PRIVATE_FEE")
+    fidelity = "FULL_CACHE_EQUIVALENT" if not missing else (
+        "CACHE_ENRICHED" if len(missing) < 5 else "DEGRADED"
+    )
+    return {
+        "funding": funding, "oi": oi, "oi_delta": oi_delta, "news_score": news_score,
+        "missing_features": missing, "evaluation_fidelity": fidelity,
+        "optional_feature_sources": sources,
+    }
+
+
+def _decide(sig, klines, ticker, snap, features):
     from bot import nexus_ai
     from bot.nexus_live_cost_calibration import NexusCostContext, _COST_CONTEXT
     ctx = NexusCostContext(sig.symbol, snap.taker_fee, snap.one_way_slippage,
@@ -206,9 +272,41 @@ def _decide(sig, klines, ticker, snap):
     try:
         return nexus_ai.decide(symbol=sig.symbol, k15=klines[0], k1h=klines[1], k4h=klines[2],
                                entry=sig.entry, sl=sig.sl, tp=sig.tp, ticker=ticker,
-                               funding=None, oi=None, oi_delta=None, news_score=None)
+                               funding=features["funding"], oi=features["oi"],
+                               oi_delta=features["oi_delta"], news_score=features["news_score"])
     finally:
         _COST_CONTEXT.reset(token)
+
+
+def _executability_frontier(minimum_order, *, pullback_pass, funnel, decision):
+    """Classify the first blocker in production-equivalent pipeline order."""
+    if not pullback_pass:
+        return "PULLBACK", "PULLBACK_BLOCKED"
+    if not funnel:
+        return "FUNNEL", "PRODUCTION_EQUIVALENT_FUNNEL_BLOCKED"
+    if minimum_order.get("capital_source") == "UNCONFIRMED":
+        return "CAPITAL", "CAPITAL_UNCONFIRMED"
+    if minimum_order.get("shadow_min_order_feasible") is False:
+        return "MIN_ORDER", str(minimum_order.get("binding") or "MINIMUM_ORDER")
+    if decision is None:
+        return "NEXUS", "NOT_EVALUATED"
+    if getattr(decision, "execution_allowed", False) is True:
+        return "SHADOW_APPROVED", "NEXUS_ALLOWED_RESEARCH_ONLY"
+
+    reasoning = list(getattr(decision, "reasoning", None) or [])
+    reason = str(reasoning[-1] if reasoning else "NEXUS_REJECTED")
+    upper = reason.upper()
+    if "R:R" in upper or "RR " in upper:
+        stage = "NEXUS_RR"
+    elif "EV " in upper or "EXPECTED VALUE" in upper:
+        stage = "NEXUS_EV"
+    elif "SCORE" in upper or "THRESHOLD" in upper:
+        stage = "NEXUS_SCORE"
+    elif "DADO" in upper or "DATA" in upper or "QUALIDADE" in upper:
+        stage = "NEXUS_DATA"
+    else:
+        stage = "NEXUS_OTHER"
+    return stage, reason[:240]
 
 
 def _bbo_observation(sig, decision, view, *, client=None):
@@ -253,6 +351,19 @@ async def existing_candidate(db, candidate_id, *, guard):
     row = json.loads(raw["payload"] if hasattr(raw, "keys") else raw[0])
     if any(row.get(k) != v for k, v in AUTHORITY.items()):
         raise ValueError("invalid stored research authority")
+    if not _bbo_persistence_enabled() and candidate_id not in _PERSISTENCE_LOGGED:
+        _PERSISTENCE_LOGGED.add(candidate_id)
+        policy = str(row.get("bbo_persistence_policy") or "LEGACY_UNKNOWN")
+        stored_bbo_present = "bbo_cost_observation" in row
+        _emit("HARD_GATE_SHADOW_PERSISTENCE", {
+            "candidate_id": candidate_id,
+            "persist_enabled": False,
+            "policy": policy,
+            "stored_bbo_present": stored_bbo_present,
+            "proof_pass": policy == "REDACTED_V2" and not stored_bbo_present,
+            "proof_source": "DB_READBACK_DEDUPE",
+            **AUTHORITY,
+        })
     # Historical rows created before persistence isolation may contain BBO data.
     # Preserve the stored audit record, but never surface/reuse that data while
     # the BBO persistence kill switch is disabled.
@@ -323,7 +434,10 @@ def outcome_from_cache(row, bars, horizon, now):
             "observation_start": start, "return_basis": "hypothetical_entry_gross"}
 
 
-async def observe_outcomes(engine, db):
+async def observe_outcomes(engine, db, *, batch_limit=_OUTCOME_BATCH_LIMIT):
+    """Incrementally mature outcomes so one scan cannot inherit a large backlog."""
+    limit = max(1, min(int(batch_limit), 50))
+    stats = {"batch_limit": limit, "examined": 0, "written": 0, "cache_gap": 0}
     _check(engine)
     await db._exec(_TABLE)
     _check(engine)
@@ -335,10 +449,11 @@ async def observe_outcomes(engine, db):
             "LEFT JOIN hard_gate_shadow_outcomes_v1 o ON "
             "o.candidate_id=c.candidate_id AND o.horizon=? "
             "WHERE c.population=? AND o.candidate_id IS NULL "
-            "ORDER BY c.captured_epoch LIMIT 200", (horizon, POPULATION))
+            "ORDER BY c.captured_epoch LIMIT ?", (horizon, POPULATION, limit))
         _check(engine)
         for raw in rows or []:
             _check(engine)
+            stats["examined"] += 1
             row = json.loads(raw["payload"] if hasattr(raw, "keys") else raw[0])
             if row.get("population") != POPULATION:
                 continue
@@ -351,7 +466,10 @@ async def observe_outcomes(engine, db):
                     "(candidate_id,horizon,population,payload) VALUES (?,?,?,?) "
                     "ON CONFLICT(candidate_id,horizon) DO NOTHING",
                     (row["candidate_id"], horizon, POPULATION, json.dumps(outcome, allow_nan=False)))
+                stats["written"] += 1
+                stats["cache_gap"] += int(outcome.get("outcome") == "UNKNOWN_CACHE_GAP")
                 _check(engine)
+    return stats
 
 
 async def scan_if_enabled(engine):
@@ -432,6 +550,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                     summary["pullback_pass"] += int(passed)
                     ticker = deepcopy(engine.client.get_cached_ticker(symbol)) or None
                     snap = _cost(sig, ticker)
+                    features = _cached_optional_features(symbol, snap)
                     minimum_order = counterfactual_min_order(engine, sig, snap)
                     summary["min_order_feasible"] += int(minimum_order["shadow_min_order_feasible"] is True)
                     # Read-only production funnel math. None of the LIVE scan's
@@ -443,11 +562,14 @@ async def scan(engine, *, db=None, bbo_views=None):
                     decision = None
                     _check(engine)
                     if passed and funnel:
-                        decision = await _compute(_decide, sig, klines, ticker, snap)
+                        decision = await _compute(_decide, sig, klines, ticker, snap, features)
                         _check(engine)
                         summary["nexus_evaluated"] += 1
                         allowed = getattr(decision, "execution_allowed", False) is True
                         summary["nexus_approved" if allowed else "nexus_rejected"] += 1
+                    frontier_stage, frontier_reason = _executability_frontier(
+                        minimum_order, pullback_pass=passed, funnel=funnel, decision=decision
+                    )
                     row = {
                         **AUTHORITY, "candidate_id": sig.candidate_id,
                         "captured_epoch": captured, "symbol": symbol, "side": sig.direction,
@@ -460,20 +582,34 @@ async def scan(engine, *, db=None, bbo_views=None):
                         "nexus_allowed": getattr(decision, "execution_allowed", False) is True,
                         "nexus_net_rr": getattr(decision, "risk_reward", None),
                         "nexus_ev": getattr(decision, "expected_value", None),
-                        "evaluation_context": POPULATION, "evaluation_fidelity": "DEGRADED",
-                        "missing_features": ["FUNDING", "OPEN_INTEREST", "OI_DELTA", "NEWS_SCORE", "PRIVATE_FEE"],
+                        "evaluation_context": POPULATION,
+                        "evaluation_fidelity": features["evaluation_fidelity"],
+                        "missing_features": features["missing_features"],
+                        "optional_feature_sources": features["optional_feature_sources"],
+                        "cached_funding": features["funding"],
+                        "cached_oi_delta": features["oi_delta"],
+                        "cached_news_score": features["news_score"],
+                        "frontier_stage": frontier_stage,
+                        "frontier_reason": frontier_reason,
                         "cost_snapshot": asdict(snap),
                     }
                     if decision is not None:
                         # Pure builder only; isolated table, no LIVE study counters.
                         row["champion_challenger"] = {**build_forward_record(sig, decision, captured_epoch=captured),
-                                                       **AUTHORITY, "evaluation_fidelity": "DEGRADED"}
+                                                       **AUTHORITY, "evaluation_fidelity": features["evaluation_fidelity"]}
                         row["bbo_cost_observation"] = _bbo_observation(
                             sig, decision, deepcopy((bbo_views or {}).get(symbol)), client=engine.client)
                     _check(engine)
                     _emit("SHADOW_CANDIDATE_WHILE_LIVE_BLOCKED", {k: v for k, v in row.items()
                           if k not in {"cost_snapshot", "champion_challenger", "bbo_cost_observation"}})
                     _terminal_observation(row)
+                    _emit("HARD_GATE_SHADOW_FRONTIER", {
+                        "candidate_id": row["candidate_id"], "symbol": row["symbol"],
+                        "side": row["side"], "stage": frontier_stage,
+                        "reason": frontier_reason, "binding": row.get("binding"),
+                        "capital_source": row.get("capital_source"),
+                        **AUTHORITY,
+                    })
                     _check(engine)
                     # Persist in the independent research dataset; failure never
                     # changes LIVE state. Bound IO to keep the engine responsive.
@@ -492,7 +628,8 @@ async def scan(engine, *, db=None, bbo_views=None):
             await asyncio.sleep(0)
         _check(engine)
         try:
-            await asyncio.wait_for(observe_outcomes(engine, db), timeout=1.0)
+            outcome_stats = await asyncio.wait_for(observe_outcomes(engine, db), timeout=2.0)
+            _emit("HARD_GATE_SHADOW_OUTCOMES", {**outcome_stats, **AUTHORITY})
         except GateCleared:
             raise
         except Exception as exc:

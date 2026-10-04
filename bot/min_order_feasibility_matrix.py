@@ -169,7 +169,8 @@ def shadow_record(row):
         raise ValueError("counterfactual research population required")
     fields = ("candidate_id", "symbol", "counterfactual", "counterfactual_risk_pct",
               "risk_budget", "min_valid_qty", "risk_at_min_qty", "binding",
-              "shadow_min_order_feasible", "live_risk_authority")
+              "shadow_min_order_feasible", "live_risk_authority",
+              "capital_source", "capital_age_ms")
     return {**{k: row[k] for k in fields}, **AUTHORITY, "observability_only": True}
 
 
