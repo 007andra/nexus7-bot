@@ -183,9 +183,9 @@ def install(TradingEngine, log) -> None:
         drift_class = str(getattr(result, "drift_classification", "UNKNOWN") or "UNKNOWN")
         # A beyond-threshold favorable drift is not a free pass. Revalidate the
         # fixed protective geometry at the fresh executable price and ensure
-        # the already-quantized quantity still fits the operator's 50%-of-
-        # available initial-margin ceiling. Any missing/inconsistent context
-        # remains fail-closed.
+        # the already-quantized quantity still fits the same operator margin
+        # fraction enforced by final_sizing_invariants. Any missing or
+        # inconsistent context remains fail-closed.
         if drift_class == "FAVORABLE_IMPROVEMENT" and abs(signed_drift) > float(
             __import__("bot.pre_dispatch_guard", fromlist=["limits_from_env"]).limits_from_env().max_signal_drift_bps
         ):
@@ -200,7 +200,12 @@ def install(TradingEngine, log) -> None:
                      or (direction == "SHORT" and tp < executable < sl))
             )
             margin = (qty_f * executable / leverage) if leverage > 0 else float("inf")
-            margin_ceiling = available * 0.50
+            try:
+                from bot.final_sizing_invariants import operator_margin_fraction
+                margin_fraction = float(operator_margin_fraction())
+            except (ImportError, TypeError, ValueError, ArithmeticError):
+                margin_fraction = 0.0
+            margin_ceiling = available * margin_fraction
             collateral_ok = (
                 available > 0 and math.isfinite(margin)
                 and margin > 0 and margin <= margin_ceiling + 1e-9
@@ -218,8 +223,8 @@ def install(TradingEngine, log) -> None:
             log.info(
                 "[LIVE_PREDISPATCH_FAVORABLE_REVALIDATION] symbol=%s result=PASS "
                 "executable=%.8f sl=%.8f tp=%.8f margin=%.8f margin_ceiling=%.8f "
-                "geometry_improved=true collateral_within_target=true",
-                symbol, executable, sl, tp, margin, margin_ceiling,
+                "margin_fraction=%.6f geometry_improved=true collateral_within_target=true",
+                symbol, executable, sl, tp, margin, margin_ceiling, margin_fraction,
             )
 
         if not result.allowed:
