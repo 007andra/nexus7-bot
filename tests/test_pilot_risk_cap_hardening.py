@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from bot import pilot_risk_cap_hardening as guard
 
@@ -148,6 +149,7 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
                 self.risk = _Risk(6.0, fresh_risk_allowed=fresh_risk_allowed)
                 self.instruments = {"DOTUSDT": {"multiplier": 1.0}}
                 self.positions = {}
+                self._pilot_available_balance = 20.0
                 self.client = _MarketClient(ticker, book)
 
             async def _refresh_entry_balance(self):
@@ -169,6 +171,7 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
             symbol = "DOTUSDT"
             entry = 100.0
             sl = 99.6  # Explicit stop required by final projected-loss contract.
+            tp = 101.0
             direction = "LONG"
 
         try:
@@ -221,6 +224,30 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
             book={"b": [[99.98, 100]], "a": [[100.02, 100]]},
             fresh_risk_allowed=False,
         )
+        self.assertIsNone(result)
+        self.assertEqual(instance.client.place_calls, 0)
+
+    async def test_favorable_revalidation_uses_same_25pct_margin_cap_as_final_sizing(self):
+        from bot.pre_dispatch_guard import PreDispatchResult
+
+        favorable = PreDispatchResult(
+            allowed=True,
+            blockers=[],
+            metrics={
+                "spread_bps": 1.0,
+                "signal_drift_bps": 50.0,
+                "signed_signal_drift_bps": -50.0,
+                "executable_price": 99.5,
+                "depth_multiple": 100.0,
+            },
+            drift_classification="FAVORABLE_IMPROVEMENT",
+        )
+        with patch.dict("os.environ", {"LIVE_OPERATOR_MARGIN_FRACTION": "0.25"}), \
+             patch.object(guard, "live_microstructure_recheck", AsyncMock(return_value=favorable)):
+            instance, result = await self._exercise(
+                ticker={"bid": 99.49, "ask": 99.5, "lastPrice": 99.5},
+                book={"b": [[99.49, 100]], "a": [[99.5, 100]]},
+            )
         self.assertIsNone(result)
         self.assertEqual(instance.client.place_calls, 0)
 
