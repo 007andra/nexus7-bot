@@ -40,6 +40,21 @@ def enabled():
     return os.environ.get("HARD_GATE_SHADOW_SCAN", "false").strip().lower() == "true"
 
 
+def _bbo_persistence_enabled():
+    """Fail-closed persistence authority without importing the BBO runtime."""
+    return os.environ.get(
+        "NEXUS_BBO_COST_SHADOW_PERSIST", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _candidate_for_persistence(row):
+    """Return a detached payload honoring the BBO persistence kill switch."""
+    stored = deepcopy(row)
+    if not _bbo_persistence_enabled():
+        stored.pop("bbo_cost_observation", None)
+    return stored
+
+
 def gate_snapshot(engine):
     """Read the exact threshold/override predicates; never call can_open/update."""
     from bot.config import cfg
@@ -194,6 +209,11 @@ async def existing_candidate(db, candidate_id, *, guard):
     row = json.loads(raw["payload"] if hasattr(raw, "keys") else raw[0])
     if any(row.get(k) != v for k, v in AUTHORITY.items()):
         raise ValueError("invalid stored research authority")
+    # Historical rows created before persistence isolation may contain BBO data.
+    # Preserve the stored audit record, but never surface/reuse that data while
+    # the BBO persistence kill switch is disabled.
+    if not _bbo_persistence_enabled():
+        row.pop("bbo_cost_observation", None)
     return row
 
 
@@ -214,12 +234,13 @@ async def persist_candidate(db, row, *, guard=lambda: None):
     guard()
     await db._exec(_TABLE)
     guard()
+    stored = _candidate_for_persistence(row)
     result = await db._exec(
         "INSERT INTO hard_gate_shadow_candidates_v1 "
         "(candidate_id,captured_epoch,symbol,population,payload) VALUES (?,?,?,?,?) "
         "ON CONFLICT(candidate_id) DO NOTHING",
-        (row["candidate_id"], row["captured_epoch"], row["symbol"], POPULATION,
-         json.dumps(row, sort_keys=True, default=str, allow_nan=False)),
+        (stored["candidate_id"], stored["captured_epoch"], stored["symbol"], POPULATION,
+         json.dumps(stored, sort_keys=True, default=str, allow_nan=False)),
     )
 
     guard()

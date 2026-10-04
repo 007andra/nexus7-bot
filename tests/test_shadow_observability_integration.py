@@ -210,3 +210,39 @@ class ComposedProof(f.Proof):
         self.assertTrue(row['bbo_cost_observation']['bbo_valid'])
         self.assertEqual(self.count('CANDIDATE_TERMINAL'), 1)
         self.assert_isolated()
+
+
+    async def test_persist_false_keeps_bbo_in_memory_but_not_candidate_json(self):
+        flags = {**FLAGS, "NEXUS_BBO_COST_SHADOW_PERSIST": "false"}
+        with patch.dict(os.environ, flags):
+            row = (await self.run_scan())['candidates'][0]
+        self.assertIn('bbo_cost_observation', row)
+        self.assertTrue(row['bbo_cost_observation']['bbo_valid'])
+        raw = self.db.conn.execute(
+            'SELECT payload FROM hard_gate_shadow_candidates_v1 WHERE candidate_id=?',
+            (row['candidate_id'],)
+        ).fetchone()[0]
+        stored = json.loads(raw)
+        self.assertNotIn('bbo_cost_observation', stored)
+        self.assertFalse(any('nexus_bbo_cost_shadow_v1' in sql for sql in self.db.calls))
+        self.assert_isolated()
+
+    async def test_persist_false_redacts_legacy_bbo_on_reuse_without_rewriting_history(self):
+        flags = {**FLAGS, "NEXUS_BBO_COST_SHADOW_PERSIST": "false"}
+        with patch.dict(os.environ, FLAGS):
+            first = (await self.run_scan())['candidates'][0]
+        raw_before = self.db.conn.execute(
+            'SELECT payload FROM hard_gate_shadow_candidates_v1 WHERE candidate_id=?',
+            (first['candidate_id'],)
+        ).fetchone()[0]
+        self.assertIn('bbo_cost_observation', json.loads(raw_before))
+        restarted = f.engine()
+        with patch.dict(os.environ, flags):
+            reused = await shadow.scan(restarted, db=self.db)
+        self.assertNotIn('bbo_cost_observation', reused['candidates'][0])
+        raw_after = self.db.conn.execute(
+            'SELECT payload FROM hard_gate_shadow_candidates_v1 WHERE candidate_id=?',
+            (first['candidate_id'],)
+        ).fetchone()[0]
+        self.assertEqual(raw_after, raw_before)
+        self.assertFalse(restarted.positions)
