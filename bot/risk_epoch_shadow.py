@@ -214,7 +214,16 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
         return sum(vals) / len(vals) if vals else None
 
     unique_count = len(ids)
-    status = "SAMPLE_COMPLETE_RESEARCH_ONLY" if unique_count >= target else "COLLECTING"
+    traversed_count = sum(f["traversed_to_nexus"] for f in flags)
+    observed_60m_count = len(observed60)
+    if unique_count < target:
+        status = "COLLECTING"
+    elif traversed_count < target:
+        status = "CANDIDATE_SAMPLE_COMPLETE_PIPELINE_BLOCKED"
+    elif observed_60m_count < target:
+        status = "PIPELINE_SAMPLE_COMPLETE_OUTCOMES_PENDING"
+    else:
+        status = "EVIDENCE_SAMPLE_COMPLETE_MANUAL_REVIEW_ONLY"
     return {
         **baseline,
         "status": status,
@@ -222,9 +231,9 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
         "unique_candidates": unique_count,
         "capital_confirmed_candidates": sum(f["capital_confirmed"] for f in flags),
         "min_order_feasible_candidates": sum(f["min_order_feasible"] for f in flags),
-        "traversed_to_nexus": sum(f["traversed_to_nexus"] for f in flags),
+        "traversed_to_nexus": traversed_count,
         "nexus_allowed": sum(f["nexus_allowed"] for f in flags),
-        "observed_60m": len(observed60),
+        "observed_60m": observed_60m_count,
         "observed_240m": len(observed240),
         "approved_observed_60m": len(approved60),
         "approved_60m_avg_gross_return": avg(approved60, "future_return"),
