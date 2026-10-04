@@ -263,13 +263,62 @@ def _cached_price_map(engine):
     return prices
 
 
-async def snapshot(db, engine):
+def _counterfactual_universe_rows(engine, price_map):
+    """Mirror HARD_GATE_SHADOW normal configured risk, never LIVE recovery risk."""
+    from bot import execution_cost
+    from bot.config import cfg
     from bot import min_order_feasibility_matrix as matrix
+
+    equity = _finite(getattr(getattr(engine, "risk", None), "balance", None))
+    if equity is None or equity <= 0:
+        raise ValueError("counterfactual equity unavailable")
+
+    # Exact policy used by hard_gate_shadow_scan.counterfactual_min_order:
+    # normal configured hypothetical risk, explicitly NOT recovery-adjusted
+    # LIVE sizing. The authoritative drawdown hard gate remains untouched.
+    risk_pct = float(
+        cfg.POST_TARGET_RISK
+        if getattr(engine, "daily_target_hit", False)
+        else cfg.MAX_RISK_PCT
+    )
+    if not math.isfinite(risk_pct) or not 0 < risk_pct <= 1:
+        raise ValueError("invalid counterfactual risk pct")
+
+    equity_d = Decimal(str(equity))
+    available = matrix.available_collateral(engine, equity_d)
+    fee = execution_cost.fallback_taker_fee()
+    slippage = os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001")
+
+    rows = []
+    for symbol in cfg.SYMBOLS:
+        info = (getattr(engine, "instruments", {}) or {}).get(symbol)
+        price = price_map.get(symbol)
+        if not info or price is None or float(price) <= 0:
+            rows.append({"symbol": symbol, "status": "UNAVAILABLE"})
+            continue
+        row = matrix.audit_symbol(
+            info=info,
+            price=price,
+            equity=equity_d,
+            available=available,
+            risk_pct=risk_pct,
+            leverage=cfg.LEVERAGE,
+            max_margin_pct=getattr(cfg, "MAX_MARGIN_PCT", 0.80),
+            fee_rate_per_side=fee,
+            slippage_pct=slippage,
+        )
+        row["symbol"] = symbol
+        row["price"] = Decimal(str(price))
+        rows.append(row)
+    return rows
+
+
+async def snapshot(db, engine):
     from bot import min_order_frontier_audit_v1 as frontier
 
     frontier_report = await frontier.snapshot(db)
     price_map = _cached_price_map(engine)
-    universe_rows = matrix.build_matrix(engine, price_map)
+    universe_rows = _counterfactual_universe_rows(engine, price_map)
     return build_report(universe_rows, frontier_report)
 
 
