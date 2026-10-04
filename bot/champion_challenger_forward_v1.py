@@ -137,7 +137,7 @@ def build_forward_record(
         reason = "BOTH_REJECT_NOT_FINAL_ECONOMICALLY_ELIGIBLE"
 
     authority = shadow_authority("champion_challenger_forward_v1").telemetry()
-    return {
+    row = {
         "candidate_id": _candidate_id(sig),
         "captured_epoch": float(time.time() if captured_epoch is None else captured_epoch),
         "study_id": STUDY_ID,
@@ -160,9 +160,17 @@ def build_forward_record(
         ),
     }
 
+    if getattr(sig, "population", None) == "HARD_GATE_SHADOW":
+        from bot.hard_gate_shadow_context import AUTHORITY
+        row.update(AUTHORITY, evaluation_fidelity="DEGRADED")
+        row["authority_json"] = json.dumps(AUTHORITY, sort_keys=True)
+    return row
+
 
 async def persist_forward_record(db, row: Mapping[str, Any]) -> bool:
     """Append the first prospective observation for each candidate."""
+    if row.get("population") == "HARD_GATE_SHADOW":
+        raise ValueError("HARD_GATE_SHADOW requires separate research dataset")
     candidate_id = str(row.get("candidate_id") or "")
     if not candidate_id:
         raise ValueError("candidate_id required")
@@ -188,6 +196,8 @@ async def persist_forward_record(db, row: Mapping[str, Any]) -> bool:
 async def observe(db, sig, decision, log) -> dict[str, Any]:
     """Persist one paired forward decision and emit research-only telemetry."""
     row = build_forward_record(sig, decision)
+    if row.get("population") == "HARD_GATE_SHADOW":
+        return row
     persisted = await persist_forward_record(db, row)
     log.info(
         "[NEXUS_CC_FORWARD_V1] candidate=%s symbol=%s side=%s "
