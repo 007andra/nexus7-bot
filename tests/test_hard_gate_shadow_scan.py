@@ -844,6 +844,46 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.e, shadow._RUNNING)
         self.nexus.assert_not_called()
 
+    async def test_min_order_capital_adequacy_is_flag_gated_and_bounded(self):
+        from bot import min_order_capital_adequacy_v1 as capital
+        before = shadow._MIN_ORDER_CAPITAL_LAST_EMIT
+        self.addCleanup(setattr, shadow, "_MIN_ORDER_CAPITAL_LAST_EMIT", before)
+        shadow._MIN_ORDER_CAPITAL_LAST_EMIT = 0.0
+        report = {
+            "epoch_id": "REENTRY_V1_20261004_R2",
+            "status": "MIN_ORDER_ONLY_BLOCKERS_QUANTIFIED",
+            "candidates": 33,
+            "pipeline_before_min_order": 4,
+            "min_order_only_blocked": 4,
+            "current_equity": 8.7583,
+            "required_equity": {"min": 24.0, "median": 40.0, "p95": 70.0},
+            "closest_candidate": None,
+            "setup_rows": [],
+        }
+        with patch.object(capital, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(capital, "format_summary",
+                          return_value="[MIN_ORDER_CAPITAL_ADEQUACY_V1] status=ok"), \
+             patch.object(capital, "format_top_setups",
+                          return_value="[MIN_ORDER_CAPITAL_ADEQUACY_V1_TOP_SETUPS] NONE"):
+            with patch.dict(os.environ, {"MIN_ORDER_CAPITAL_ADEQUACY_V1": "false"}):
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_capital_adequacy(self.db)
+                )
+                snap.assert_not_awaited()
+            with patch.dict(os.environ, {"MIN_ORDER_CAPITAL_ADEQUACY_V1": "true"}):
+                self.assertIs(
+                    report,
+                    await shadow._maybe_emit_min_order_capital_adequacy(self.db),
+                )
+                snap.assert_awaited_once()
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_capital_adequacy(self.db)
+                )
+                snap.assert_awaited_once()
+        self.assert_isolated()
+
+
     async def test_logger_concurrent_task_configuration_and_semantics(self):
         from bot.logger import log, shadow_log
         entered, release = threading.Event(), threading.Event()
