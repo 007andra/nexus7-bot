@@ -29,6 +29,15 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("release_authorized=true", acc)
         self.assertNotIn("BLOCK_LIVE_RELEASE", acc)
 
+    def test_release_log_renders_configured_caps(self):
+        with patch.dict(os.environ, {
+            "PILOT_MAX_CONCURRENT_POSITIONS": "1",
+            "PILOT_MAX_NEW_ORDER_SUBMISSIONS": "1",
+        }, clear=False):
+            log = self._c().validate().release_log()
+        self.assertIn("max_positions=1", log)
+        self.assertIn("max_new_order_submissions=1", log)
+
     def test_contradictory_states_are_rejected(self):
         bad = (
             dict(validation_lock=True),

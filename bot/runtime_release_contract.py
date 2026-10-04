@@ -17,6 +17,7 @@ precondition it must be added to ``release_checks`` *and* flipped here, and
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 ACCOUNTING_ROLE = "OBSERVABILITY_ONLY"
 ACCOUNTING_EVIDENCE_STATE = "AWAITING_CONTROLLED_LIVE_EVIDENCE"
@@ -60,7 +61,9 @@ class ReleaseContract:
             return (
                 "[CONTROLLED_PILOT_RELEASE] authorized=true validation_lock=false "
                 f"exchange={self.exchange} accounting_role={self.accounting_role} "
-                "scope=pilot_only max_positions=2 external_positions=count_and_read_only"
+                f"scope=pilot_only max_positions={os.environ.get('PILOT_MAX_CONCURRENT_POSITIONS', '2')} "
+                f"max_new_order_submissions={os.environ.get('PILOT_MAX_NEW_ORDER_SUBMISSIONS', '2')} "
+                "external_positions=count_and_read_only"
             )
         return (
             "[CONTROLLED_PILOT_RELEASE] authorized=false validation_lock=true "

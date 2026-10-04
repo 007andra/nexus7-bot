@@ -22,9 +22,14 @@ def _release_approved() -> bool:
     return os.environ.get("PILOT_RELEASE_APPROVED", "").strip() == PILOT_RELEASE_TOKEN
 
 
-# Controlled pilot: two concurrent positions and two new-order submissions per session.
-PILOT_MAX_CONCURRENT_POSITIONS = 2
-MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = 2
+# Controlled pilot limits are explicit runtime configuration. Invalid values
+# fail closed at import time rather than silently widening LIVE authority.
+PILOT_MAX_CONCURRENT_POSITIONS = int(os.environ.get("PILOT_MAX_CONCURRENT_POSITIONS", "2"))
+MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = int(os.environ.get("PILOT_MAX_NEW_ORDER_SUBMISSIONS", "2"))
+if PILOT_MAX_CONCURRENT_POSITIONS < 1:
+    raise ValueError("PILOT_MAX_CONCURRENT_POSITIONS must be >= 1")
+if MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION < 1:
+    raise ValueError("PILOT_MAX_NEW_ORDER_SUBMISSIONS must be >= 1")
 PILOT_MAX_NEW_POSITIONS_SESSION = MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION
 PILOT_MAX_MARKET_DATA_AGE_S = float(os.environ.get("PILOT_MAX_MARKET_DATA_AGE_S", "120"))
 
@@ -192,12 +197,12 @@ class PilotGuard:
         return PILOT_ENABLED and not _paper_trade_enabled()
 
     def reserve_submission(self, symbol: str) -> bool:
-        """Atomically reserve one of two session submission slots before dispatch."""
+        """Atomically reserve a configured session submission slot before dispatch."""
         if not self.enabled:
             return True
         with self._submission_lock:
             if self.state.new_order_submissions_this_session >= MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION:
-                log.warning(f"[PILOT] {symbol} submission cap reached (2)")
+                log.warning(f"[PILOT] {symbol} submission cap reached ({MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION})")
                 return False
             self.state.new_order_submissions_this_session += 1
             self.state.first_order_ts = time.time()
