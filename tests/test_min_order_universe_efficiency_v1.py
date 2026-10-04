@@ -140,7 +140,12 @@ class SnapshotIsolation(unittest.TestCase):
                 self.calls.append(symbol)
                 return {"lastPrice": "123.45"}
 
-        engine = SimpleNamespace(client=Client())
+        engine = SimpleNamespace(
+            client=Client(),
+            risk=SimpleNamespace(balance=8.75830036),
+            instruments={"BTCUSDT": {"loaded": True}},
+            daily_target_hit=False,
+        )
         front = {
             "epoch_id": "REENTRY_V1_20261004_R2",
             "started_epoch": 1000.0,
@@ -150,18 +155,41 @@ class SnapshotIsolation(unittest.TestCase):
             "structurally_blocked": 0,
             "unknown": 0,
         }
-        matrix_rows = [universe_row("BTCUSDT", "COST_BLOCK", 0.0)]
+        matrix_row = universe_row("BTCUSDT", "COST_BLOCK", 0.0)
         with patch.object(frontier, "snapshot", new_callable=AsyncMock,
                           return_value=front) as fs, \
-             patch.object(matrix, "build_matrix", return_value=matrix_rows) as bm, \
-             patch("bot.config.cfg.SYMBOLS", ["BTCUSDT"]):
+             patch.object(matrix, "build_matrix",
+                          side_effect=AssertionError("LIVE recovery matrix forbidden")) as bm, \
+             patch.object(matrix, "audit_symbol", return_value=matrix_row) as audit_symbol, \
+             patch("bot.config.cfg.SYMBOLS", ["BTCUSDT"]), \
+             patch("bot.config.cfg.MAX_RISK_PCT", 0.0025):
             report = asyncio.run(eff.snapshot(object(), engine))
         fs.assert_awaited_once()
-        bm.assert_called_once()
-        _, price_map = bm.call_args.args
-        self.assertEqual(price_map, {"BTCUSDT": 123.45})
+        bm.assert_not_called()
+        audit_symbol.assert_called_once()
+        kwargs = audit_symbol.call_args.kwargs
+        self.assertEqual(float(kwargs["risk_pct"]), 0.0025)
+        self.assertAlmostEqual(float(kwargs["equity"]), 8.75830036)
         self.assertEqual(engine.client.calls, ["BTCUSDT"])
         self.assertEqual(report["universe_symbols"], 1)
+
+    def test_hard_gate_drawdown_does_not_zero_counterfactual_universe_budget(self):
+        from bot import min_order_feasibility_matrix as matrix
+
+        engine = SimpleNamespace(
+            risk=SimpleNamespace(balance=8.75830036, drawdown=0.6158),
+            instruments={"SOLUSDT": {"loaded": True}},
+            daily_target_hit=False,
+        )
+        with patch.object(matrix, "audit_symbol",
+                          return_value=universe_row("SOLUSDT", "CONDITIONAL", 0.14)) as audit_symbol, \
+             patch("bot.config.cfg.SYMBOLS", ["SOLUSDT"]), \
+             patch("bot.config.cfg.MAX_RISK_PCT", 0.0025):
+            rows = eff._counterfactual_universe_rows(engine, {"SOLUSDT": 121.77})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(float(audit_symbol.call_args.kwargs["risk_pct"]), 0.0025)
+        self.assertGreater(float(audit_symbol.call_args.kwargs["risk_pct"]), 0.0)
+
 
     def test_formatters_restate_non_authority(self):
         report = eff.build_report(
