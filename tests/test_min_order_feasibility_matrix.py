@@ -96,3 +96,23 @@ def test_build_matrix_uses_recovery_adjusted_risk_without_mutation():
     assert len(rows) == 1
     assert abs(float(rows[0]["risk_budget"]) - (8.7583 * 0.005)) < 1e-12
     assert engine.instruments["XUSDT"] == before
+
+
+def test_build_matrix_counterfactual_override_ignores_zero_recovery_multiplier():
+    engine = SimpleNamespace(
+        risk=SimpleNamespace(balance=8.7583, drawdown=0.6158),
+        instruments={"XUSDT": _info(step="1", min_qty="1", min_notional="5")},
+        _pilot_available_balance=8.7583,
+        _effective_risk_pct=lambda: 0.0025,
+    )
+    with patch.object(matrix.cfg, "SYMBOLS", ["XUSDT"]), \
+         patch.object(matrix.cfg, "LEVERAGE", 50), \
+         patch.object(matrix.cfg, "MAX_MARGIN_PCT", 1.0), \
+         patch.object(matrix, "recovery_size_multiplier", return_value=0.0) as recovery, \
+         patch.object(matrix.execution_cost, "fallback_taker_fee", return_value=0.0005):
+        rows = matrix.build_matrix(
+            engine, {"XUSDT": 1.0}, risk_pct_override=0.0025
+        )
+    recovery.assert_not_called()
+    assert len(rows) == 1
+    assert abs(float(rows[0]["risk_budget"]) - (8.7583 * 0.0025)) < 1e-12
