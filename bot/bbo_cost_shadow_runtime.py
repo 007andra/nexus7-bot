@@ -191,7 +191,9 @@ def build_record(sig, decision, view: feed.BBOView | None, *, floor: float) -> m
     def _base(status, **extra):
         values = dict(
             candidate_id=_candidate_id(sig), symbol=symbol, side=side,
-            setup=str(getattr(sig, "entry_type", "NA")), entry=entry or 0.0, stop=stop or 0.0,
+            setup=str(getattr(sig, "entry_type", "NA")),
+            regime=str(getattr(sig, "regime", None) or getattr(decision, "market_regime", None) or "UNKNOWN"),
+            entry=entry or 0.0, stop=stop or 0.0,
             target=target or 0.0, gross_rr=gross_rr or 0.0, confidence=confidence,
             bid=None, ask=None, mid=None, spread_bps=None, bbo_valid=False,
             bbo_reason=view.reason if view else "MISSING_BOOK",

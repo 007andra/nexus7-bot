@@ -170,6 +170,7 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(out["candidates"]), 1)
         self.assertTrue(out["candidates"][0]["shadow_min_order_feasible"])
         self.assertTrue(out["candidates"][0]["nexus_called"])
+        self.assertEqual(out["candidates"][0]["regime"], "TRENDING_UP")
         self.assert_isolated()
         print("FORCED_NEXUS_APPROVAL_EXECUTION_COUNTERS=" + json.dumps({k: v.call_count for k, v in self.counters.items()}, sort_keys=True))
 
@@ -366,6 +367,40 @@ class Proof(unittest.IsolatedAsyncioTestCase):
     async def test_no_additional_rest_default(self):
         out = await self.run_scan()
         self.assertEqual(out["summary"]["additional_rest_calls_per_scan"], 0)
+        self.assert_isolated()
+
+
+    async def test_bbo_calibration_v2_is_persistence_gated_and_bounded(self):
+        from bot import bbo_calibration_v2
+        before = shadow._BBO_CALIBRATION_LAST_EMIT
+        self.addCleanup(setattr, shadow, "_BBO_CALIBRATION_LAST_EMIT", before)
+        shadow._BBO_CALIBRATION_LAST_EMIT = 0.0
+        report = {
+            "status": "COLLECTING", "unique_candidates": 1, "valid_bbo_candidates": 1,
+            "target_min": 50, "target_preferred": 100,
+            "global": {
+                "static_cost_bps": {"mean": 30.0},
+                "bbo_cost_bps": {"mean": 16.0},
+                "cost_reduction_bps": {"mean": 14.0},
+                "delta_rr": {"mean": 0.3},
+                "delta_ev": {"mean": 0.1},
+                "would_change_decision": 0,
+                "bbo_age_ms": {"p95": 200.0},
+                "spread_bps": {"p95": 2.0},
+            },
+        }
+        with patch.object(bbo_calibration_v2, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(bbo_calibration_v2, "format_summary",
+                          return_value="[BBO_CALIBRATION_V2] status=COLLECTING"):
+            with patch.dict(os.environ, {"NEXUS_BBO_COST_SHADOW_PERSIST": "false"}):
+                self.assertIsNone(await shadow._maybe_emit_bbo_calibration(self.db))
+                snap.assert_not_awaited()
+            with patch.dict(os.environ, {"NEXUS_BBO_COST_SHADOW_PERSIST": "true"}):
+                self.assertIs(report, await shadow._maybe_emit_bbo_calibration(self.db))
+                snap.assert_awaited_once()
+                self.assertIsNone(await shadow._maybe_emit_bbo_calibration(self.db))
+                snap.assert_awaited_once()
         self.assert_isolated()
 
 

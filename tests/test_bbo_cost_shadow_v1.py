@@ -216,8 +216,8 @@ def test_16_17_rr_net_and_ev_match_nexus_expected_value():
 
 def _sig(symbol="AVAXUSDT", entry=11.114, sl=10.994095, tp=11.353811, slip=0.001):
     sig = SimpleNamespace(symbol=symbol, direction="LONG", entry=entry, sl=sl, tp=tp,
-                          entry_type="PULLBACK", _bgx_setup_id=f"{symbol}:LONG:PULLBACK:1990054",
-                          score=60)
+                          entry_type="PULLBACK", regime="TRENDING_UP",
+                          _bgx_setup_id=f"{symbol}:LONG:PULLBACK:1990054", score=60)
     snap = execution_cost.ExecutionCostSnapshot(
         snapshot_id="cost-test", candidate_id=sig._bgx_setup_id, exchange="binance", symbol=symbol,
         entry_reference=entry, taker_fee=0.0005, maker_fee=0.0002, entry_slippage=slip,
@@ -241,12 +241,14 @@ def _valid_view(symbol="AVAXUSDT", bid=11.1135, ask=11.1145, qty=500.0):
 def test_18_would_change_decision_counterfactual_reproduces_production_avax():
     rec = rt.build_record(_sig(), _decision(), _valid_view(), floor=1.6)
     assert rec.status == "OK" and rec.static_parity is True        # matches logged rr_net 1.347
+    assert rec.regime == "TRENDING_UP"
     assert abs(rec.rr_net_static - 1.347) < 0.002
     assert rec.static_allowed is False and rec.shadow_allowed is True
     assert rec.would_change_decision is True
     line = model.format_record(rec)
     for token in ("[COST_SHADOW_BBO]", "candidate_id=AVAXUSDT:LONG:PULLBACK:1990054",
-                  "bbo_valid=true", "would_change_decision=true", "decision_scope=EV_RR_GATE",
+                  "regime=TRENDING_UP", "bbo_valid=true", "would_change_decision=true",
+                  "decision_scope=EV_RR_GATE",
                   "estimated_impact_bps=NA impact_model=UNPROVEN",
                   "shadow_only=true decision_effect=NONE execution_effect=NONE"):
         assert token in line, token

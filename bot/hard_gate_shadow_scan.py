@@ -23,6 +23,8 @@ from bot.logger import shadow_log as log
 _RUNNING = weakref.WeakSet()
 _PERSISTENCE_LOGGED = set()
 _OUTCOME_BATCH_LIMIT = 8
+_BBO_CALIBRATION_INTERVAL_S = 300.0
+_BBO_CALIBRATION_LAST_EMIT = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -56,6 +58,33 @@ def _candidate_for_persistence(row):
         stored.pop("bbo_cost_observation", None)
         stored["bbo_persistence_policy"] = "REDACTED_V2"
     return stored
+
+
+async def _maybe_emit_bbo_calibration(db):
+    """Bounded research readout; never participates in trading authority."""
+    global _BBO_CALIBRATION_LAST_EMIT
+    if not _bbo_persistence_enabled():
+        return None
+    now = time.monotonic()
+    if (_BBO_CALIBRATION_LAST_EMIT > 0.0 and
+            now - _BBO_CALIBRATION_LAST_EMIT < _BBO_CALIBRATION_INTERVAL_S):
+        return None
+    _BBO_CALIBRATION_LAST_EMIT = now
+    try:
+        from bot import bbo_calibration_v2
+        report = await asyncio.wait_for(bbo_calibration_v2.snapshot(db), timeout=1.5)
+        log.info("%s", bbo_calibration_v2.format_summary(report))
+        return report
+    except Exception as exc:
+        _emit("BBO_CALIBRATION_V2", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
 
 
 def gate_snapshot(engine):
@@ -624,7 +653,8 @@ async def scan(engine, *, db=None, bbo_views=None):
                     row = {
                         **AUTHORITY, "candidate_id": sig.candidate_id,
                         "captured_epoch": captured, "symbol": symbol, "side": sig.direction,
-                        "setup": sig.entry_type, "score": sig.score, "entry": sig.entry,
+                        "setup": sig.entry_type, "regime": getattr(sig, "regime", "UNKNOWN"),
+                        "score": sig.score, "entry": sig.entry,
                         "stop": sig.sl, "target": sig.tp, "pullback_pass": passed,
                         "production_equivalent_pullback_result": pullback,
                         "production_equivalent_funnel_result": funnel,
@@ -734,6 +764,8 @@ async def scan(engine, *, db=None, bbo_views=None):
                 "decision_effect": "NONE",
                 "execution_effect": "NONE",
             })
+        _check(engine)
+        await _maybe_emit_bbo_calibration(db)
         _check(engine)
     except GateCleared:
         summary["shadow_scan_aborted_reason"] = "LIVE_HARD_GATE_CLEARED"
