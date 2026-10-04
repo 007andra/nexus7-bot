@@ -187,13 +187,16 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.analyzer.assert_not_called()
 
     async def test_authority_and_degraded_fidelity(self):
-        row = (await self.run_scan())["candidates"][0]
+        from bot import market_data
+        with patch.object(market_data, "get_market_sentiment", side_effect=RuntimeError("no cache")):
+            row = (await self.run_scan())["candidates"][0]
         for key, value in AUTHORITY.items():
             self.assertEqual(row[key], value)
         self.assertEqual(row["evaluation_context"], "HARD_GATE_SHADOW")
         self.assertEqual(row["evaluation_fidelity"], "DEGRADED")
         self.assertIn("FUNDING", row["missing_features"])
         self.assertIn("OPEN_INTEREST", row["missing_features"])
+        self.assertIn("NEWS_SCORE", row["missing_features"])
         self.assertNotIn("live_executable", row)
 
     async def test_pullback_blocked_candidate_observed_without_nexus(self):
