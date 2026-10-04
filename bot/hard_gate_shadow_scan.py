@@ -25,6 +25,8 @@ _PERSISTENCE_LOGGED = set()
 _OUTCOME_BATCH_LIMIT = 8
 _BBO_CALIBRATION_INTERVAL_S = 300.0
 _BBO_CALIBRATION_LAST_EMIT = 0.0
+_MIN_ORDER_FRONTIER_INTERVAL_S = 300.0
+_MIN_ORDER_FRONTIER_LAST_EMIT = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -77,6 +79,33 @@ async def _maybe_emit_bbo_calibration(db):
         return report
     except Exception as exc:
         _emit("BBO_CALIBRATION_V2", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
+async def _maybe_emit_min_order_frontier(db):
+    """Bounded active-epoch research readout; no trading authority."""
+    global _MIN_ORDER_FRONTIER_LAST_EMIT
+    from bot import min_order_frontier_audit_v1 as frontier
+    if not frontier.enabled():
+        return None
+    now = time.monotonic()
+    if (_MIN_ORDER_FRONTIER_LAST_EMIT > 0.0 and
+            now - _MIN_ORDER_FRONTIER_LAST_EMIT < _MIN_ORDER_FRONTIER_INTERVAL_S):
+        return None
+    _MIN_ORDER_FRONTIER_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(frontier.snapshot(db), timeout=1.5)
+        log.info("%s", frontier.format_summary(report))
+        return report
+    except Exception as exc:
+        _emit("MIN_ORDER_FRONTIER_AUDIT_V1", {
             "status": "ERROR",
             "error": type(exc).__name__,
             "promotion_allowed": False,
@@ -211,12 +240,18 @@ def counterfactual_min_order(engine, sig, snap):
               "live_risk_authority": "BLOCKED_BY_DRAWDOWN_HARD_GATE",
               "shadow_min_order_feasible": None, "binding": "CAPITAL_UNCONFIRMED",
               "risk_budget": None, "min_valid_qty": None, "risk_at_min_qty": None,
+              "margin_at_min_qty": None, "margin_cap": None,
+              "required_equity_at_min_qty": None,
               "capital_source": "UNCONFIRMED", "capital_age_ms": None}
     capital = _confirmed_shadow_capital(engine)
     if capital is None:
         return result
     equity, available, source, age_ms = capital
-    result.update(capital_source=source, capital_age_ms=age_ms)
+    result.update(
+        capital_source=source,
+        capital_age_ms=age_ms,
+        margin_cap=available * float(cfg.MAX_MARGIN_PCT),
+    )
     if not all(math.isfinite(x) and x > 0 for x in (equity, available, risk_pct)) or risk_pct > 1:
         return result
     detail = decompose(
@@ -227,10 +262,15 @@ def counterfactual_min_order(engine, sig, snap):
         slippage_pct=max(float(os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001")),
                          snap.slippage_allowance),
     )
-    result.update(shadow_min_order_feasible=detail.get("result") == "PASS",
-                  binding=detail.get("binding"), risk_budget=detail.get("risk_budget"),
-                  min_valid_qty=detail.get("min_valid_qty"),
-                  risk_at_min_qty=detail.get("risk_at_min_valid_qty"))
+    result.update(
+        shadow_min_order_feasible=detail.get("result") == "PASS",
+        binding=detail.get("binding"),
+        risk_budget=detail.get("risk_budget"),
+        min_valid_qty=detail.get("min_valid_qty"),
+        risk_at_min_qty=detail.get("risk_at_min_valid_qty"),
+        margin_at_min_qty=detail.get("margin_at_min_valid_qty"),
+        required_equity_at_min_qty=detail.get("required_equity_at_min_valid_qty"),
+    )
     return result
 
 
@@ -766,6 +806,8 @@ async def scan(engine, *, db=None, bbo_views=None):
             })
         _check(engine)
         await _maybe_emit_bbo_calibration(db)
+        _check(engine)
+        await _maybe_emit_min_order_frontier(db)
         _check(engine)
     except GateCleared:
         summary["shadow_scan_aborted_reason"] = "LIVE_HARD_GATE_CLEARED"
