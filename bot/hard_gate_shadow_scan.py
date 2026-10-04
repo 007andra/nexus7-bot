@@ -25,6 +25,8 @@ _PERSISTENCE_LOGGED = set()
 _OUTCOME_BATCH_LIMIT = 8
 _BBO_CALIBRATION_INTERVAL_S = 300.0
 _BBO_CALIBRATION_LAST_EMIT = 0.0
+_BBO_CALIBRATION_V3_INTERVAL_S = 300.0
+_BBO_CALIBRATION_V3_LAST_EMIT = 0.0
 _MIN_ORDER_FRONTIER_INTERVAL_S = 300.0
 _MIN_ORDER_FRONTIER_LAST_EMIT = 0.0
 _MIN_ORDER_UNIVERSE_INTERVAL_S = 300.0
@@ -55,12 +57,19 @@ def _bbo_persistence_enabled():
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _bbo_v3_enabled():
+    return os.environ.get(
+        "NEXUS_BBO_CALIBRATION_V3", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _candidate_for_persistence(row):
     """Return a detached payload honoring the BBO persistence kill switch."""
     stored = deepcopy(row)
     if not _bbo_persistence_enabled():
         stored.pop("bbo_cost_observation", None)
-        stored["bbo_persistence_policy"] = "REDACTED_V2"
+        stored.pop("bbo_cost_only_observation", None)
+        stored["bbo_persistence_policy"] = "REDACTED_V3"
     return stored
 
 
@@ -81,6 +90,33 @@ async def _maybe_emit_bbo_calibration(db):
         return report
     except Exception as exc:
         _emit("BBO_CALIBRATION_V2", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
+async def _maybe_emit_bbo_calibration_v3(db):
+    """Bounded decoupled cost-only calibration; never trading authority."""
+    global _BBO_CALIBRATION_V3_LAST_EMIT
+    if not (_bbo_persistence_enabled() and _bbo_v3_enabled()):
+        return None
+    now = time.monotonic()
+    if (_BBO_CALIBRATION_V3_LAST_EMIT > 0.0 and
+            now - _BBO_CALIBRATION_V3_LAST_EMIT < _BBO_CALIBRATION_V3_INTERVAL_S):
+        return None
+    _BBO_CALIBRATION_V3_LAST_EMIT = now
+    try:
+        from bot import bbo_calibration_v3
+        report = await asyncio.wait_for(bbo_calibration_v3.snapshot(db), timeout=1.5)
+        log.info("%s", bbo_calibration_v3.format_summary(report))
+        return report
+    except Exception as exc:
+        _emit("BBO_CALIBRATION_V3", {
             "status": "ERROR",
             "error": type(exc).__name__,
             "promotion_allowed": False,
@@ -448,6 +484,81 @@ def _bbo_observation(sig, decision, view, *, client=None):
         return payload
 
 
+def _bbo_cost_only_observation(sig, snap, view, *, client=None):
+    """Cost-only BBO evidence available before MIN_ORDER/NEXUS decisions."""
+    if not _bbo_v3_enabled():
+        return None
+    runtime = sys.modules.get("bot.bbo_cost_shadow_runtime")
+    if runtime is None or not runtime.enabled():
+        return None
+    try:
+        if view is None:
+            view = runtime.snapshot_for_research(client, sig.symbol)
+        valid = bool(view is not None and view.valid and view.quote is not None)
+        book = runtime.model.book_metrics(view.quote.bid, view.quote.ask) if valid else None
+        costs = runtime.model.cost_breakdown(
+            symbol=str(sig.symbol),
+            taker_fee=float(snap.taker_fee),
+            entry_slippage=float(snap.entry_slippage),
+            exit_slippage=float(snap.exit_slippage),
+            book=book,
+        )
+        live = costs.live_plus_static_impact_cost_bps
+        static = costs.static_total_cost_bps
+        q = view.quote if valid else None
+        payload = {
+            **AUTHORITY,
+            "cohort": "COST_ONLY",
+            "candidate_id": str(sig.candidate_id),
+            "symbol": str(sig.symbol),
+            "side": str(sig.direction).upper(),
+            "setup": str(sig.entry_type),
+            "regime": str(getattr(sig, "regime", "UNKNOWN")),
+            "bbo_valid": valid,
+            "bbo_reason": "OK" if valid else str(getattr(view, "reason", "MISSING_BOOK")),
+            "bbo_age_ms": getattr(view, "age_ms", None) if view is not None else None,
+            "bbo_generation": getattr(q, "generation", None),
+            "bbo_update_id": getattr(q, "update_id", None),
+            "bid": getattr(q, "bid", None),
+            "ask": getattr(q, "ask", None),
+            "mid": book.mid if book is not None else None,
+            "spread_bps": book.spread_bps if book is not None else None,
+            "static_total_cost_bps": static,
+            "live_spread_only_cost_bps": costs.live_spread_only_cost_bps,
+            "live_total_cost_bps": live,
+            "cost_reduction_bps": None if live is None else static - live,
+            "impact_model": costs.impact_model,
+            "production_sha": os.environ.get("RAILWAY_GIT_COMMIT_SHA", "UNKNOWN") or "UNKNOWN",
+        }
+        _emit("COST_SHADOW_BBO_V3_COST_ONLY", {
+            "candidate_id": payload["candidate_id"],
+            "symbol": payload["symbol"],
+            "setup": payload["setup"],
+            "regime": payload["regime"],
+            "bbo_valid": payload["bbo_valid"],
+            "bbo_age_ms": payload["bbo_age_ms"],
+            "spread_bps": payload["spread_bps"],
+            "static_total_cost_bps": payload["static_total_cost_bps"],
+            "live_total_cost_bps": payload["live_total_cost_bps"],
+            "cost_reduction_bps": payload["cost_reduction_bps"],
+            "cohort": "COST_ONLY",
+            **AUTHORITY,
+        })
+        return payload
+    except Exception as exc:
+        payload = {
+            **AUTHORITY,
+            "cohort": "COST_ONLY",
+            "candidate_id": str(getattr(sig, "candidate_id", "UNKNOWN")),
+            "symbol": str(getattr(sig, "symbol", "UNKNOWN")),
+            "bbo_valid": False,
+            "bbo_reason": "SHADOW_DATA_UNAVAILABLE",
+            "error": type(exc).__name__,
+        }
+        _emit("COST_SHADOW_BBO_V3_COST_ONLY", payload)
+        return payload
+
+
 async def existing_candidate(db, candidate_id, *, guard):
     """Reuse durable research evidence on replay; never repeat its decision/observers."""
     guard()
@@ -466,13 +577,15 @@ async def existing_candidate(db, candidate_id, *, guard):
     if not _bbo_persistence_enabled() and candidate_id not in _PERSISTENCE_LOGGED:
         _PERSISTENCE_LOGGED.add(candidate_id)
         policy = str(row.get("bbo_persistence_policy") or "LEGACY_UNKNOWN")
-        stored_bbo_present = "bbo_cost_observation" in row
+        stored_bbo_present = (
+            "bbo_cost_observation" in row or "bbo_cost_only_observation" in row
+        )
         _emit("HARD_GATE_SHADOW_PERSISTENCE", {
             "candidate_id": candidate_id,
             "persist_enabled": False,
             "policy": policy,
             "stored_bbo_present": stored_bbo_present,
-            "proof_pass": policy == "REDACTED_V2" and not stored_bbo_present,
+            "proof_pass": policy in {"REDACTED_V2", "REDACTED_V3"} and not stored_bbo_present,
             "proof_source": "DB_READBACK_DEDUPE",
             **AUTHORITY,
         })
@@ -481,6 +594,7 @@ async def existing_candidate(db, candidate_id, *, guard):
     # the BBO persistence kill switch is disabled.
     if not _bbo_persistence_enabled():
         row.pop("bbo_cost_observation", None)
+        row.pop("bbo_cost_only_observation", None)
     return row
 
 
@@ -745,6 +859,9 @@ async def scan(engine, *, db=None, bbo_views=None):
                         "frontier_reason": frontier_reason,
                         "cost_snapshot": asdict(snap),
                     }
+                    row["bbo_cost_only_observation"] = _bbo_cost_only_observation(
+                        sig, snap, deepcopy((bbo_views or {}).get(symbol)), client=engine.client
+                    )
                     if decision is not None:
                         # Pure builder only; isolated table, no LIVE study counters.
                         row["champion_challenger"] = {**build_forward_record(sig, decision, captured_epoch=captured),
@@ -753,7 +870,8 @@ async def scan(engine, *, db=None, bbo_views=None):
                             sig, decision, deepcopy((bbo_views or {}).get(symbol)), client=engine.client)
                     _check(engine)
                     _emit("SHADOW_CANDIDATE_WHILE_LIVE_BLOCKED", {k: v for k, v in row.items()
-                          if k not in {"cost_snapshot", "champion_challenger", "bbo_cost_observation"}})
+                          if k not in {"cost_snapshot", "champion_challenger", "bbo_cost_observation",
+                                       "bbo_cost_only_observation"}})
                     _terminal_observation(row)
                     _emit("HARD_GATE_SHADOW_FRONTIER", {
                         "candidate_id": row["candidate_id"], "symbol": row["symbol"],
@@ -837,6 +955,8 @@ async def scan(engine, *, db=None, bbo_views=None):
             })
         _check(engine)
         await _maybe_emit_bbo_calibration(db)
+        _check(engine)
+        await _maybe_emit_bbo_calibration_v3(db)
         _check(engine)
         await _maybe_emit_min_order_frontier(db)
         _check(engine)

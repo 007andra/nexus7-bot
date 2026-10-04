@@ -314,6 +314,59 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assert_isolated()
 
 
+    async def test_min_order_block_still_collects_bbo_v3_cost_only(self):
+        blocked = {
+            "counterfactual": True,
+            "counterfactual_risk_pct": 0.0025,
+            "live_risk_authority": "BLOCKED_BY_DRAWDOWN_HARD_GATE",
+            "shadow_min_order_feasible": False,
+            "binding": "MIN_NOTIONAL_BINDING",
+            "risk_budget": 0.02189575,
+            "min_valid_qty": 1.0,
+            "risk_at_min_qty": 0.03,
+            "capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+            "capital_age_ms": 10.0,
+        }
+        cost_only = {
+            "cohort": "COST_ONLY",
+            "candidate_id": "shadow",
+            "bbo_valid": True,
+            "static_total_cost_bps": 29.0,
+            "live_total_cost_bps": 16.0,
+            "shadow_only": True,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        }
+        with patch.object(shadow, "counterfactual_min_order", return_value=blocked), \
+             patch.object(shadow, "_bbo_cost_only_observation",
+                          return_value=cost_only) as cost_obs:
+            out = await self.run_scan()
+        row = out["candidates"][0]
+        self.assertFalse(row["nexus_called"])
+        self.assertEqual(row["frontier_stage"], "MIN_ORDER")
+        self.assertEqual(row["bbo_cost_only_observation"]["cohort"], "COST_ONLY")
+        self.assertNotIn("bbo_cost_observation", row)
+        cost_obs.assert_called_once()
+        self.nexus.assert_not_called()
+        self.assert_isolated()
+
+
+    def test_bbo_v3_persistence_kill_switch_redacts_both_cohorts(self):
+        row = {
+            **AUTHORITY,
+            "candidate_id": "x",
+            "population": "HARD_GATE_SHADOW",
+            "live_eligible": False,
+            "bbo_cost_observation": {"x": 1},
+            "bbo_cost_only_observation": {"x": 2},
+        }
+        with patch.dict(os.environ, {"NEXUS_BBO_COST_SHADOW_PERSIST": "false"}):
+            stored = shadow._candidate_for_persistence(row)
+        self.assertNotIn("bbo_cost_observation", stored)
+        self.assertNotIn("bbo_cost_only_observation", stored)
+        self.assertEqual(stored["bbo_persistence_policy"], "REDACTED_V3")
+
+
     async def test_fresh_authenticated_cached_capital_used_when_v3_unconfirmed(self):
         self.e.risk.professional_snapshot.confirmed = False
         self.e.client._last_account_overview_snapshot = {
@@ -400,6 +453,54 @@ class Proof(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(report, await shadow._maybe_emit_bbo_calibration(self.db))
                 snap.assert_awaited_once()
                 self.assertIsNone(await shadow._maybe_emit_bbo_calibration(self.db))
+                snap.assert_awaited_once()
+        self.assert_isolated()
+
+
+    async def test_bbo_calibration_v3_is_dual_flag_gated_and_bounded(self):
+        from bot import bbo_calibration_v3
+        before = shadow._BBO_CALIBRATION_V3_LAST_EMIT
+        self.addCleanup(setattr, shadow, "_BBO_CALIBRATION_V3_LAST_EMIT", before)
+        shadow._BBO_CALIBRATION_V3_LAST_EMIT = 0.0
+        report = {
+            "status": "COLLECTING",
+            "cost_only_unique_candidates": 4,
+            "cost_only_valid_bbo": 4,
+            "target_min": 50,
+            "target_preferred": 100,
+            "cost_only_global": {
+                "static_cost_bps": {"mean": 29.0},
+                "bbo_cost_bps": {"mean": 16.0},
+                "cost_reduction_bps": {"mean": 13.0},
+                "bbo_age_ms": {"p95": 200.0},
+                "spread_bps": {"p95": 2.0},
+            },
+            "decision_impact_unique_candidates": 1,
+            "decision_impact_valid_bbo": 1,
+        }
+        with patch.object(bbo_calibration_v3, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(bbo_calibration_v3, "format_summary",
+                          return_value="[BBO_CALIBRATION_V3] status=COLLECTING"):
+            with patch.dict(os.environ, {
+                "NEXUS_BBO_COST_SHADOW_PERSIST": "false",
+                "NEXUS_BBO_CALIBRATION_V3": "true",
+            }):
+                self.assertIsNone(await shadow._maybe_emit_bbo_calibration_v3(self.db))
+                snap.assert_not_awaited()
+            with patch.dict(os.environ, {
+                "NEXUS_BBO_COST_SHADOW_PERSIST": "true",
+                "NEXUS_BBO_CALIBRATION_V3": "false",
+            }):
+                self.assertIsNone(await shadow._maybe_emit_bbo_calibration_v3(self.db))
+                snap.assert_not_awaited()
+            with patch.dict(os.environ, {
+                "NEXUS_BBO_COST_SHADOW_PERSIST": "true",
+                "NEXUS_BBO_CALIBRATION_V3": "true",
+            }):
+                self.assertIs(report, await shadow._maybe_emit_bbo_calibration_v3(self.db))
+                snap.assert_awaited_once()
+                self.assertIsNone(await shadow._maybe_emit_bbo_calibration_v3(self.db))
                 snap.assert_awaited_once()
         self.assert_isolated()
 
