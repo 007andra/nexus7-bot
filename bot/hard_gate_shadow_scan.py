@@ -27,6 +27,8 @@ _BBO_CALIBRATION_INTERVAL_S = 300.0
 _BBO_CALIBRATION_LAST_EMIT = 0.0
 _MIN_ORDER_FRONTIER_INTERVAL_S = 300.0
 _MIN_ORDER_FRONTIER_LAST_EMIT = 0.0
+_MIN_ORDER_UNIVERSE_INTERVAL_S = 300.0
+_MIN_ORDER_UNIVERSE_LAST_EMIT = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -106,6 +108,35 @@ async def _maybe_emit_min_order_frontier(db):
         return report
     except Exception as exc:
         _emit("MIN_ORDER_FRONTIER_AUDIT_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
+async def _maybe_emit_min_order_universe_efficiency(db, engine):
+    """Bounded cache-only universe research; no LIVE authority."""
+    global _MIN_ORDER_UNIVERSE_LAST_EMIT
+    from bot import min_order_universe_efficiency_v1 as universe
+    if not universe.enabled():
+        return None
+    now = time.monotonic()
+    if (_MIN_ORDER_UNIVERSE_LAST_EMIT > 0.0 and
+            now - _MIN_ORDER_UNIVERSE_LAST_EMIT < _MIN_ORDER_UNIVERSE_INTERVAL_S):
+        return None
+    _MIN_ORDER_UNIVERSE_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(universe.snapshot(db, engine), timeout=2.0)
+        log.info("%s", universe.format_summary(report))
+        log.info("%s", universe.format_top_symbols(report))
+        log.info("%s", universe.format_top_setups(report))
+        return report
+    except Exception as exc:
+        _emit("MIN_ORDER_UNIVERSE_EFFICIENCY_V1", {
             "status": "ERROR",
             "error": type(exc).__name__,
             "promotion_allowed": False,
@@ -808,6 +839,8 @@ async def scan(engine, *, db=None, bbo_views=None):
         await _maybe_emit_bbo_calibration(db)
         _check(engine)
         await _maybe_emit_min_order_frontier(db)
+        _check(engine)
+        await _maybe_emit_min_order_universe_efficiency(db, engine)
         _check(engine)
     except GateCleared:
         summary["shadow_scan_aborted_reason"] = "LIVE_HARD_GATE_CLEARED"
