@@ -438,6 +438,56 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assert_isolated()
 
 
+    async def test_min_order_universe_efficiency_is_flag_gated_and_bounded(self):
+        from bot import min_order_universe_efficiency_v1 as universe
+        before = shadow._MIN_ORDER_UNIVERSE_LAST_EMIT
+        self.addCleanup(setattr, shadow, "_MIN_ORDER_UNIVERSE_LAST_EMIT", before)
+        shadow._MIN_ORDER_UNIVERSE_LAST_EMIT = 0.0
+        report = {
+            "epoch_id": "REENTRY_V1_20261004_R2",
+            "status": "COLLECTING",
+            "universe_symbols": 25,
+            "active_epoch_candidates": 19,
+            "active_candidate_symbols": 8,
+            "active_setup_groups": 10,
+            "universe_status_counts": {
+                "CONDITIONAL": 18, "COST_BLOCK": 7, "MARGIN_BLOCK": 0, "UNAVAILABLE": 0,
+            },
+            "efficiency_counts": {
+                "CAPITAL_COMPATIBLE_OBSERVED": 0,
+                "STOP_WIDTH_BLOCK": 8,
+                "CONDITIONAL_NO_ACTIVE_CANDIDATE": 10,
+                "COST_BLOCK": 7,
+            },
+            "symbol_rows": [],
+            "setup_rows": [],
+        }
+        with patch.object(universe, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(universe, "format_summary",
+                          return_value="[MIN_ORDER_UNIVERSE_EFFICIENCY_V1] status=COLLECTING"), \
+             patch.object(universe, "format_top_symbols",
+                          return_value="[MIN_ORDER_UNIVERSE_EFFICIENCY_V1_TOP_SYMBOLS] NONE"), \
+             patch.object(universe, "format_top_setups",
+                          return_value="[MIN_ORDER_UNIVERSE_EFFICIENCY_V1_TOP_SETUPS] NONE"):
+            with patch.dict(os.environ, {"MIN_ORDER_UNIVERSE_EFFICIENCY_V1": "false"}):
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_universe_efficiency(self.db, self.e)
+                )
+                snap.assert_not_awaited()
+            with patch.dict(os.environ, {"MIN_ORDER_UNIVERSE_EFFICIENCY_V1": "true"}):
+                self.assertIs(
+                    report,
+                    await shadow._maybe_emit_min_order_universe_efficiency(self.db, self.e),
+                )
+                snap.assert_awaited_once()
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_universe_efficiency(self.db, self.e)
+                )
+                snap.assert_awaited_once()
+        self.assert_isolated()
+
+
     async def test_counterfactual_min_order_persists_exact_margin_context(self):
         out = await self.run_scan()
         row = out["candidates"][0]
