@@ -12,12 +12,14 @@ class FakeDB:
         self.candidates = list(candidates or [])
         self.outcomes = list(outcomes or [])
         self.exec_calls = 0
+        self.fetchall_calls = []
 
     async def _exec(self, *args, **kwargs):
         self.exec_calls += 1
         return None
 
     async def _fetchall(self, sql, params=()):
+        self.fetchall_calls.append((sql, params))
         if "FROM hard_gate_shadow_candidates_v1" in sql:
             return [{"payload": json.dumps(row)} for row in self.candidates]
         if "FROM hard_gate_shadow_outcomes_v1" in sql:
@@ -53,6 +55,28 @@ class RiskEpochShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "DISABLED")
         self.assertEqual(row["execution_effect"], "NONE")
         self.assertEqual(db.exec_calls, 0)
+
+    async def test_explicit_scan_start_epoch_is_persisted_before_enrollment(self):
+        db = SimpleNamespace(
+            _exec=AsyncMock(return_value=None),
+            _fetchall=AsyncMock(side_effect=[[], []]),
+        )
+        with patch.dict(
+            os.environ,
+            {"RISK_EPOCH_SHADOW_ID": "TEST_SCAN_START"},
+            clear=False,
+        ):
+            row = await epoch.ensure_epoch(
+                db,
+                self._engine(),
+                start_equity=8.75830036,
+                started_epoch=12345.25,
+            )
+        self.assertEqual(row["epoch_id"], "TEST_SCAN_START")
+        self.assertEqual(row["started_epoch"], 12345.25)
+        self.assertEqual(row["start_equity"], 8.75830036)
+        self.assertEqual(row["historical_hwm"], 22.7986938551)
+        self.assertEqual(row["execution_effect"], "NONE")
 
     async def test_two_candidate_sample_is_research_only_and_preserves_historical_hwm(self):
         candidates = [
@@ -120,6 +144,16 @@ class RiskEpochShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["nexus_allowed"], 1)
         self.assertEqual(row["observed_60m"], 1)
         self.assertEqual(row["approved_observed_60m"], 1)
+        outcome_queries = [
+            (sql, params) for sql, params in db.fetchall_calls
+            if "FROM hard_gate_shadow_outcomes_v1" in sql
+        ]
+        self.assertEqual(len(outcome_queries), 1)
+        self.assertIn("JOIN hard_gate_shadow_candidates_v1", outcome_queries[0][0])
+        self.assertEqual(
+            outcome_queries[0][1],
+            (epoch.POPULATION, epoch.POPULATION, 100.0),
+        )
         self.assertAlmostEqual(row["approved_60m_avg_gross_return"], 0.01)
         self.assertEqual(row["historical_hwm"], 22.7986938551)
         self.assertTrue(row["historical_hwm_immutable"])
