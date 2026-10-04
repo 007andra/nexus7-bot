@@ -44,10 +44,50 @@ def _finite(value):
     return out if math.isfinite(out) else None
 
 
+def _reason_category(reason):
+    upper = str(reason or "").upper()
+    if "EV NEGATIVO" in upper or "EXPECTED VALUE" in upper:
+        return "EV_NEGATIVE"
+    if "R:R" in upper or "RR " in upper:
+        return "RR_BELOW_MIN"
+    if "SCORE" in upper or "THRESHOLD" in upper:
+        return "SCORE"
+    if "DADO" in upper or "DATA" in upper or "QUALIDADE" in upper:
+        return "DATA"
+    if "REGIME" in upper or "TENDÊNCIA" in upper or "TENDENCIA" in upper:
+        return "REGIME"
+    return "OTHER"
+
+
+def _normalize_record(obs):
+    row = dict(obs)
+    score = row.get("score_snapshot")
+    score = score if isinstance(score, dict) else {}
+    effective = {
+        "confidence": _finite(score.get("fusion_confidence")),
+        "risk_reward": _finite(score.get("rr_net")),
+        "expected_value": _finite(score.get("ev_pct")),
+    }
+    for key, value in effective.items():
+        if value is not None:
+            row[key] = value
+    row["reason_category"] = str(
+        row.get("reason_category") or _reason_category(row.get("reason"))
+    )
+    row["metric_source"] = (
+        "SCORE_SNAPSHOT_PRE_VETO"
+        if any(value is not None for value in effective.values())
+        else str(row.get("metric_source") or "DECISION_FIELDS")
+    )
+    return row
+
+
 def build_observation(sig, decision, minimum_order, *, captured_epoch):
     reasoning = list(getattr(decision, "reasoning", None) or [])
     score = getattr(decision, "_bgx_score_snapshot", None)
-    return {
+    score = score if isinstance(score, dict) else {}
+    reason = str(reasoning[-1] if reasoning else "NONE")[:240]
+    row = {
         **AUTHORITY,
         "cohort": "MIN_ORDER_BLOCKED_COUNTERFACTUAL_NEXUS",
         "candidate_id": str(sig.candidate_id),
@@ -62,8 +102,9 @@ def build_observation(sig, decision, minimum_order, *, captured_epoch):
         "setup_quality": _finite(getattr(decision, "setup_quality", None)),
         "risk_reward": _finite(getattr(decision, "risk_reward", None)),
         "expected_value": _finite(getattr(decision, "expected_value", None)),
-        "reason": str(reasoning[-1] if reasoning else "NONE")[:240],
-        "score_snapshot": score if isinstance(score, dict) else None,
+        "reason": reason,
+        "reason_category": _reason_category(reason),
+        "score_snapshot": score or None,
         "required_equity_at_min_qty": _finite(
             minimum_order.get("required_equity_at_min_qty")
         ),
@@ -74,6 +115,7 @@ def build_observation(sig, decision, minimum_order, *, captured_epoch):
         "canonical_nexus_allowed": False,
         "risk_epoch_traversal_credit": False,
     }
+    return _normalize_record(row)
 
 
 def error_observation(sig, minimum_order, *, captured_epoch, error):
@@ -113,7 +155,7 @@ def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=N
             continue
         if obs.get("risk_epoch_traversal_credit") is not False:
             continue
-        records.append(dict(obs))
+        records.append(_normalize_record(obs))
 
     by_id = {str(r.get("candidate_id")): r for r in records if r.get("candidate_id")}
     records = list(by_id.values())
@@ -132,6 +174,11 @@ def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=N
     approved_observed = [
         outcome_by_id[cid] for cid in allowed_ids if cid in outcome_by_id
     ]
+
+    rejection_reasons = defaultdict(int)
+    for row in records:
+        if row.get("execution_allowed") is not True and row.get("status") != "ERROR":
+            rejection_reasons[str(row.get("reason_category") or "OTHER")] += 1
 
     groups = defaultdict(lambda: {"evaluated": 0, "allowed": 0})
     for row in records:
@@ -178,6 +225,7 @@ def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=N
         "avg_required_equity": _mean(
             r.get("required_equity_at_min_qty") for r in records
         ),
+        "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "observed_60m": n60,
         "approved_observed_60m": len(approved_observed),
         "approved_60m_avg_gross_return": _mean(
@@ -250,6 +298,7 @@ def format_summary(report):
         f"avg_rr={_fmt(report['avg_risk_reward'], 4)} "
         f"avg_ev={_fmt(report['avg_expected_value'], 4)} "
         f"avg_required_equity={_fmt(report['avg_required_equity'], 4)} "
+        f"rejection_reasons={','.join(f'{k}:{v}' for k, v in report.get('rejection_reasons', {}).items()) or 'NONE'} "
         f"observed_60m={report['observed_60m']} "
         f"approved_observed_60m={report['approved_observed_60m']} "
         f"approved_60m_avg_return={_fmt(report['approved_60m_avg_gross_return'], 6)} "
