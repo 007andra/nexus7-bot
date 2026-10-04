@@ -74,7 +74,7 @@ def _loads(raw):
     return json.loads(raw)
 
 
-async def _ensure_epoch(db, engine, start_equity: float):
+async def _ensure_epoch(db, engine, start_equity: float, *, started_epoch: float | None = None):
     await db._exec(_META)
     eid = epoch_id()
     rows = await db._fetchall(
@@ -98,7 +98,7 @@ async def _ensure_epoch(db, engine, start_equity: float):
 
     row = {
         "epoch_id": eid,
-        "started_epoch": time.time(),
+        "started_epoch": float(time.time() if started_epoch is None else started_epoch),
         "start_equity": start_equity,
         "historical_hwm": hwm,
         "lifetime_drawdown": dd,
@@ -122,6 +122,13 @@ async def _ensure_epoch(db, engine, start_equity: float):
         (eid,),
     )
     return _loads(rows[0]) if rows else row
+
+
+async def ensure_epoch(db, engine, *, start_equity: float, started_epoch: float | None = None) -> dict:
+    """Create/read the immutable epoch baseline before candidate enrollment."""
+    return await _ensure_epoch(
+        db, engine, float(start_equity), started_epoch=started_epoch
+    )
 
 
 def _candidate_flags(row: dict):
@@ -173,9 +180,11 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
     outcomes = {}
     if ids:
         out_rows = await db._fetchall(
-            "SELECT candidate_id,horizon,payload FROM hard_gate_shadow_outcomes_v1 "
-            "WHERE population=?",
-            (POPULATION,),
+            "SELECT o.candidate_id,o.horizon,o.payload "
+            "FROM hard_gate_shadow_outcomes_v1 o "
+            "JOIN hard_gate_shadow_candidates_v1 c ON c.candidate_id=o.candidate_id "
+            "WHERE o.population=? AND c.population=? AND c.captured_epoch>=?",
+            (POPULATION, POPULATION, started),
         )
         for raw in out_rows or []:
             if hasattr(raw, "keys"):
