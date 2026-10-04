@@ -40,7 +40,8 @@ _rest_purpose = contextvars.ContextVar("bgx_truth_rest_purpose", default="OTHER"
 
 
 def enabled() -> bool:
-    return _ENABLED
+    from bot.hard_gate_shadow_context import active
+    return _ENABLED and not active()
 
 
 def runtime_instance_id() -> str:
