@@ -804,7 +804,10 @@ async def scan(engine, *, db=None, bbo_views=None):
                **dict.fromkeys(("symbols_scanned", "strategy_signals", "fresh_candidates",
                                 "dedupe_reused", "pullback_pass", "pullback_blocked",
                                 "min_order_feasible", "nexus_evaluated", "nexus_approved",
-                                "nexus_rejected", "additional_rest_calls_per_scan"), 0)}
+                                "nexus_rejected", "counterfactual_nexus_evaluated",
+                                "counterfactual_nexus_allowed", "counterfactual_nexus_rejected",
+                                "counterfactual_nexus_errors",
+                                "additional_rest_calls_per_scan"), 0)}
     records = []
     try:
         from bot.config import cfg
