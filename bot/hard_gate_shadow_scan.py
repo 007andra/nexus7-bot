@@ -41,14 +41,10 @@ def enabled():
 
 
 def _bbo_persistence_enabled():
-    """Fail-closed persistence authority for BBO observations."""
-    try:
-        runtime = sys.modules.get("bot.bbo_cost_shadow_runtime")
-        if runtime is None:
-            from bot import bbo_cost_shadow_runtime as runtime
-        return bool(runtime.persist_enabled())
-    except Exception:
-        return False
+    """Fail-closed persistence authority without importing the BBO runtime."""
+    return os.environ.get(
+        "NEXUS_BBO_COST_SHADOW_PERSIST", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _candidate_for_persistence(row):
