@@ -295,6 +295,9 @@ _SCORE_LOG_MAX = 300
 
 def record_score(symbol: str, combined: int, s4h: int, s1h: int, s15: int):
     """Registra um score avaliado no buffer de diagnóstico."""
+    from bot.hard_gate_shadow_context import active
+    if active():
+        return
     global _SCORE_LOG
     _SCORE_LOG.append({
         "symbol": symbol, "score": combined,

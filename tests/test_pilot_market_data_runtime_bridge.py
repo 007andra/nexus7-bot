@@ -58,6 +58,13 @@ class PilotMarketDataRuntimeBridgeReproduction(unittest.TestCase):
         self.assertTrue(result["ws_urls"], result)
         for url in result["ws_urls"]:
             self.assertEqual(url, "wss://fstream.binance.com/market/stream", result)
+        # The only other connection allowed is the observation-only BBO cost
+        # shadow: routed /public, bookTicker streams only, never /market.
+        for url in result.get("shadow_ws_urls", []):
+            base, _, query = url.partition("?streams=")
+            self.assertEqual(base, "wss://fstream.binance.com/public/stream", result)
+            streams = query.split("/")
+            self.assertTrue(streams and all(s.endswith("@bookTicker") for s in streams), result)
 
     def test_incident_fresh_public_market_data_passes_gate_11_in_real_runtime(self):
         result = run_harness("fresh_public_market_data")

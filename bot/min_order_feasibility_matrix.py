@@ -158,7 +158,27 @@ def build_matrix(engine, price_map: dict[str, float]) -> list[dict]:
     return rows
 
 
+def enabled():
+    return os.environ.get("MIN_ORDER_FEASIBILITY_MATRIX", "false").lower() == "true"
+
+
+def shadow_record(row):
+    """Classify the existing counterfactual result; never perform LIVE sizing."""
+    from bot.hard_gate_shadow_context import AUTHORITY, POPULATION
+    if row.get("population") != POPULATION or row.get("counterfactual") is not True:
+        raise ValueError("counterfactual research population required")
+    fields = ("candidate_id", "symbol", "counterfactual", "counterfactual_risk_pct",
+              "risk_budget", "min_valid_qty", "risk_at_min_qty", "binding",
+              "shadow_min_order_feasible", "live_risk_authority")
+    return {**{k: row[k] for k in fields}, **AUTHORITY, "observability_only": True}
+
+
 def log_once(engine, price_map: dict[str, float], log) -> None:
+    if not enabled():
+        return
+    from bot.hard_gate_shadow_context import active
+    if active():
+        return  # shadow uses an explicit counterfactual row, not LIVE budget math
     if getattr(engine, "_min_order_feasibility_matrix_logged", False):
         return
     try:

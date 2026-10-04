@@ -38,6 +38,9 @@ def _stage_wrapper(Analyzer, flag: str, stage: str, authority: str):
     original = Analyzer.analyze_mtf
 
     def wrapped(self, symbol, k15, k1h, k4h, *args, **kwargs):
+        from bot.hard_gate_shadow_context import active
+        if active():
+            return original(self, symbol, k15, k1h, k4h, *args, **kwargs)
         result = original(self, symbol, k15, k1h, k4h, *args, **kwargs)
         truth.emit_stage_result(stage, authority, result, symbol=symbol)
         _remember_signal(result)
@@ -66,6 +69,9 @@ def install_analysis_authority_inner(Analyzer):
     original = Analyzer.analyze_mtf
 
     def wrapped(self, symbol, k15, k1h, k4h, *args, **kwargs):
+        from bot.hard_gate_shadow_context import active
+        if active():
+            return original(self, symbol, k15, k1h, k4h, *args, **kwargs)
         meta = truth.analysis_cache_meta()
         raw = meta.get("_raw_inputs", {"15": k15, "60": k1h, "240": k4h})
         truth.capture_analysis_input(
@@ -345,6 +351,9 @@ def install_marketdata_outer(Analyzer, TradingEngine):
     original = Analyzer.analyze_mtf
 
     def wrapped(self, symbol, k15, k1h, k4h, *args, **kwargs):
+        from bot.hard_gate_shadow_context import active
+        if active():
+            return original(self, symbol, k15, k1h, k4h, *args, **kwargs)
         evaluation_id = truth.new_evaluation_id("POLICY_A_STRATEGY", symbol)
         client = _ACTIVE_CLIENT.get()
         raw_inputs = {"15": list(k15), "60": list(k1h), "240": list(k4h)}

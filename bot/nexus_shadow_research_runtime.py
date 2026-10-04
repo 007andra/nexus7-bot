@@ -163,6 +163,8 @@ async def persist_snapshot(db, row: dict[str, Any]) -> bool:
 
 
 async def _capture_safe(engine, sig, decision, log) -> None:
+    if getattr(sig, "population", None) == "HARD_GATE_SHADOW":
+        return  # isolated hard_gate_shadow_candidates_v1 owns this population
     candidate = _candidate_id(sig)
     persisted = False
     audit_observed = False

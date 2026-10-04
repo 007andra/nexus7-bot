@@ -206,8 +206,29 @@ class _RepeatedBlockFilter(logging.Filter):
             # malfunctions, and never affect trading/risk state.
             return True
 
+# One fixed routing implementation, installed when this module initializes.
+# No handler/filter/level mutation occurs on entry to or exit from research.
+# Shadow details never reach LIVE funnel, terminal, radar or Telegram handlers.
+class _ResearchContextLogger(logging.Logger):
+    def _log(self, level, msg, args, **kwargs):
+        from bot.hard_gate_shadow_context import active
+        if active():
+            shadow_log.log(level, "[HARD_GATE_SHADOW_DETAIL] " + str(msg), *args, **kwargs)
+            return
+        return super()._log(level, msg, args, **kwargs)
+
+
+shadow_log = logging.Logger("nexus-hard-gate-shadow", logging.INFO)
+_shadow_handler = logging.StreamHandler(sys.stdout)
+_shadow_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s"))
+shadow_log.addHandler(_shadow_handler)
+shadow_log.propagate = False
+
+
 def _make(name):
     lvl=getattr(logging,os.environ.get("LOG_LEVEL","INFO").upper(),logging.INFO); lg=logging.getLogger(name)
+    if not isinstance(lg, _ResearchContextLogger):
+        lg.__class__ = _ResearchContextLogger
     if not lg.handlers:
         lg.setLevel(lvl); h=logging.StreamHandler(sys.stdout); h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s",datefmt="%H:%M:%S")); h.addFilter(_RepeatedBlockFilter()); lg.addHandler(h); lg.addHandler(_DecisionTelegramHandler()); lg.propagate=False
     return lg
