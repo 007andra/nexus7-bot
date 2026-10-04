@@ -1033,6 +1033,65 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assert_isolated()
 
 
+    async def test_counterfactual_gate_attribution_is_flag_gated_and_bounded(self):
+        from bot import min_order_counterfactual_gate_attribution_v1 as attribution
+        before = shadow._MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT
+        self.addCleanup(
+            setattr, shadow, "_MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT", before
+        )
+        shadow._MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT = 0.0
+        report = {
+            "epoch_id": "REENTRY_V1_20261004_R2",
+            "status": "ATTRIBUTION_ACTIVE_RESEARCH_ONLY",
+            "evaluated": 9,
+            "allowed": 0,
+            "rejected": 9,
+            "thresholds": {"rr_net_min": 1.6},
+            "ev_negative_rejected": 5,
+            "rr_below_min_positive_ev_rejected": 4,
+            "rr_positive_ev_shortfall": {
+                "n": 4, "mean": 0.3, "median": 0.25, "min": 0.1, "max": 0.6,
+            },
+            "reason_rows": [],
+            "closest_rr_rejects": [],
+            "observed_60m": 0,
+        }
+        with patch.object(attribution, "snapshot", new_callable=AsyncMock,
+                          return_value=report) as snap, \
+             patch.object(attribution, "format_summary",
+                          return_value="[MIN_ORDER_COUNTERFACTUAL_GATE_ATTRIBUTION_V1] ok"), \
+             patch.object(attribution, "format_closest",
+                          return_value="[MIN_ORDER_COUNTERFACTUAL_GATE_ATTRIBUTION_V1_CLOSEST_RR] NONE"):
+            with patch.dict(
+                os.environ,
+                {"MIN_ORDER_COUNTERFACTUAL_GATE_ATTRIBUTION_V1": "false"},
+            ):
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_counterfactual_gate_attribution(
+                        self.db
+                    )
+                )
+                snap.assert_not_awaited()
+            with patch.dict(
+                os.environ,
+                {"MIN_ORDER_COUNTERFACTUAL_GATE_ATTRIBUTION_V1": "true"},
+            ):
+                self.assertIs(
+                    report,
+                    await shadow._maybe_emit_min_order_counterfactual_gate_attribution(
+                        self.db
+                    ),
+                )
+                snap.assert_awaited_once()
+                self.assertIsNone(
+                    await shadow._maybe_emit_min_order_counterfactual_gate_attribution(
+                        self.db
+                    )
+                )
+                snap.assert_awaited_once()
+        self.assert_isolated()
+
+
     async def test_logger_concurrent_task_configuration_and_semantics(self):
         from bot.logger import log, shadow_log
         entered, release = threading.Event(), threading.Event()
