@@ -198,8 +198,20 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
             if row.get("outcome") == "OBSERVED":
                 outcomes.setdefault(horizon, []).append(row)
 
-    observed60 = outcomes.get(60, [])
-    observed240 = outcomes.get(240, [])
+    all_observed60 = outcomes.get(60, [])
+    all_observed240 = outcomes.get(240, [])
+    traversed_ids = {
+        row.get("candidate_id") for row, f in zip(candidates, flags)
+        if f["traversed_to_nexus"] and row.get("candidate_id")
+    }
+    observed60 = [
+        row for row in all_observed60
+        if row.get("candidate_id") in traversed_ids
+    ]
+    observed240 = [
+        row for row in all_observed240
+        if row.get("candidate_id") in traversed_ids
+    ]
     approved_ids = {
         row.get("candidate_id") for row, f in zip(candidates, flags)
         if f["nexus_allowed"] and row.get("candidate_id")
@@ -235,6 +247,8 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
         "nexus_allowed": sum(f["nexus_allowed"] for f in flags),
         "observed_60m": observed_60m_count,
         "observed_240m": len(observed240),
+        "all_observed_60m": len(all_observed60),
+        "all_observed_240m": len(all_observed240),
         "approved_observed_60m": len(approved60),
         "approved_60m_avg_gross_return": avg(approved60, "future_return"),
         "approved_60m_avg_mfe": avg(approved60, "MFE"),
@@ -258,7 +272,8 @@ def format_log(row: dict) -> str:
         "epoch_id", "status", "start_equity", "historical_hwm", "lifetime_drawdown",
         "target_candidates", "unique_candidates", "capital_confirmed_candidates",
         "min_order_feasible_candidates", "traversed_to_nexus", "nexus_allowed",
-        "observed_60m", "observed_240m", "approved_observed_60m",
+        "observed_60m", "observed_240m", "all_observed_60m", "all_observed_240m",
+        "approved_observed_60m",
         "approved_60m_avg_gross_return", "approved_60m_avg_mfe",
         "approved_60m_avg_mae", "promotion_allowed", "promotion_reason",
         "decision_effect", "execution_effect",
