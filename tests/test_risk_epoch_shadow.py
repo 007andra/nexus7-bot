@@ -162,6 +162,66 @@ class RiskEpochShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["execution_effect"], "NONE")
         self.assertIsNone(row["hypothetical_realized_equity"])
 
+    async def test_pre_nexus_outcomes_do_not_satisfy_promotion_outcome_sample(self):
+        baseline = {
+            "epoch_id": "REENTRY_V1",
+            "started_epoch": 100.0,
+            "start_equity": 8.75830036,
+            "historical_hwm": 22.7986938551,
+            "lifetime_drawdown": 0.615842012018,
+            **epoch.EPOCH_AUTHORITY,
+        }
+        candidates = [
+            {
+                "candidate_id": "TRAVERSED",
+                "captured_epoch": 110.0,
+                "pullback_pass": True,
+                "production_equivalent_funnel_result": True,
+                "capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+                "shadow_min_order_feasible": True,
+                "nexus_called": True,
+                "nexus_allowed": False,
+            },
+            {
+                "candidate_id": "PRE_NEXUS",
+                "captured_epoch": 120.0,
+                "pullback_pass": True,
+                "production_equivalent_funnel_result": True,
+                "capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+                "shadow_min_order_feasible": False,
+                "nexus_called": False,
+                "nexus_allowed": False,
+            },
+        ]
+        outcomes = [
+            {
+                "candidate_id": "PRE_NEXUS",
+                "horizon": 60,
+                "payload": {
+                    "outcome": "OBSERVED",
+                    "future_return": 0.02,
+                    "MFE": 0.03,
+                    "MAE": -0.004,
+                },
+            }
+        ]
+        db = FakeDB(candidates=candidates, outcomes=outcomes)
+        with patch.dict(
+            os.environ,
+            {
+                "RISK_EPOCH_SHADOW_V1": "true",
+                "RISK_EPOCH_SHADOW_TARGET_CANDIDATES": "1",
+            },
+            clear=False,
+        ), patch.object(epoch, "_ensure_epoch", AsyncMock(return_value=baseline)):
+            row = await epoch.snapshot(db, self._engine(), start_equity=8.75830036)
+        self.assertEqual(row["traversed_to_nexus"], 1)
+        self.assertEqual(row["all_observed_60m"], 1)
+        self.assertEqual(row["observed_60m"], 0)
+        self.assertEqual(row["status"], "PIPELINE_SAMPLE_COMPLETE_OUTCOMES_PENDING")
+        self.assertFalse(row["promotion_allowed"])
+
+
     async def test_pipeline_complete_waits_for_outcomes(self):
         baseline = {
             "epoch_id": "REENTRY_V1",
