@@ -10,6 +10,7 @@ No exchange mutation, release state, or execution permission is changed here.
 from __future__ import annotations
 
 import math
+import time
 
 from bot import account_balance_semantics
 from bot import capital_flow_reconciliation as capital_flows
@@ -94,6 +95,17 @@ class TradingEngine(CoreTradingEngine):
                 return
 
             state = await account_balance_semantics.read_account_state(self.client)
+
+            # Publish the exact authenticated read already performed by this
+            # runtime loop for cache-only research/observability consumers.
+            # This adds no exchange I/O and grants no execution authority.
+            snapshot = dict(state)
+            snapshot["_observed_at"] = time.time()
+            try:
+                self.client._last_account_overview_snapshot = snapshot
+            except (AttributeError, TypeError):
+                pass
+
             equity = float(state["equity"])
             self.risk.update(equity)
 
