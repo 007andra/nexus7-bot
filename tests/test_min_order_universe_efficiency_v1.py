@@ -140,7 +140,7 @@ class SnapshotIsolation(unittest.TestCase):
                 self.calls.append(symbol)
                 return {"lastPrice": "123.45"}
 
-        engine = SimpleNamespace(client=Client())
+        engine = SimpleNamespace(client=Client(), daily_target_hit=False)
         front = {
             "epoch_id": "REENTRY_V1_20261004_R2",
             "started_epoch": 1000.0,
@@ -154,14 +154,35 @@ class SnapshotIsolation(unittest.TestCase):
         with patch.object(frontier, "snapshot", new_callable=AsyncMock,
                           return_value=front) as fs, \
              patch.object(matrix, "build_matrix", return_value=matrix_rows) as bm, \
-             patch("bot.config.cfg.SYMBOLS", ["BTCUSDT"]):
+             patch("bot.config.cfg.SYMBOLS", ["BTCUSDT"]), \
+             patch("bot.config.cfg.MAX_RISK_PCT", 0.0025):
             report = asyncio.run(eff.snapshot(object(), engine))
         fs.assert_awaited_once()
         bm.assert_called_once()
         _, price_map = bm.call_args.args
         self.assertEqual(price_map, {"BTCUSDT": 123.45})
+        self.assertEqual(bm.call_args.kwargs["risk_pct_override"], 0.0025)
         self.assertEqual(engine.client.calls, ["BTCUSDT"])
         self.assertEqual(report["universe_symbols"], 1)
+
+
+    def test_snapshot_uses_post_target_counterfactual_risk_when_target_hit(self):
+        from bot import min_order_feasibility_matrix as matrix
+        from bot import min_order_frontier_audit_v1 as frontier
+
+        class Client:
+            def get_cached_ticker(self, symbol):
+                return {"lastPrice": "1.0"}
+
+        engine = SimpleNamespace(client=Client(), daily_target_hit=True)
+        front = {"epoch_id": "R2", "records": []}
+        with patch.object(frontier, "snapshot", new_callable=AsyncMock,
+                          return_value=front), \
+             patch.object(matrix, "build_matrix", return_value=[]) as bm, \
+             patch("bot.config.cfg.SYMBOLS", ["XUSDT"]), \
+             patch("bot.config.cfg.POST_TARGET_RISK", 0.001):
+            asyncio.run(eff.snapshot(object(), engine))
+        self.assertEqual(bm.call_args.kwargs["risk_pct_override"], 0.001)
 
     def test_formatters_restate_non_authority(self):
         report = eff.build_report(
