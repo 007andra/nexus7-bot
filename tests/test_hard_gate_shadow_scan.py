@@ -187,8 +187,9 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.analyzer.assert_not_called()
 
     async def test_authority_and_degraded_fidelity(self):
-        from bot import market_data
-        with patch.object(market_data, "get_market_sentiment", side_effect=RuntimeError("no cache")):
+        from bot import market_data, execution_cost
+        with patch.object(market_data, "get_market_sentiment", side_effect=RuntimeError("no cache")), \
+             patch.object(execution_cost, "cached_taker_fee", return_value=None):
             row = (await self.run_scan())["candidates"][0]
         for key, value in AUTHORITY.items():
             self.assertEqual(row[key], value)
