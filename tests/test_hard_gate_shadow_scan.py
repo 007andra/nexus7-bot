@@ -84,8 +84,10 @@ def engine(symbols=None):
     obj.risk = NS(drawdown=.6158, _peak_equity=22.7987, _ready=True,
                   professional_snapshot=NS(confirmed=True, capital=NS(equity=8.7583, available_collateral=8.7583)))
     obj.viable_symbols = symbols or ["SOLUSDT"]
+    # Keep the default fixture feasible under the conservative 0.25% risk budget
+    # so tests that exercise NEXUS are testing the post-min-order path explicitly.
     obj.instruments = {s: {"quantityUnit": "BASE_ASSET", "qtyStep": "0.001", "minQty": "0.001",
-                          "minNotional": "5", "multiplier": 1.0} for s in obj.viable_symbols}
+                          "minNotional": "1", "multiplier": 1.0} for s in obj.viable_symbols}
     obj.positions = {}
     obj._cooldown = {"SOLUSDT": 123}
     obj._oi_hist = {"SOLUSDT": 100}
@@ -166,6 +168,8 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         out = await self.run_scan()
         self.assertEqual(out["summary"]["nexus_approved"], 1)
         self.assertEqual(len(out["candidates"]), 1)
+        self.assertTrue(out["candidates"][0]["shadow_min_order_feasible"])
+        self.assertTrue(out["candidates"][0]["nexus_called"])
         self.assert_isolated()
         print("FORCED_NEXUS_APPROVAL_EXECUTION_COUNTERS=" + json.dumps({k: v.call_count for k, v in self.counters.items()}, sort_keys=True))
 
@@ -273,8 +277,40 @@ class Proof(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_capital_is_unknown(self):
         self.e.risk.professional_snapshot.confirmed = False
-        row = (await self.run_scan())["candidates"][0]
+        out = await self.run_scan()
+        row = out["candidates"][0]
         self.assertIsNone(row["shadow_min_order_feasible"])
+        self.assertFalse(row["nexus_called"])
+        self.assertEqual(row["frontier_stage"], "CAPITAL")
+        self.assertEqual(out["summary"]["nexus_evaluated"], 0)
+        self.nexus.assert_not_called()
+
+
+    async def test_min_order_block_prevents_nexus_call(self):
+        blocked = {
+            "counterfactual": True,
+            "counterfactual_risk_pct": 0.0025,
+            "live_risk_authority": "BLOCKED_BY_DRAWDOWN_HARD_GATE",
+            "shadow_min_order_feasible": False,
+            "binding": "MIN_NOTIONAL_BINDING",
+            "risk_budget": 0.02189575,
+            "min_valid_qty": 1.0,
+            "risk_at_min_qty": 0.03,
+            "capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+            "capital_age_ms": 10.0,
+        }
+        with patch.object(shadow, "counterfactual_min_order", return_value=blocked):
+            out = await self.run_scan()
+        row = out["candidates"][0]
+        self.assertFalse(row["shadow_min_order_feasible"])
+        self.assertFalse(row["nexus_called"])
+        self.assertEqual(row["frontier_stage"], "MIN_ORDER")
+        self.assertEqual(row["frontier_reason"], "MIN_NOTIONAL_BINDING")
+        self.assertEqual(out["summary"]["nexus_evaluated"], 0)
+        self.assertEqual(out["summary"]["nexus_approved"], 0)
+        self.assertEqual(out["summary"]["nexus_rejected"], 0)
+        self.nexus.assert_not_called()
+        self.assert_isolated()
 
 
     async def test_fresh_authenticated_cached_capital_used_when_v3_unconfirmed(self):
@@ -334,6 +370,21 @@ class Proof(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_executability_frontier_distinguishes_min_order_and_nexus_rr(self):
+        self.assertFalse(shadow._production_equivalent_nexus_eligible(
+            {"capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+             "shadow_min_order_feasible": False},
+            pullback_pass=True, funnel=True,
+        ))
+        self.assertFalse(shadow._production_equivalent_nexus_eligible(
+            {"capital_source": "UNCONFIRMED",
+             "shadow_min_order_feasible": None},
+            pullback_pass=True, funnel=True,
+        ))
+        self.assertTrue(shadow._production_equivalent_nexus_eligible(
+            {"capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
+             "shadow_min_order_feasible": True},
+            pullback_pass=True, funnel=True,
+        ))
         stage, reason = shadow._executability_frontier(
             {"capital_source": "AUTHENTICATED_ACCOUNT_CACHE",
              "shadow_min_order_feasible": False, "binding": "MIN_NOTIONAL_BINDING"},

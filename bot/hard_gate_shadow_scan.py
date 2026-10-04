@@ -278,16 +278,28 @@ def _decide(sig, klines, ticker, snap, features):
         _COST_CONTEXT.reset(token)
 
 
+def _production_equivalent_nexus_eligible(minimum_order, *, pullback_pass, funnel):
+    """Mirror the pre-NEXUS production-equivalent gate order in shadow."""
+    return (
+        pullback_pass
+        and funnel
+        and minimum_order.get("capital_source") not in (None, "UNCONFIRMED")
+        and minimum_order.get("shadow_min_order_feasible") is True
+    )
+
+
 def _executability_frontier(minimum_order, *, pullback_pass, funnel, decision):
     """Classify the first blocker in production-equivalent pipeline order."""
     if not pullback_pass:
         return "PULLBACK", "PULLBACK_BLOCKED"
     if not funnel:
         return "FUNNEL", "PRODUCTION_EQUIVALENT_FUNNEL_BLOCKED"
-    if minimum_order.get("capital_source") == "UNCONFIRMED":
+    if minimum_order.get("capital_source") in (None, "UNCONFIRMED"):
         return "CAPITAL", "CAPITAL_UNCONFIRMED"
-    if minimum_order.get("shadow_min_order_feasible") is False:
-        return "MIN_ORDER", str(minimum_order.get("binding") or "MINIMUM_ORDER")
+    if minimum_order.get("shadow_min_order_feasible") is not True:
+        return "MIN_ORDER", str(
+            minimum_order.get("binding") or "MIN_ORDER_FEASIBILITY_UNKNOWN"
+        )
     if decision is None:
         return "NEXUS", "NOT_EVALUATED"
     if getattr(decision, "execution_allowed", False) is True:
@@ -598,7 +610,9 @@ async def scan(engine, *, db=None, bbo_views=None):
                     sig.score = adjusted
                     decision = None
                     _check(engine)
-                    if passed and funnel:
+                    if _production_equivalent_nexus_eligible(
+                        minimum_order, pullback_pass=passed, funnel=funnel
+                    ):
                         decision = await _compute(_decide, sig, klines, ticker, snap, features)
                         _check(engine)
                         summary["nexus_evaluated"] += 1
