@@ -119,6 +119,49 @@ def _cost(sig, ticker):
     return snap
 
 
+def _confirmed_shadow_capital(engine):
+    """Return read-only confirmed capital without performing exchange I/O.
+
+    Prefer the authenticated account snapshot already published by the LIVE
+    runtime. It carries an observation timestamp and is subject to the same
+    freshness ceiling used by the pilot exposure-capacity gate. RiskManagerV3
+    remains an acceptable fallback for offline/test contexts when it is already
+    confirmed. Nothing here updates risk state or authorizes execution.
+    """
+    raw = getattr(getattr(engine, "client", None), "_last_account_overview_snapshot", None)
+    if isinstance(raw, dict):
+        try:
+            observed_at = float(raw.get("_observed_at"))
+            max_age = float(os.environ.get("PILOT_MAX_ACCOUNT_SNAPSHOT_AGE_S", "60"))
+            age = time.time() - observed_at
+            if (
+                math.isfinite(observed_at)
+                and math.isfinite(max_age)
+                and max_age > 0
+                and math.isfinite(age)
+                and 0 <= age <= max_age
+            ):
+                from bot.professional_risk import capital_state_from_account_overview
+                capital = capital_state_from_account_overview(raw)
+                equity = float(capital.equity)
+                available = float(capital.available_collateral)
+                if all(math.isfinite(x) and x > 0 for x in (equity, available)):
+                    return equity, available, "AUTHENTICATED_ACCOUNT_CACHE", age * 1000.0
+        except (TypeError, ValueError, ArithmeticError):
+            pass
+
+    cached = getattr(getattr(engine, "risk", None), "professional_snapshot", None)
+    if cached is not None and getattr(cached, "confirmed", False):
+        try:
+            equity = float(cached.capital.equity)
+            available = float(cached.capital.available_collateral)
+            if all(math.isfinite(x) and x > 0 for x in (equity, available)):
+                return equity, available, "RISK_V3_CONFIRMED", None
+        except (TypeError, ValueError, ArithmeticError, AttributeError):
+            pass
+    return None
+
+
 def counterfactual_min_order(engine, sig, snap):
     from bot.config import cfg
     from bot.sizing_decomposition import decompose
@@ -130,12 +173,13 @@ def counterfactual_min_order(engine, sig, snap):
     result = {"counterfactual": True, "counterfactual_risk_pct": risk_pct,
               "live_risk_authority": "BLOCKED_BY_DRAWDOWN_HARD_GATE",
               "shadow_min_order_feasible": None, "binding": "CAPITAL_UNCONFIRMED",
-              "risk_budget": None, "min_valid_qty": None, "risk_at_min_qty": None}
-    cached = getattr(engine.risk, "professional_snapshot", None)
-    if cached is None or not getattr(cached, "confirmed", False):
+              "risk_budget": None, "min_valid_qty": None, "risk_at_min_qty": None,
+              "capital_source": "UNCONFIRMED", "capital_age_ms": None}
+    capital = _confirmed_shadow_capital(engine)
+    if capital is None:
         return result
-    equity = float(cached.capital.equity)
-    available = float(cached.capital.available_collateral)
+    equity, available, source, age_ms = capital
+    result.update(capital_source=source, capital_age_ms=age_ms)
     if not all(math.isfinite(x) and x > 0 for x in (equity, available, risk_pct)) or risk_pct > 1:
         return result
     detail = decompose(

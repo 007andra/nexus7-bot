@@ -272,6 +272,57 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         row = (await self.run_scan())["candidates"][0]
         self.assertIsNone(row["shadow_min_order_feasible"])
 
+
+    async def test_fresh_authenticated_cached_capital_used_when_v3_unconfirmed(self):
+        self.e.risk.professional_snapshot.confirmed = False
+        self.e.client._last_account_overview_snapshot = {
+            "accountEquity": "8.7583",
+            "availableBalance": "8.7583",
+            "positionMargin": "0",
+            "orderMargin": "0",
+            "unrealisedPNL": "0",
+            "_observed_at": time.time(),
+        }
+        self.before = self.state()
+        row = (await self.run_scan())["candidates"][0]
+        self.assertEqual(row["capital_source"], "AUTHENTICATED_ACCOUNT_CACHE")
+        self.assertIsNotNone(row["capital_age_ms"])
+        self.assertAlmostEqual(float(row["risk_budget"]), 8.7583 * row["counterfactual_risk_pct"])
+        self.assertGreater(float(row["min_valid_qty"]), 0)
+        self.assertNotEqual(row["binding"], "CAPITAL_UNCONFIRMED")
+        self.assert_isolated()
+
+    async def test_stale_authenticated_cached_capital_stays_unknown(self):
+        self.e.risk.professional_snapshot.confirmed = False
+        self.e.client._last_account_overview_snapshot = {
+            "accountEquity": "8.7583",
+            "availableBalance": "8.7583",
+            "positionMargin": "0",
+            "orderMargin": "0",
+            "unrealisedPNL": "0",
+            "_observed_at": time.time() - 61,
+        }
+        self.before = self.state()
+        with patch.dict(os.environ, {"PILOT_MAX_ACCOUNT_SNAPSHOT_AGE_S": "60"}):
+            row = (await self.run_scan())["candidates"][0]
+        self.assertIsNone(row["shadow_min_order_feasible"])
+        self.assertEqual(row["binding"], "CAPITAL_UNCONFIRMED")
+        self.assertEqual(row["capital_source"], "UNCONFIRMED")
+        self.assert_isolated()
+
+    async def test_future_authenticated_cached_capital_stays_unknown(self):
+        self.e.risk.professional_snapshot.confirmed = False
+        self.e.client._last_account_overview_snapshot = {
+            "accountEquity": "8.7583",
+            "availableBalance": "8.7583",
+            "_observed_at": time.time() + 10,
+        }
+        self.before = self.state()
+        row = (await self.run_scan())["candidates"][0]
+        self.assertEqual(row["binding"], "CAPITAL_UNCONFIRMED")
+        self.assertEqual(row["capital_source"], "UNCONFIRMED")
+        self.assert_isolated()
+
     async def test_no_additional_rest_default(self):
         out = await self.run_scan()
         self.assertEqual(out["summary"]["additional_rest_calls_per_scan"], 0)
