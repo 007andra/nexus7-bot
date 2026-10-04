@@ -264,12 +264,23 @@ def _cached_price_map(engine):
 
 
 async def snapshot(db, engine):
+    from bot.config import cfg
     from bot import min_order_feasibility_matrix as matrix
     from bot import min_order_frontier_audit_v1 as frontier
 
     frontier_report = await frontier.snapshot(db)
     price_map = _cached_price_map(engine)
-    universe_rows = matrix.build_matrix(engine, price_map)
+    # This audit intentionally uses the same normal configured hypothetical
+    # budget as HARD_GATE_SHADOW counterfactual_min_order. Recovery/hard-gate
+    # multipliers are LIVE authority and may be zero while entries are blocked;
+    # applying them here would make the research universe unreadable.
+    risk_pct = float(
+        cfg.POST_TARGET_RISK if getattr(engine, "daily_target_hit", False)
+        else cfg.MAX_RISK_PCT
+    )
+    universe_rows = matrix.build_matrix(
+        engine, price_map, risk_pct_override=risk_pct
+    )
     return build_report(universe_rows, frontier_report)
 
 
