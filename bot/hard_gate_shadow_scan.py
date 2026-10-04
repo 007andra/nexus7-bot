@@ -66,7 +66,8 @@ async def _maybe_emit_bbo_calibration(db):
     if not _bbo_persistence_enabled():
         return None
     now = time.monotonic()
-    if now - _BBO_CALIBRATION_LAST_EMIT < _BBO_CALIBRATION_INTERVAL_S:
+    if (_BBO_CALIBRATION_LAST_EMIT > 0.0 and
+            now - _BBO_CALIBRATION_LAST_EMIT < _BBO_CALIBRATION_INTERVAL_S):
         return None
     _BBO_CALIBRATION_LAST_EMIT = now
     try:
