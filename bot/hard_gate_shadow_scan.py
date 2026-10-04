@@ -37,6 +37,8 @@ _MIN_ORDER_CF_NEXUS_INTERVAL_S = 300.0
 _MIN_ORDER_CF_NEXUS_LAST_EMIT = 0.0
 _MIN_ORDER_CF_VALIDATION_INTERVAL_S = 300.0
 _MIN_ORDER_CF_VALIDATION_LAST_EMIT = 0.0
+_MIN_ORDER_CF_ATTRIBUTION_INTERVAL_S = 300.0
+_MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -823,6 +825,38 @@ async def _maybe_emit_min_order_counterfactual_validation(db):
         return None
 
 
+async def _maybe_emit_min_order_counterfactual_gate_attribution(db):
+    """Bounded veto-attribution readout; diagnostic only."""
+    global _MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT
+    from bot import min_order_counterfactual_gate_attribution_v1 as attribution
+    if not attribution.enabled():
+        return None
+    now = time.monotonic()
+    if (_MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT > 0.0 and
+            now - _MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT <
+            _MIN_ORDER_CF_ATTRIBUTION_INTERVAL_S):
+        return None
+    _MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(attribution.snapshot(db), timeout=1.5)
+        log.info("%s", attribution.format_summary(report))
+        log.info("%s", attribution.format_closest(report))
+        return report
+    except Exception as exc:
+        _emit("MIN_ORDER_COUNTERFACTUAL_GATE_ATTRIBUTION_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "thresholds_unchanged": True,
+            "risk_epoch_traversal_credit": False,
+            "automatic_promotion": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
 async def scan(engine, *, db=None, bbo_views=None):
     if not enabled():
         return None
@@ -1126,6 +1160,8 @@ async def scan(engine, *, db=None, bbo_views=None):
         await _maybe_emit_min_order_counterfactual_nexus(db)
         _check(engine)
         await _maybe_emit_min_order_counterfactual_validation(db)
+        _check(engine)
+        await _maybe_emit_min_order_counterfactual_gate_attribution(db)
         _check(engine)
         await _maybe_emit_min_order_universe_efficiency(db, engine)
         _check(engine)
