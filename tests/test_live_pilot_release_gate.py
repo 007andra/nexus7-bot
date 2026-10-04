@@ -75,6 +75,19 @@ class LivePilotReleaseGateTests(unittest.TestCase):
             self.assertFalse(guard.reserve_submission("ETHUSDT"))
             self.assertEqual(guard.state.new_order_submissions_this_session, 2)
 
+    def test_runtime_caps_can_be_reduced_to_one(self):
+        code = (
+            "import os;"
+            "os.environ['PILOT_MAX_CONCURRENT_POSITIONS']='1';"
+            "os.environ['PILOT_MAX_NEW_ORDER_SUBMISSIONS']='1';"
+            "import bot.pilot as p;"
+            "assert p.PILOT_MAX_CONCURRENT_POSITIONS == 1;"
+            "assert p.MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION == 1"
+        )
+        import subprocess, sys
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_paper_remains_inert_without_release_token(self):
         guard = pilot.PilotGuard()
         with patch.object(pilot, "PILOT_ENABLED", True), patch.dict(
