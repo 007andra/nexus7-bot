@@ -125,12 +125,17 @@ def audit_symbol(
     }
 
 
-def build_matrix(engine, price_map: dict[str, float]) -> list[dict]:
+def build_matrix(engine, price_map: dict[str, float], *, risk_pct_override=None) -> list[dict]:
     equity = _d(getattr(getattr(engine, "risk", None), "balance", 0.0) or 0.0)
     if equity <= 0:
         raise ValueError("equity unavailable")
     available = available_collateral(engine, equity)
-    risk_pct = effective_risk_pct(engine)
+    if risk_pct_override is None:
+        risk_pct = effective_risk_pct(engine)
+    else:
+        risk_pct = _d(risk_pct_override)
+        if risk_pct <= 0 or risk_pct > 1:
+            raise ValueError("invalid risk pct override")
     fee = _d(execution_cost.fallback_taker_fee())
     slippage = _d(os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001"))
 
