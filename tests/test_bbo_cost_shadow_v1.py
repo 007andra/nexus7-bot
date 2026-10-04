@@ -280,7 +280,7 @@ def _install(decision=None, flags=None):
     engine_cls = type("E", (_Engine,), {"_bbo_cost_shadow_installed": False})
     client_cls = type("C", (_Client,), {})
     log = _Log()
-    with patch.dict(os.environ, flags or {}, clear=False):
+    with patch.dict(os.environ, flags if flags is not None else {"NEXUS_BBO_COST_SHADOW": "true"}, clear=False):
         rt.install(engine_cls, client_cls, log)
     return engine_cls, client_cls, log
 
@@ -343,7 +343,8 @@ def test_26_persistence_failure_never_affects_champion():
         async def _exec(self, *a, **k):
             raise RuntimeError("database unavailable")
     log = _Log()
-    rec = asyncio.run(rt.observe(_sig(), _decision(), _valid_view(), log, rt.EmitDeduper(), db=_DB()))
+    with patch.dict(os.environ, {"NEXUS_BBO_COST_SHADOW_PERSIST": "true"}):
+        rec = asyncio.run(rt.observe(_sig(), _decision(), _valid_view(), log, rt.EmitDeduper(), db=_DB()))
     assert rec is not None and rec.status == "OK"
     assert any("SHADOW_DATA_UNAVAILABLE stage=emit" in t for _, t in log.rows)
 
@@ -355,7 +356,8 @@ def test_26b_persistence_is_append_only():
         async def _exec(self, sql, params=()):
             calls.append((sql, params))
             return True
-    asyncio.run(rt.observe(_sig(), _decision(), _valid_view(), _Log(), rt.EmitDeduper(), db=_DB()))
+    with patch.dict(os.environ, {"NEXUS_BBO_COST_SHADOW_PERSIST": "true"}):
+        asyncio.run(rt.observe(_sig(), _decision(), _valid_view(), _Log(), rt.EmitDeduper(), db=_DB()))
     sqls = " ".join(s for s, _ in calls).upper()
     assert "ON CONFLICT(OBSERVATION_ID) DO NOTHING" in sqls
     assert "UPDATE " not in sqls and "DELETE" not in sqls and "DROP" not in sqls

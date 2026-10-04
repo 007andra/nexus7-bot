@@ -36,7 +36,8 @@ async def probe(peer):
     bbo_views = {}
     if peer == "492":
         from bot import candidate_terminal_telemetry as telemetry
-        terminal = telemetry.install(log)
+        with patch.dict(os.environ, {"CANDIDATE_TERMINAL_TELEMETRY": "true"}):
+            terminal = telemetry.install(log)
         terminal.active = telemetry.CandidateTrace("live-existing", "SOLUSDT", "LONG", "80")
         before = deepcopy(vars(terminal.active)), deepcopy(terminal._candidates), deepcopy(terminal._candidate_ids)
     elif peer == "493":
@@ -64,7 +65,7 @@ async def probe(peer):
     capture = Capture()
     shadow.log.addHandler(capture)
     try:
-        with patch.dict(os.environ, ENV), patch.object(cfg, "MAX_DRAWDOWN", .17), \
+        with patch.dict(os.environ, {**ENV, "NEXUS_BBO_COST_SHADOW": "true"}), patch.object(cfg, "MAX_DRAWDOWN", .17), \
              patch.object(Analyzer, "analyze_mtf", return_value=signal()), \
              patch.object(nexus_ai, "decide", return_value=decision()), \
              patch.object(TradingEngine, "_open", new_callable=AsyncMock) as opening, \

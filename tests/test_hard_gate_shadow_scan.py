@@ -377,7 +377,7 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.nexus.side_effect = decide
         out = await self.run_scan()
         self.assertEqual(out["summary"]["shadow_scan_aborted_reason"], "LIVE_HARD_GATE_CLEARED")
-        self.assertFalse(self.db.calls)
+        self.assertFalse(any("INSERT" in sql for sql in self.db.calls))
         self.assertEqual(sum(v.call_count for v in self.counters.values()), 0)
 
     async def test_override_or_valid_recovery_does_not_run(self):

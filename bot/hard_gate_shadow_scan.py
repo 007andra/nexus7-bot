@@ -67,7 +67,10 @@ def _emit(tag, values):
         if isinstance(value, (list, tuple)):
             return ",".join(map(str, value)) or "NONE"
         return str(value).replace(" ", "_")
-    log.info("[%s] %s", tag, " ".join(f"{k}={fmt(v)}" for k, v in values.items()))
+    try:
+        log.info("[%s] %s", tag, " ".join(f"{k}={fmt(v)}" for k, v in values.items()))
+    except Exception:
+        pass  # telemetry cannot change either research progression or LIVE authority
 
 
 async def _compute(func, *args, **kwargs):
@@ -149,18 +152,60 @@ def _decide(sig, klines, ticker, snap):
         _COST_CONTEXT.reset(token)
 
 
-def _bbo_observation(sig, decision, view):
+def _bbo_observation(sig, decision, view, *, client=None):
     # Optional compatibility, no import/runtime dependency on unmerged #494.
     # Pure build only: never uses its shared persistence population or feed start.
     runtime = sys.modules.get("bot.bbo_cost_shadow_runtime")
     if runtime is None or not runtime.enabled():
         return None
-    # The BBO owner supplies an immutable snapshot. This pipeline never reads
-    # its private cache registry or starts/subscribes to a feed.
-    record = runtime.build_record(sig, decision, view, floor=runtime.rr_floor())
-    log.info("%s population=HARD_GATE_SHADOW evaluation_context=HARD_GATE_SHADOW "
-             "live_eligible=false", runtime.model.format_record(record))
-    return {**asdict(record), **AUTHORITY}
+    try:
+        # Snapshot acquired after NEXUS: reconnect generations are checked by
+        # the owner at observation time, without re-running any decision.
+        if view is None:
+            view = runtime.snapshot_for_research(client, sig.symbol)
+        record = runtime.build_record(sig, decision, view, floor=runtime.rr_floor())
+        payload = {**asdict(record), **AUTHORITY}
+        try:
+            authority = " ".join(f"{k}={str(v).lower() if isinstance(v, bool) else v}"
+                                 for k, v in AUTHORITY.items())
+            log.info("%s %s evaluation_context=HARD_GATE_SHADOW", runtime.model.format_record(record), authority)
+        except Exception:
+            pass
+        return payload
+    except Exception as exc:
+        payload = {**AUTHORITY, "candidate_id": sig.candidate_id,
+                   "status": "SHADOW_DATA_UNAVAILABLE", "error": type(exc).__name__}
+        _emit("COST_SHADOW_BBO", payload)
+        return payload
+
+
+async def existing_candidate(db, candidate_id, *, guard):
+    """Reuse durable research evidence on replay; never repeat its decision/observers."""
+    guard()
+    await db._exec(_TABLE)
+    guard()
+    rows = await db._fetchall(
+        "SELECT payload FROM hard_gate_shadow_candidates_v1 WHERE candidate_id=? AND population=?",
+        (candidate_id, POPULATION))
+    guard()
+    if not rows:
+        return None
+    raw = rows[0]
+    row = json.loads(raw["payload"] if hasattr(raw, "keys") else raw[0])
+    if any(row.get(k) != v for k, v in AUTHORITY.items()):
+        raise ValueError("invalid stored research authority")
+    return row
+
+
+def _terminal_observation(row):
+    from bot import candidate_terminal_telemetry as terminal
+    from bot import min_order_feasibility_matrix as matrix
+    for module, tag in ((terminal, "CANDIDATE_TERMINAL"), (matrix, "MIN_ORDER_FEASIBILITY_MATRIX")):
+        try:
+            if module.enabled():
+                _emit(tag, module.shadow_record(row))
+        except Exception:
+            pass  # observers cannot alter candidate or LIVE authority
 
 
 async def persist_candidate(db, row, *, guard=lambda: None):
@@ -305,6 +350,18 @@ async def scan(engine, *, db=None, bbo_views=None):
                     formation = getattr(sig, "_bgx_formation_bucket", None) or int(captured // 900)
                     sig.candidate_id = f"{POPULATION}:{symbol}:{sig.direction}:{sig.entry_type}:{formation}"
                     sig._bgx_setup_id = sig.candidate_id
+                    try:
+                        existing = await existing_candidate(
+                            db, sig.candidate_id, guard=lambda: _check(engine))
+                    except GateCleared:
+                        raise
+                    except Exception as exc:
+                        existing = None
+                        _emit("HARD_GATE_SHADOW_SCAN", {"dedup_read_error": type(exc).__name__, **AUTHORITY})
+                    _check(engine)
+                    if existing is not None:
+                        records.append(existing)
+                        continue
                     pullback = context.pullback
                     passed = pullback != "BLOCKED"
                     summary["pullback_pass"] += int(passed)
@@ -347,10 +404,12 @@ async def scan(engine, *, db=None, bbo_views=None):
                         row["champion_challenger"] = {**build_forward_record(sig, decision, captured_epoch=captured),
                                                        **AUTHORITY, "evaluation_fidelity": "DEGRADED"}
                         row["bbo_cost_observation"] = _bbo_observation(
-                            sig, decision, deepcopy((bbo_views or {}).get(symbol)))
+                            sig, decision, deepcopy((bbo_views or {}).get(symbol)), client=engine.client)
                     _check(engine)
                     _emit("SHADOW_CANDIDATE_WHILE_LIVE_BLOCKED", {k: v for k, v in row.items()
                           if k not in {"cost_snapshot", "champion_challenger", "bbo_cost_observation"}})
+                    _terminal_observation(row)
+                    _check(engine)
                     # Persist in the independent research dataset; failure never
                     # changes LIVE state. Bound IO to keep the engine responsive.
                     try:

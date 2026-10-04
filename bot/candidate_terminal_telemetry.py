@@ -26,6 +26,7 @@ produces one record per reason.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 import threading
@@ -218,7 +219,7 @@ class CandidateTerminalCollector:
         return CandidateTrace(candidate_id=cid, symbol=symbol, side=side, score=score)
 
     def observe(self, message: str, now: float | None = None) -> list[str]:
-        if message.startswith("[CANDIDATE_TERMINAL"):
+        if message.startswith("[CANDIDATE_TERMINAL") or "population=HARD_GATE_SHADOW" in message:
             return []
         out: list[str] = []
         with self._lock:
@@ -272,8 +273,26 @@ class _TerminalHandler(logging.Handler):
             return
 
 
+def enabled():
+    return os.environ.get("CANDIDATE_TERMINAL_TELEMETRY", "false").lower() == "true"
+
+
+def shadow_record(row):
+    """Structured research terminal, never fed into the LIVE trace collector."""
+    from bot.hard_gate_shadow_context import AUTHORITY, POPULATION
+    if row.get("population") != POPULATION or row.get("live_eligible") is not False:
+        raise ValueError("research-only terminal requires explicit population")
+    return {**{k: row[k] for k in ("candidate_id", "symbol", "side", "score", "nexus_called", "nexus_allowed")},
+            **AUTHORITY, "terminal_stage": "HARD_GATE_SHADOW",
+            "terminal_reason": "RESEARCH_ONLY_LIVE_BLOCKED", "telemetry_only": True,
+            "final_sizing_reached": False, "cross_reached": False,
+            "predispatch_reached": False, "submission_reached": False}
+
+
 def install(log) -> CandidateTerminalCollector:
     """Attach one passive handler to the application logger."""
+    if not enabled():
+        return None
     existing = getattr(log, "_candidate_terminal_collector", None)
     if existing is not None:
         return existing

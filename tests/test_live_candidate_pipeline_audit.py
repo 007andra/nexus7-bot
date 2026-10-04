@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import random
 from contextlib import contextmanager, redirect_stdout
 from decimal import Decimal
@@ -257,7 +258,7 @@ def test_11_audit_and_shadow_paths_never_mutate_exchange():
 
     from bot import min_order_feasibility_matrix as matrix
     log = _Log()
-    with patch.object(matrix, "recovery_size_multiplier", return_value=0.5):
+    with patch.dict(os.environ, {"MIN_ORDER_FEASIBILITY_MATRIX": "true"}), patch.object(matrix, "recovery_size_multiplier", return_value=0.5):
         matrix.log_once(eng, {"BNBUSDT": 1000.0}, log)
     assert any("MIN_ORDER_FEASIBILITY_MATRIX_SUMMARY" in text for _, text in log.rows)
 
@@ -396,8 +397,9 @@ def test_terminal_collector_flushes_trace_without_terminal_log_and_never_wraps()
     assert "symbol=BNBUSDT" in out[1] and "terminal_stage=MIN_ORDER_FEASIBILITY" in out[1]
     # install() attaches a handler only: TradingEngine._open is never touched.
     log = logging.getLogger("candidate_terminal_install_test")
-    collector = terminal.install(log)
-    assert terminal.install(log) is collector
+    with patch.dict(os.environ, {"CANDIDATE_TERMINAL_TELEMETRY": "true"}):
+        collector = terminal.install(log)
+        assert terminal.install(log) is collector
     buf = io.StringIO()
     with redirect_stdout(buf):
         log.warning("[MIN_ORDER_FEASIBILITY] symbol=BNBUSDT result=BLOCK reason=INSUFFICIENT_RISK_BUDGET")

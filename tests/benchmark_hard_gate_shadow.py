@@ -29,11 +29,17 @@ async def main():
     obj = engine([f"ASSET{i}USDT" for i in range(25)])
     sql = DB()
     results = []
+    sample_id = [0]
+    def fresh_signal(symbol, *args, **kwargs):
+        sig = signal(symbol)
+        sig._bgx_formation_bucket = sample_id[0]
+        return sig
     for workload in ("composed_analyzer", "forced_signal_real_nexus"):
         timings, rests, evaluated = [], 0, 0
-        cm = patch.object(Analyzer, "analyze_mtf", side_effect=lambda symbol, *a, **k: signal(symbol)) if workload.startswith("forced") else nullcontext()
+        cm = patch.object(Analyzer, "analyze_mtf", side_effect=fresh_signal) if workload.startswith("forced") else nullcontext()
         with patch.dict(os.environ, ENV), patch.object(cfg, "MAX_DRAWDOWN", .17), cm:
             for run in range(21):
+                sample_id[0] = run + 1
                 start = time.perf_counter()
                 output = await shadow.scan(obj, db=sql)
                 duration = (time.perf_counter() - start) * 1000

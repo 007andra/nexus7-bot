@@ -85,11 +85,11 @@ _FALLBACK_REGISTRY: dict[int, tuple] = {}
 
 
 def enabled() -> bool:
-    return os.environ.get(FLAG, "true").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get(FLAG, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def persist_enabled() -> bool:
-    return os.environ.get(PERSIST_FLAG, "true").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get(PERSIST_FLAG, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def rr_floor() -> float:
@@ -104,6 +104,14 @@ def cache_for(client) -> feed.BBOCache | None:
     except TypeError:
         entry = _FALLBACK_REGISTRY.get(id(client))
     return entry[0] if entry else None
+
+
+def snapshot_for_research(client, symbol):
+    """Owner-side immutable handoff; no feed start, REST or decision evaluation."""
+    if not enabled():
+        return None
+    cache = cache_for(client)
+    return cache.snapshot(symbol) if cache is not None else None
 
 
 def _register(client, cache, task) -> None:

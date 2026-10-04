@@ -120,7 +120,7 @@ A comparação com o NEXUS usa a mesma álgebra de `nexus_ai.expected_value` e o
 5. **Fail-open só no shadow.** Erros de feed, parse, cálculo, log ou persistência viram `SHADOW_DATA_UNAVAILABLE` (`test_26`). Os gates de trading continuam fail-closed, sem nenhuma alteração.
 6. **Persistência append-only.** `INSERT … ON CONFLICT(observation_id) DO NOTHING`, sem UPDATE nem DELETE (`test_26b`).
 7. **Contrato de runtime.** `test_binance_cross_stress_dispatch_proof` (44), `test_runtime_contract_guard` (8) e `test_operator_runtime_contract` (2) passam com o bootstrap instalado.
-8. **Kill switch.** Os flags `NEXUS_BBO_COST_SHADOW=false` e `NEXUS_BBO_COST_SHADOW_PERSIST=false` desligam o shadow.
+8. **Default desabilitado na integração.** Ambos os flags usam default `false`. Os flags `NEXUS_BBO_COST_SHADOW=false` e `NEXUS_BBO_COST_SHADOW_PERSIST=false` desligam o shadow.
 
 ## Replay sobre a população auditada
 
@@ -145,3 +145,7 @@ Escala:
 - **SUPPORTED** exige fills reais.
 
 Nunca há promoção automática.
+
+Na integração #492/#494/#496, o módulo proprietário fornece snapshots imutáveis
+ao hard-gate shadow depois da única avaliação NEXUS. A observação é gravada no
+payload separado HARD_GATE_SHADOW, sem alimentar a tabela/população principal.

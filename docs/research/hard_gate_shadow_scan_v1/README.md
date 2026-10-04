@@ -8,7 +8,7 @@ execution_effect=NONE
 live_authority_unchanged=true
 
 Base: `43c6fe92cd45895f54014e252247c215dc437ca0`, production branch
-`migration/binance-usdm`. Independent of PRs #492, #493 and #494.
+`migration/binance-usdm`. Originally independent; this integration includes #492 and #494 and excludes #493.
 No merge, deployment, recovery renewal or Railway variable changes are included.
 
 ## WHY THIS CANNOT REOPEN LIVE TRADING
@@ -77,7 +77,10 @@ research even when this hypothetical minimum-order test fails.
 Only `hard_gate_shadow_candidates_v1` and `hard_gate_shadow_outcomes_v1` are
 written. Candidate IDs start with `HARD_GATE_SHADOW:` and include symbol, side,
 setup and formation bucket. Repeated IDs are immutable (`ON CONFLICT ... DO
-NOTHING`). The Champion × Challenger pure builder is reused, but its main
+NOTHING`). Persisted IDs are read before NEXUS and reused on duplicates/restart,
+without decision recalculation or observer re-emission. Deduplication depends
+on research storage availability; failures can cause telemetry retries, never
+execution. The Champion × Challenger pure builder is reused, but its main
 persistence API rejects this population; its observer and existing general
 shadow capture also refuse to enroll these records in the main dataset.
 
@@ -87,9 +90,11 @@ There is no automatic promotion/import into LIVE on restart or replay. BBO
 comparisons, if #494 is loaded independently, are also stored only inside this
 separate candidate payload, not in its shared BBO table. The scan never reads
 the BBO cache directly. `scan(..., bbo_views=...)` accepts copied snapshots from
-the owner for compatibility/research callers. The default engine hook supplies
-no BBO views, so that observation is unavailable until a separately reviewed
-owner-side handoff is wired; this PR does not modify or stack #494.
+the owner for compatibility/research callers. In the controlled integration,
+the BBO owner now supplies its immutable snapshot through
+`snapshot_for_research(client, symbol)` after the one NEXUS evaluation. It
+checks the current generation at observation time. No direct cache reader or
+second NEXUS evaluation is introduced. Both BBO flags default false.
 
 Outcomes use cache-only complete closed 15m paths at 60/240 minutes. Sampling
 starts at the next 15m boundary to exclude pre-capture high/low observations.
