@@ -42,6 +42,8 @@ _MIN_ORDER_CF_ATTRIBUTION_INTERVAL_S = 300.0
 _MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT = 0.0
 _MIN_ORDER_CF_SENSITIVITY_INTERVAL_S = 300.0
 _MIN_ORDER_CF_SENSITIVITY_LAST_EMIT = 0.0
+_MIN_ORDER_CF_REVIEW_INTERVAL_S = 300.0
+_MIN_ORDER_CF_REVIEW_LAST_EMIT = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -891,6 +893,38 @@ async def _maybe_emit_min_order_counterfactual_threshold_sensitivity(db):
         return None
 
 
+async def _maybe_emit_min_order_counterfactual_decision_review(db):
+    """Bounded synthesis; can only recommend manual review."""
+    global _MIN_ORDER_CF_REVIEW_LAST_EMIT
+    from bot import min_order_counterfactual_decision_review_v1 as review
+    if not review.enabled():
+        return None
+    now = time.monotonic()
+    if (_MIN_ORDER_CF_REVIEW_LAST_EMIT > 0.0 and
+            now - _MIN_ORDER_CF_REVIEW_LAST_EMIT <
+            _MIN_ORDER_CF_REVIEW_INTERVAL_S):
+        return None
+    _MIN_ORDER_CF_REVIEW_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(review.snapshot(db), timeout=1.5)
+        log.info("%s", review.format_summary(report))
+        return report
+    except Exception as exc:
+        _emit("MIN_ORDER_COUNTERFACTUAL_DECISION_REVIEW_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "manual_review_required": True,
+            "production_thresholds_unchanged": True,
+            "risk_epoch_traversal_credit": False,
+            "automatic_promotion": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
 async def scan(engine, *, db=None, bbo_views=None):
     if not enabled():
         return None
@@ -1198,6 +1232,8 @@ async def scan(engine, *, db=None, bbo_views=None):
         await _maybe_emit_min_order_counterfactual_gate_attribution(db)
         _check(engine)
         await _maybe_emit_min_order_counterfactual_threshold_sensitivity(db)
+        _check(engine)
+        await _maybe_emit_min_order_counterfactual_decision_review(db)
         _check(engine)
         await _maybe_emit_min_order_universe_efficiency(db, engine)
         _check(engine)
