@@ -111,11 +111,16 @@ async def snapshot(db, readiness: dict, budget_study: dict, oos: dict):
         except Exception:
             continue
         cf = obj.get("counterfactual_nexus_v1")
+        cid = str(obj.get("candidate_id") or "")
         if (
             isinstance(cf, dict)
+            and cid
+            and str(cf.get("candidate_id") or "") == cid
             and cf.get("cohort") == "MIN_ORDER_BLOCKED_COUNTERFACTUAL_NEXUS"
             and cf.get("risk_epoch_traversal_credit") is False
             and cf.get("execution_allowed") is True
+            and obj.get("shadow_only") is True
+            and obj.get("live_eligible") is False
         ):
             candidates.append(obj)
 
