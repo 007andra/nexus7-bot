@@ -1419,6 +1419,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                     pilot_budget_study_v1,
                     prospective_oos_enrollment_audit_v1,
                     prospective_oos_first_approval_review_v1,
+                    prospective_oos_maturation_review_v1,
                     pilot_release_review_v1,
                     segregated_pilot_budget_proof_v1,
                     reentry_governance_v2,
@@ -1503,6 +1504,53 @@ async def scan(engine, *, db=None, bbo_views=None):
                             first_approval_review
                         ),
                     )
+                    try:
+                        maturation_review = await asyncio.wait_for(
+                            prospective_oos_maturation_review_v1.snapshot(
+                                db,
+                                prospective_oos_report,
+                            ),
+                            timeout=3.0,
+                        )
+                        log.warning(
+                            "%s",
+                            prospective_oos_maturation_review_v1.format_log(
+                                maturation_review
+                            ),
+                        )
+                        for candidate_line in (
+                            prospective_oos_maturation_review_v1.format_candidate_rows(
+                                maturation_review
+                            )
+                        ):
+                            log.warning("%s", candidate_line)
+                        log.warning(
+                            "%s",
+                            prospective_oos_maturation_review_v1.format_concentration(
+                                maturation_review
+                            ),
+                        )
+                    except Exception as exc:
+                        _emit("PROSPECTIVE_OOS_MATURATION_REVIEW_V1", {
+                            "status": "ERROR",
+                            "error": type(exc).__name__,
+                            "research_only": True,
+                            "shadow_only": True,
+                            "association_not_causation": True,
+                            "candidate_generation_unchanged": True,
+                            "thresholds_unchanged": True,
+                            "risk_unchanged": True,
+                            "sizing_unchanged": True,
+                            "leverage_unchanged": True,
+                            "historical_hwm_preserved": True,
+                            "lifetime_drawdown_preserved": True,
+                            "current_hard_gate_unchanged": True,
+                            "automatic_promotion": False,
+                            "promotion_allowed": False,
+                            "live_allowed": False,
+                            "decision_effect": "NONE",
+                            "execution_effect": "NONE",
+                        })
                     governance = reentry_governance_v2.evaluate(
                         readiness_row,
                         prospective_oos_report,
