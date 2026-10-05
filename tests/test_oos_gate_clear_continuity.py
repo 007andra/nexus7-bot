@@ -226,6 +226,22 @@ class GateClearContinuityStatic(unittest.TestCase):
         for marker in forbidden:
             self.assertNotIn(marker, segment)
 
+    def test_gate_clear_cache_gap_is_deferred_and_cohort_metadata_is_frozen(self):
+        start = SOURCE.index(
+            "async def _mature_existing_prospective_oos_when_gate_clear"
+        )
+        end = SOURCE.index("async def scan_if_enabled", start)
+        segment = SOURCE[start:end]
+
+        guard = 'if outcome.get("outcome") != "OBSERVED":'
+        write = '"INSERT INTO hard_gate_shadow_outcomes_v1 "'
+        self.assertIn(guard, segment)
+        self.assertIn('stats["cache_gap_deferred"] += 1', segment)
+        self.assertLess(segment.index(guard), segment.index(write))
+        self.assertIn('baseline.get("cohort_id") != oos.COHORT_ID', segment)
+        self.assertIn('baseline.get("hypothesis_frozen") is not True', segment)
+        self.assertIn('baseline.get("reset_allowed") is not False', segment)
+
 
 if __name__ == "__main__":
     unittest.main()
