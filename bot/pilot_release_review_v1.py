@@ -23,6 +23,8 @@ def evaluate(
     oos: dict,
     budget_study: dict,
     ledger: dict,
+    *,
+    budget_proof: dict | None = None,
 ) -> dict:
     blockers = []
     oos_ready = oos.get("status") == "READY_FOR_MANUAL_REVIEW"
@@ -37,6 +39,13 @@ def evaluate(
         and ledger.get("lifetime_drawdown_preserved") is True
         and ledger.get("current_hard_gate_unchanged") is True
     )
+    budget_proof_ready = (
+        (budget_proof or {}).get("status") == "PROOF_PASS"
+        and (budget_proof or {}).get("proof_pass") is True
+        and (budget_proof or {}).get("synthetic_entries_persisted") is False
+        and (budget_proof or {}).get("oos_enrollment_credit") is False
+        and (budget_proof or {}).get("canonical_pipeline_credit") is False
+    )
 
     if not oos_ready:
         blockers.append("PROSPECTIVE_OOS_NOT_READY")
@@ -46,6 +55,8 @@ def evaluate(
         blockers.append("BUDGET_STUDY_UNAVAILABLE")
     if not ledger_ready:
         blockers.append("SEGREGATED_LEDGER_SHADOW_PROOF_NOT_READY")
+    if not budget_proof_ready:
+        blockers.append("SEGREGATED_BUDGET_GUARD_PROOF_NOT_READY")
 
     # These remain mandatory even if all research evidence passes.
     blockers.extend((
@@ -55,7 +66,10 @@ def evaluate(
         "LIVE_SEGREGATED_EXECUTION_PATH_NOT_IMPLEMENTED",
     ))
 
-    research_package_ready = oos_ready and runtime_ready and budget_ready and ledger_ready
+    research_package_ready = (
+        oos_ready and runtime_ready and budget_ready and ledger_ready
+        and budget_proof_ready
+    )
     status = (
         "DESIGN_EVIDENCE_READY_FOR_MANUAL_REVIEW"
         if research_package_ready
@@ -86,6 +100,17 @@ def evaluate(
         "segregated_ledger_budget_blocked_entries": ledger.get(
             "budget_blocked_entries"
         ),
+        "budget_guard_proof_status": (budget_proof or {}).get("status"),
+        "budget_guard_proof_pass": bool((budget_proof or {}).get("proof_pass")),
+        "budget_guard_proof_reserved_attempts": (budget_proof or {}).get(
+            "reserved_attempts"
+        ),
+        "budget_guard_proof_blocked_attempts": (budget_proof or {}).get(
+            "blocked_attempts"
+        ),
+        "budget_guard_proof_synthetic_entries_persisted": (budget_proof or {}).get(
+            "synthetic_entries_persisted"
+        ),
         "current_account_entries_blocked": readiness.get("status") != "READY",
         "current_account_gate_bypass_allowed": False,
         "historical_hwm_reset_allowed": False,
@@ -113,6 +138,9 @@ def format_log(row: dict) -> str:
         "budget_study_status", "shadow_reference_budget_usdt",
         "segregated_ledger_status", "segregated_ledger_remaining_budget_usdt",
         "segregated_ledger_budget_blocked_entries",
+        "budget_guard_proof_status", "budget_guard_proof_pass",
+        "budget_guard_proof_reserved_attempts", "budget_guard_proof_blocked_attempts",
+        "budget_guard_proof_synthetic_entries_persisted",
         "current_account_entries_blocked", "current_account_gate_bypass_allowed",
         "historical_hwm_reset_allowed", "lifetime_drawdown_rewrite_allowed",
         "external_capital_clears_lifetime_drawdown",
