@@ -21,6 +21,8 @@ POPULATION = "HARD_GATE_SHADOW"
 FLAG = "NEXUS_BBO_CALIBRATION_V3"
 MIN_SAMPLE = 50
 PREFERRED_SAMPLE = 100
+MIN_DISTINCT_SIDES = 2
+MIN_DISTINCT_REGIMES = 2
 AUTHORITY = {
     "research_only": True,
     "shadow_only": True,
@@ -158,9 +160,25 @@ def build_report(payloads):
             by_id.setdefault(row["candidate_id"], row)
     cost_rows = list(by_id.values())
     valid = sum(1 for r in cost_rows if r["bbo_valid"] and r["bbo_cost_bps"] is not None)
+
+    # Diversity is an evidence-quality requirement, not trading authority.
+    valid_rows = [r for r in cost_rows if r["bbo_valid"] and r["bbo_cost_bps"] is not None]
+    distinct_sides = sorted({r["side"] for r in valid_rows if r["side"] != "UNKNOWN"})
+    distinct_regimes = sorted({r["regime"] for r in valid_rows if r["regime"] != "UNKNOWN"})
+    diversity_blockers = []
+    if len(distinct_sides) < MIN_DISTINCT_SIDES:
+        diversity_blockers.append("SIDE_DIVERSITY")
+    if len(distinct_regimes) < MIN_DISTINCT_REGIMES:
+        diversity_blockers.append("REGIME_DIVERSITY")
+    diversity_ready = not diversity_blockers
+
     status = (
-        "PREFERRED_SAMPLE_REACHED" if valid >= PREFERRED_SAMPLE
-        else "MIN_SAMPLE_REACHED" if valid >= MIN_SAMPLE
+        "PREFERRED_SAMPLE_DIVERSE_REACHED"
+        if valid >= PREFERRED_SAMPLE and diversity_ready
+        else "PREFERRED_SAMPLE_REACHED_DIVERSITY_INCOMPLETE"
+        if valid >= PREFERRED_SAMPLE
+        else "MIN_SAMPLE_REACHED"
+        if valid >= MIN_SAMPLE
         else "COLLECTING"
     )
 
@@ -172,6 +190,12 @@ def build_report(payloads):
         "status": status,
         "target_min": MIN_SAMPLE,
         "target_preferred": PREFERRED_SAMPLE,
+        "target_min_sides": MIN_DISTINCT_SIDES,
+        "target_min_regimes": MIN_DISTINCT_REGIMES,
+        "distinct_sides": distinct_sides,
+        "distinct_regimes": distinct_regimes,
+        "diversity_ready": diversity_ready,
+        "diversity_blockers": diversity_blockers,
         "cost_only_unique_candidates": len(cost_rows),
         "cost_only_valid_bbo": valid,
         "cost_only_global": _metric_block(cost_rows),
@@ -233,6 +257,8 @@ def format_summary(report):
         f"cost_only_unique={report['cost_only_unique_candidates']} "
         f"cost_only_valid={report['cost_only_valid_bbo']} "
         f"target_min={report['target_min']} target_preferred={report['target_preferred']} "
+        f"diversity_ready={str(report['diversity_ready']).lower()} "
+        f"diversity_blockers={','.join(report['diversity_blockers']) or 'NONE'} "
         f"side_counts={group_counts('side')} "
         f"regime_counts={group_counts('regime')} "
         f"setup_counts={group_counts('setup')} "
@@ -249,6 +275,7 @@ def format_summary(report):
 
 
 __all__ = [
-    "AUTHORITY", "FLAG", "MIN_SAMPLE", "PREFERRED_SAMPLE", "build_report",
+    "AUTHORITY", "FLAG", "MIN_SAMPLE", "PREFERRED_SAMPLE", "MIN_DISTINCT_SIDES",
+    "MIN_DISTINCT_REGIMES", "build_report",
     "enabled", "format_summary", "load_payloads", "snapshot",
 ]
