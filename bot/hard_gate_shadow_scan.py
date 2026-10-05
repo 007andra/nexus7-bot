@@ -23,6 +23,7 @@ from bot.logger import shadow_log as log
 _RUNNING = weakref.WeakSet()
 _PERSISTENCE_LOGGED = set()
 _OUTCOME_BATCH_LIMIT = 8
+_CANDIDATE_PERSIST_TIMEOUT_S = 3.0
 _OUTCOME_IO_TIMEOUT_S = 5.0
 _RISK_EPOCH_IO_TIMEOUT_S = 3.0
 _BBO_CALIBRATION_INTERVAL_S = 300.0
@@ -1155,7 +1156,10 @@ async def scan(engine, *, db=None, bbo_views=None):
                     # Persist in the independent research dataset; failure never
                     # changes LIVE state. Bound IO to keep the engine responsive.
                     try:
-                        await asyncio.wait_for(persist_candidate(db, row, guard=lambda: _check(engine)), timeout=1.0)
+                        await asyncio.wait_for(
+                            persist_candidate(db, row, guard=lambda: _check(engine)),
+                            timeout=_CANDIDATE_PERSIST_TIMEOUT_S,
+                        )
                     except GateCleared:
                         raise
                     except Exception as exc:

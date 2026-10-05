@@ -766,6 +766,13 @@ class Proof(unittest.IsolatedAsyncioTestCase):
             await self.run_scan()
         self.assert_isolated()
 
+    def test_candidate_persistence_timeout_is_research_bounded_but_not_one_second(self):
+        self.assertEqual(shadow._CANDIDATE_PERSIST_TIMEOUT_S, 3.0)
+        self.assertLessEqual(
+            shadow._CANDIDATE_PERSIST_TIMEOUT_S,
+            shadow._OUTCOME_IO_TIMEOUT_S,
+        )
+
     async def test_duplicate_candidate_append_only(self):
         with patch.object(shadow.time, "time", return_value=1791060001):
             first = await self.run_scan()
