@@ -1417,6 +1417,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                     oos_progress_board_v2,
                     pilot_budget_study_v1,
                     pilot_release_review_v1,
+                    segregated_pilot_budget_proof_v1,
                     reentry_governance_v2,
                     reentry_readiness,
                     reentry_release_board_v1,
@@ -1443,6 +1444,13 @@ async def scan(engine, *, db=None, bbo_views=None):
                         prospective_oos_report,
                     )
                     log.warning("%s", pilot_budget_study_v1.format_log(budget_study))
+                    budget_proof = segregated_pilot_budget_proof_v1.evaluate(
+                        budget_study
+                    )
+                    log.warning(
+                        "%s",
+                        segregated_pilot_budget_proof_v1.format_log(budget_proof),
+                    )
                     shadow_ledger = await asyncio.wait_for(
                         segregated_pilot_ledger_v1.snapshot(
                             db,
@@ -1469,6 +1477,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                         prospective_oos_report,
                         budget_study,
                         shadow_ledger,
+                        budget_proof=budget_proof,
                     )
                     log.warning(
                         "%s", pilot_release_review_v1.format_log(pilot_review)
