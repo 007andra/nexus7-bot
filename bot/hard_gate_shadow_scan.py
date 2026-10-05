@@ -954,6 +954,9 @@ async def scan(engine, *, db=None, bbo_views=None):
                                 "counterfactual_nexus_errors",
                                 "additional_rest_calls_per_scan"), 0)}
     records = []
+    epoch_row = None
+    validation_report = None
+    review_report = None
     try:
         from bot.config import cfg
         from bot.strategy import Analyzer
@@ -1241,13 +1244,34 @@ async def scan(engine, *, db=None, bbo_views=None):
         _check(engine)
         await _maybe_emit_min_order_counterfactual_nexus(db)
         _check(engine)
-        await _maybe_emit_min_order_counterfactual_validation(db)
+        validation_report = await _maybe_emit_min_order_counterfactual_validation(db)
         _check(engine)
         await _maybe_emit_min_order_counterfactual_gate_attribution(db)
         _check(engine)
         await _maybe_emit_min_order_counterfactual_threshold_sensitivity(db)
         _check(engine)
-        await _maybe_emit_min_order_counterfactual_decision_review(db)
+        review_report = await _maybe_emit_min_order_counterfactual_decision_review(db)
+        _check(engine)
+        if epoch_row is not None and validation_report is not None and review_report is not None:
+            try:
+                from bot import reentry_readiness, reentry_release_board_v1
+                release_board = reentry_release_board_v1.evaluate(
+                    reentry_readiness.snapshot(engine),
+                    epoch_row,
+                    validation_report,
+                    review_report,
+                )
+                log.warning("%s", reentry_release_board_v1.format_log(release_board))
+            except Exception as exc:
+                _emit("REENTRY_RELEASE_BOARD_V1", {
+                    "status": "ERROR",
+                    "error": type(exc).__name__,
+                    "automatic_promotion": False,
+                    "promotion_allowed": False,
+                    "live_allowed": False,
+                    "decision_effect": "NONE",
+                    "execution_effect": "NONE",
+                })
         _check(engine)
         await _maybe_emit_min_order_universe_efficiency(db, engine)
         _check(engine)
