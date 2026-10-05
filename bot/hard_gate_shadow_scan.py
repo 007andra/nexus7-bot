@@ -23,6 +23,7 @@ from bot.logger import shadow_log as log
 _RUNNING = weakref.WeakSet()
 _PERSISTENCE_LOGGED = set()
 _OUTCOME_BATCH_LIMIT = 8
+_RISK_EPOCH_IO_TIMEOUT_S = 3.0
 _BBO_CALIBRATION_INTERVAL_S = 300.0
 _BBO_CALIBRATION_LAST_EMIT = 0.0
 _BBO_CALIBRATION_V3_INTERVAL_S = 300.0
@@ -937,7 +938,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                             start_equity=float(capital[0]),
                             started_epoch=time.time(),
                         ),
-                        timeout=2.0,
+                        timeout=_RISK_EPOCH_IO_TIMEOUT_S,
                     )
         except GateCleared:
             raise
@@ -1149,7 +1150,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                         risk_epoch_shadow.snapshot(
                             db, engine, start_equity=float(capital[0])
                         ),
-                        timeout=2.0,
+                        timeout=_RISK_EPOCH_IO_TIMEOUT_S,
                     )
                     try:
                         log.info("%s", risk_epoch_shadow.format_log(epoch_row))
