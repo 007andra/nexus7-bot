@@ -42,23 +42,37 @@ def candidate(
     }
 
 
-def outcome(ret):
+def outcome(ret, *, horizon=60, observation_start=2700.0):
     return {
+        "horizon": horizon,
         "outcome": "OBSERVED",
         "future_return": ret,
         "MFE": max(ret, 0.01),
         "MAE": min(ret, -0.005),
-        "observation_start": 2700.0,
+        "observation_start": observation_start,
     }
 
 
-def ledger_entry(cid, *, status="SHADOW_RESERVED"):
+def ledger_entry(
+    cid,
+    *,
+    status="SHADOW_RESERVED",
+    risk_unit=0.02,
+    reserved_loss=None,
+    remaining_before=0.10,
+):
+    if reserved_loss is None:
+        reserved_loss = risk_unit if status == "SHADOW_RESERVED" else 0.0
+    remaining_after = max(0.0, remaining_before - reserved_loss)
     return {
         **ledger.AUTHORITY,
         "ledger_id": ledger.LEDGER_ID,
         "candidate_id": cid,
         "status": status,
-        "reserved_loss_usdt": 0.02 if status == "SHADOW_RESERVED" else 0.0,
+        "risk_unit_usdt": risk_unit,
+        "reserved_loss_usdt": reserved_loss,
+        "remaining_before_usdt": remaining_before,
+        "remaining_after_usdt": remaining_after,
         "production_order_created": False,
         "prospective_oos_cohort": oos.COHORT,
         "oos_enrollment_credit": False,
@@ -116,10 +130,11 @@ class FirstApprovalReviewTests(unittest.TestCase):
         ]
         row60 = review.evaluate(
             candidates,
-            {cid: outcome(0.010)},
+            {cid: outcome(0.010, horizon=60)},
             {},
             {cid: ledger_entry(cid)},
             oos_report(),
+            now_epoch=10000.0,
         )
         self.assertEqual(
             row60["status"],
@@ -129,10 +144,11 @@ class FirstApprovalReviewTests(unittest.TestCase):
 
         row240 = review.evaluate(
             candidates,
-            {cid: outcome(0.010)},
-            {cid: outcome(0.015)},
+            {cid: outcome(0.010, horizon=60)},
+            {cid: outcome(0.015, horizon=240)},
             {cid: ledger_entry(cid)},
             oos_report(),
+            now_epoch=20000.0,
         )
         self.assertEqual(row240["status"], "FIRST_APPROVAL_MATURED_240M")
         self.assertTrue(row240["audit_pass"])
@@ -144,9 +160,10 @@ class FirstApprovalReviewTests(unittest.TestCase):
         row = review.evaluate(
             [candidate(cid, allowed=True)],
             {},
-            {cid: outcome(0.015)},
+            {cid: outcome(0.015, horizon=240)},
             {cid: ledger_entry(cid)},
             oos_report(),
+            now_epoch=20000.0,
         )
         self.assertEqual(row["status"], "FIRST_APPROVAL_AUDIT_FAIL")
         self.assertIn("OUTCOME_240M_WITHOUT_60M", row["blockers"])
@@ -175,6 +192,71 @@ class FirstApprovalReviewTests(unittest.TestCase):
         )
         self.assertEqual(row["status"], "FIRST_APPROVAL_AUDIT_FAIL")
         self.assertIn("FIRST_APPROVAL_LEDGER_SCOPE_INVALID", row["blockers"])
+
+    def test_first_approval_requires_exactly_one_r_shadow_reservation(self):
+        cid = "A1"
+        wrong_amount = ledger_entry(cid, reserved_loss=0.01)
+        row = review.evaluate(
+            [candidate(cid, allowed=True)],
+            {},
+            {},
+            {cid: wrong_amount},
+            oos_report(),
+            now_epoch=10000.0,
+        )
+        self.assertEqual(row["status"], "FIRST_APPROVAL_AUDIT_FAIL")
+        self.assertIn("FIRST_APPROVAL_NOT_EXACTLY_1R_RESERVED", row["blockers"])
+        self.assertFalse(row["ledger_exact_one_r"])
+
+        budget_block = ledger_entry(cid, status="SHADOW_BUDGET_BLOCK")
+        row = review.evaluate(
+            [candidate(cid, allowed=True)],
+            {},
+            {},
+            {cid: budget_block},
+            oos_report(),
+            now_epoch=10000.0,
+        )
+        self.assertEqual(row["status"], "FIRST_APPROVAL_AUDIT_FAIL")
+        self.assertIn("FIRST_APPROVAL_NOT_EXACTLY_1R_RESERVED", row["blockers"])
+
+    def test_observed_outcome_must_be_mature_and_non_early(self):
+        cid = "A1"
+        candidates = [candidate(cid, allowed=True, captured=2000.0)]
+        entry = {cid: ledger_entry(cid)}
+
+        early = review.evaluate(
+            candidates,
+            {cid: outcome(0.01, horizon=60, observation_start=1800.0)},
+            {},
+            entry,
+            oos_report(),
+            now_epoch=10000.0,
+        )
+        self.assertEqual(early["status"], "FIRST_APPROVAL_AUDIT_FAIL")
+        self.assertIn("OUTCOME_60M_EARLY_OBSERVATION_START", early["blockers"])
+
+        immature = review.evaluate(
+            candidates,
+            {cid: outcome(0.01, horizon=60, observation_start=2700.0)},
+            {},
+            entry,
+            oos_report(),
+            now_epoch=6200.0,
+        )
+        self.assertEqual(immature["status"], "FIRST_APPROVAL_AUDIT_FAIL")
+        self.assertIn("OUTCOME_60M_NOT_MATURE", immature["blockers"])
+
+        mismatch = review.evaluate(
+            candidates,
+            {cid: outcome(0.01, horizon=240, observation_start=2700.0)},
+            {},
+            entry,
+            oos_report(),
+            now_epoch=20000.0,
+        )
+        self.assertEqual(mismatch["status"], "FIRST_APPROVAL_AUDIT_FAIL")
+        self.assertIn("OUTCOME_60M_HORIZON_MISMATCH", mismatch["blockers"])
 
     def test_non_oos_allowed_candidate_is_ignored(self):
         row = review.evaluate(
