@@ -156,3 +156,11 @@ def test_snapshot_and_summary_are_research_only():
     assert "promotion_allowed=false" in line
     assert "live_allowed=false" in line
     assert "decision_effect=NONE execution_effect=NONE" in line
+    audit = cal.format_group_audit(report)
+    assert "[BBO_CALIBRATION_V3_GROUP_AUDIT]" in audit
+    assert "symbol=SOLUSDT:n=1:valid=1" in audit
+    assert "setup=MOMENTUM:n=1:valid=1" in audit
+    assert "side=LONG:n=1:valid=1" in audit
+    assert "regime=TRENDING_UP:n=1:valid=1" in audit
+    assert "promotion_allowed=false live_allowed=false" in audit
+    assert "decision_effect=NONE execution_effect=NONE" in audit
