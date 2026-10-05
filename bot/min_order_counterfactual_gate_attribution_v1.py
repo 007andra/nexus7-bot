@@ -333,6 +333,25 @@ def format_summary(report):
     )
 
 
+def format_outcome_reasons(report):
+    rows = list(report.get("outcome_reason_rows") or [])
+    parts = [
+        f"{r['reason']}:obs60={r['observed_60m']}"
+        f":avg_ret={_fmt(r['avg_return'], 6)}"
+        f":pos_rate={_fmt(r['positive_rate'], 4)}"
+        f":avg_mfe={_fmt(r['avg_mfe'], 6)}"
+        f":avg_mae={_fmt(r['avg_mae'], 6)}"
+        for r in rows
+    ]
+    return (
+        "[MIN_ORDER_COUNTERFACTUAL_GATE_ATTRIBUTION_V1_OUTCOMES] "
+        + ("|".join(parts) if parts else "NONE")
+        + " diagnostic_only=true thresholds_unchanged=true "
+        "risk_epoch_traversal_credit=false promotion_allowed=false "
+        "live_allowed=false decision_effect=NONE execution_effect=NONE"
+    )
+
+
 def format_closest(report):
     rows = report.get("closest_rr_rejects") or []
     parts = [
@@ -356,6 +375,7 @@ __all__ = [
     "current_thresholds",
     "enabled",
     "format_closest",
+    "format_outcome_reasons",
     "format_summary",
     "snapshot",
 ]
