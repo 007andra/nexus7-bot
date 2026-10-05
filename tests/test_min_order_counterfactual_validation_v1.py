@@ -172,6 +172,11 @@ class SnapshotIsolation(unittest.TestCase):
             [outcome("a", 0.01)],
         )
         line = validation.format_summary(report)
+        self.assertIn("all_median_return=", line)
+        self.assertIn("all_avg_mfe=", line)
+        self.assertIn("all_avg_mae=", line)
+        self.assertIn("allowed_median_return=", line)
+        self.assertIn("rejected_median_return=", line)
         self.assertIn("risk_epoch_traversal_credit=false", line)
         self.assertIn("automatic_promotion=false", line)
         self.assertIn("promotion_allowed=false", line)
