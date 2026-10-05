@@ -112,6 +112,22 @@ class ReleaseBoardTests(unittest.TestCase):
         self.assertIn("M3_EDGE_EVIDENCE", row["blockers"])
         self.assertFalse(row["live_allowed"])
 
+
+    def test_oos_pass_cannot_bypass_risk_or_canonical_pipeline(self):
+        row = board.evaluate(
+            readiness(ready=False),
+            epoch(complete=False),
+            validation(positive=True),
+            {"recommendation": "DISCARD_RR_RELAXATION_IN_THIS_SAMPLE"},
+            prospective_oos=oos(ready=True),
+        )
+        self.assertEqual(row["m3_edge_evidence"], "PROSPECTIVE_OOS_PASS_MANUAL_REVIEW")
+        self.assertIn("M1_RISK_GATE", row["blockers"])
+        self.assertIn("M2_CANONICAL_PIPELINE", row["blockers"])
+        self.assertEqual(row["status"], "BLOCKED")
+        self.assertFalse(row["live_allowed"])
+        self.assertFalse(row["promotion_allowed"])
+
     def test_runtime_preflight_failure_blocks_m4(self):
         row = board.evaluate(
             readiness(ready=True, preflight=False),
