@@ -450,12 +450,33 @@ async def snapshot(db):
         (POPULATION, started),
     )
     payloads = []
+    invalid_candidate_rows = 0
+    candidate_ids = set()
     for item in rows or []:
         raw = item["payload"] if hasattr(item, "keys") else item[0]
         try:
-            payloads.append(json.loads(raw))
+            obj = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError):
+            invalid_candidate_rows += 1
             continue
+        obs = obj.get("counterfactual_nexus_v1")
+        cid = str(obj.get("candidate_id") or "")
+        if (
+            not cid
+            or obj.get("population") != POPULATION
+            or obj.get("post_gate_v2") is not True
+            or obj.get("shadow_only") is not True
+            or obj.get("live_eligible") is not False
+            or obj.get("execution_effect") != "NONE"
+            or not isinstance(obs, dict)
+            or str(obs.get("candidate_id") or "") != cid
+            or obs.get("cohort") != COHORT
+            or obs.get("risk_epoch_traversal_credit") is not False
+        ):
+            invalid_candidate_rows += 1
+            continue
+        candidate_ids.add(cid)
+        payloads.append(obj)
 
     out_rows = await db._fetchall(
         "SELECT candidate_id,horizon,payload FROM post_gate_shadow_outcomes_v2 "
@@ -463,22 +484,55 @@ async def snapshot(db):
         (POPULATION, 60, 240),
     )
     out60, out240 = [], []
+    invalid_outcome_rows = 0
     for item in out_rows or []:
-        cid = item["candidate_id"] if hasattr(item, "keys") else item[0]
+        cid = str(item["candidate_id"] if hasattr(item, "keys") else item[0])
         horizon = int(item["horizon"] if hasattr(item, "keys") else item[1])
         raw = item["payload"] if hasattr(item, "keys") else item[2]
         try:
             obj = json.loads(raw)
-            obj["candidate_id"] = cid
-            (out60 if horizon == 60 else out240).append(obj)
         except (TypeError, ValueError, json.JSONDecodeError):
+            invalid_outcome_rows += 1
             continue
+        if (
+            cid not in candidate_ids
+            or obj.get("population") != POPULATION
+            or obj.get("post_gate_v2") is not True
+            or obj.get("live_eligible") is not False
+            or obj.get("execution_effect") != "NONE"
+            or int(obj.get("horizon", -1)) != horizon
+            or obj.get("outcome") != "OBSERVED"
+        ):
+            invalid_outcome_rows += 1
+            continue
+        obj["candidate_id"] = cid
+        (out60 if horizon == 60 else out240).append(obj)
+
+    baseline_valid = (
+        baseline.get("cohort_id") == COHORT_ID
+        and baseline.get("population") == POPULATION
+        and baseline.get("hypothesis_frozen") is True
+        and baseline.get("reset_allowed") is False
+        and baseline.get("v1_population_untouched") is True
+        and baseline.get("v1_cohort_id_untouched") is True
+        and isinstance(baseline.get("hypothesis"), dict)
+        and baseline["hypothesis"].get("hypothesis_id") == COHORT_ID
+        and baseline["hypothesis"].get("production_threshold_changes") is False
+    )
 
     report = v1.build_report(payloads, out60, out240, baseline=baseline)
     report.update(AUTHORITY)
     report["population"] = POPULATION
     report["cohort_id"] = COHORT_ID
     report["v1_untouched"] = True
+    report["invalid_candidate_rows"] = invalid_candidate_rows
+    report["invalid_outcome_rows"] = invalid_outcome_rows
+    report["cohort_metadata_frozen"] = baseline_valid
+    report["audit_pass"] = (
+        baseline_valid
+        and invalid_candidate_rows == 0
+        and invalid_outcome_rows == 0
+    )
     return report
 
 
@@ -496,6 +550,9 @@ def format_summary(report):
         f"allowed60_n={a60['n']} rejected60_n={r60['n']} "
         f"allowed240_n={a240['n']} rejected240_n={r240['n']} "
         f"sample_complete={str(report['sample_complete']).lower()} "
+        f"audit_pass={str(report['audit_pass']).lower()} "
+        f"invalid_candidates={report['invalid_candidate_rows']} "
+        f"invalid_outcomes={report['invalid_outcome_rows']} "
         "v1_untouched=true research_only=true shadow_only=true "
         "promotion_allowed=false live_allowed=false "
         "decision_effect=NONE execution_effect=NONE"
