@@ -105,6 +105,21 @@ async def snapshot(db, *, now_epoch=None):
     payload_counts = Counter(x for x in payload_ids if x)
     duplicate_payload_ids = sum(1 for n in payload_counts.values() if n > 1)
 
+    distributions = {}
+    for dim in ("symbol", "side", "regime", "setup"):
+        counts = Counter(
+            str(item["payload"].get(dim) or "UNKNOWN")
+            for item in candidates.values()
+        )
+        distributions[dim] = dict(sorted(counts.items()))
+    allowed_n = sum(
+        1 for item in candidates.values()
+        if (item["payload"].get("counterfactual_nexus_v1") or {}).get(
+            "execution_allowed"
+        ) is True
+    )
+    rejected_n = len(candidates) - allowed_n
+
     outcome_rows = await db._fetchall(
         "SELECT candidate_id,horizon,payload "
         "FROM hard_gate_shadow_outcomes_v1 "
@@ -198,6 +213,9 @@ async def snapshot(db, *, now_epoch=None):
         "oos_outcomes": oos_outcomes,
         "first_capture_epoch": min(captured_values) if captured_values else None,
         "last_capture_epoch": max(captured_values) if captured_values else None,
+        "allowed_candidates": allowed_n,
+        "rejected_candidates": rejected_n,
+        "distributions": distributions,
         "violations": violations,
         "total_violations": total_violations,
         "integrity_pass": total_violations == 0,
@@ -225,6 +243,8 @@ def format_log(row: dict) -> str:
         f"cohort_id={_fmt(row.get('cohort_id'))} "
         f"enrolled={_fmt(row.get('enrolled_candidates'))} "
         f"oos_outcomes={_fmt(row.get('oos_outcomes'))} "
+        f"allowed_candidates={_fmt(row.get('allowed_candidates'))} "
+        f"rejected_candidates={_fmt(row.get('rejected_candidates'))} "
         f"metadata_frozen={_fmt(row.get('metadata_frozen'))} "
         f"total_violations={_fmt(row.get('total_violations'))} "
         f"candidate_id_mismatches={_fmt(v.get('candidate_id_mismatches'))} "
@@ -239,4 +259,19 @@ def format_log(row: dict) -> str:
         "cohort_mutation_authorized=false candidate_generation_unchanged=true "
         "thresholds_unchanged=true promotion_allowed=false live_allowed=false "
         "decision_effect=NONE execution_effect=NONE"
+    )
+
+
+def format_distribution(row: dict) -> str:
+    parts = []
+    for dim in ("symbol", "side", "regime", "setup"):
+        counts = (row.get("distributions") or {}).get(dim) or {}
+        body = ",".join(f"{k}:{v}" for k, v in counts.items()) or "NONE"
+        parts.append(f"{dim}={body}")
+    return (
+        "[PROSPECTIVE_OOS_ENROLLMENT_DISTRIBUTION_V1] "
+        + " | ".join(parts)
+        + " forced_diversity=false candidate_generation_unchanged=true "
+        "promotion_allowed=false live_allowed=false decision_effect=NONE "
+        "execution_effect=NONE"
     )
