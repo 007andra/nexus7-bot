@@ -23,6 +23,7 @@ from bot.logger import shadow_log as log
 _RUNNING = weakref.WeakSet()
 _PERSISTENCE_LOGGED = set()
 _OUTCOME_BATCH_LIMIT = 8
+_OUTCOME_IO_TIMEOUT_S = 5.0
 _RISK_EPOCH_IO_TIMEOUT_S = 3.0
 _BBO_CALIBRATION_INTERVAL_S = 300.0
 _BBO_CALIBRATION_LAST_EMIT = 0.0
@@ -1161,7 +1162,9 @@ async def scan(engine, *, db=None, bbo_views=None):
             await asyncio.sleep(0)
         _check(engine)
         try:
-            outcome_stats = await asyncio.wait_for(observe_outcomes(engine, db), timeout=2.0)
+            outcome_stats = await asyncio.wait_for(
+                observe_outcomes(engine, db), timeout=_OUTCOME_IO_TIMEOUT_S
+            )
             _emit("HARD_GATE_SHADOW_OUTCOMES", {**outcome_stats, **AUTHORITY})
         except GateCleared:
             raise
