@@ -130,6 +130,34 @@ class AttributionTests(unittest.TestCase):
             by_reason["RR_BELOW_MIN"]["positive_rate"], 1.0
         )
 
+    def test_outcome_reason_metrics_exclude_allowed_candidates(self):
+        rows = [
+            payload(
+                "rr_rejected",
+                reason="R:R líquido 1.4 < mínimo líquido 1.60",
+                rr=1.4,
+                ev=0.1,
+                allowed=False,
+            ),
+            payload(
+                "rr_allowed",
+                reason="R:R líquido 1.7 >= mínimo líquido 1.60",
+                rr=1.7,
+                ev=0.2,
+                allowed=True,
+            ),
+        ]
+        outcomes = [
+            outcome("rr_rejected", -0.03),
+            outcome("rr_allowed", 0.50),
+        ]
+        with patch.dict(os.environ, {"NEXUS_MIN_RR_NET": "1.60"}):
+            report = attribution.build_report(rows, outcomes)
+        by_reason = {r["reason"]: r for r in report["outcome_reason_rows"]}
+        self.assertEqual(report["observed_60m"], 1)
+        self.assertEqual(by_reason["RR_BELOW_MIN"]["observed_60m"], 1)
+        self.assertAlmostEqual(by_reason["RR_BELOW_MIN"]["avg_return"], -0.03)
+
     def test_outcome_reason_formatter_exposes_return_mfe_mae(self):
         rows = [
             payload(
@@ -153,6 +181,7 @@ class AttributionTests(unittest.TestCase):
         self.assertIn("RR_BELOW_MIN:obs60=1", line)
         self.assertIn(":avg_mfe=", line)
         self.assertIn(":avg_mae=", line)
+        self.assertIn("rejected_only=true", line)
         self.assertIn("promotion_allowed=false live_allowed=false", line)
         self.assertIn("decision_effect=NONE execution_effect=NONE", line)
 
