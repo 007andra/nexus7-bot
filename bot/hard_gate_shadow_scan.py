@@ -790,6 +790,23 @@ async def _mature_existing_prospective_oos_when_gate_clear(
 
     raw_meta = meta_rows[0]["payload"] if hasattr(meta_rows[0], "keys") else meta_rows[0][0]
     baseline = json.loads(raw_meta)
+    if (
+        baseline.get("cohort_id") != oos.COHORT_ID
+        or baseline.get("hypothesis_frozen") is not True
+        or baseline.get("reset_allowed") is not False
+    ):
+        result = {
+            "status": "INVALID_EXISTING_COHORT",
+            "gate_clear": True,
+            "new_candidates": 0,
+            "written": 0,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        }
+        _emit("PROSPECTIVE_OOS_GATE_CLEAR_CONTINUITY_V1", result)
+        return result
     started = float(baseline["started_epoch"])
     limit = max(1, min(int(batch_limit), 50))
     stats = {
@@ -798,7 +815,7 @@ async def _mature_existing_prospective_oos_when_gate_clear(
         "batch_limit": limit,
         "examined": 0,
         "written": 0,
-        "cache_gap": 0,
+        "cache_gap_deferred": 0,
         "skipped_non_oos": 0,
         "skipped_identity_or_authority": 0,
         "new_candidates": 0,
@@ -851,6 +868,12 @@ async def _mature_existing_prospective_oos_when_gate_clear(
             outcome = outcome_from_cache(row, bars, horizon, time.time())
             if outcome is None:
                 continue
+            # A restart can temporarily leave the local 15m cache incomplete.
+            # Do not persist UNKNOWN_CACHE_GAP as a terminal outcome here:
+            # defer it so a later continuity pass can mature the same candidate.
+            if outcome.get("outcome") != "OBSERVED":
+                stats["cache_gap_deferred"] += 1
+                continue
             await db._exec(
                 "INSERT INTO hard_gate_shadow_outcomes_v1 "
                 "(candidate_id,horizon,population,payload) VALUES (?,?,?,?) "
@@ -863,9 +886,6 @@ async def _mature_existing_prospective_oos_when_gate_clear(
                 ),
             )
             stats["written"] += 1
-            stats["cache_gap"] += int(
-                outcome.get("outcome") == "UNKNOWN_CACHE_GAP"
-            )
 
     report = await oos.snapshot(db)
     log.warning("%s", oos.format_summary(report))
