@@ -75,12 +75,9 @@ def _candidate_record(raw):
     cf_cid = str(cf.get("candidate_id") or "")
     captured_epoch = _finite(raw.get("captured_epoch"))
     table_cid = raw.get("_review_table_candidate_id")
-    table_captured = _finite(raw.get("_review_table_captured_epoch"))
     if not cid or cf_cid != cid or captured_epoch is None:
         return None
     if table_cid is not None and str(table_cid) != cid:
-        return None
-    if table_captured is not None and abs(table_captured - captured_epoch) > 1e-9:
         return None
     if raw.get("shadow_only") is not True or raw.get("live_eligible") is not False:
         return None
@@ -159,6 +156,7 @@ def evaluate(
         now = time.time()
     records = []
     malformed_eligible = 0
+    cohort_start = _finite(oos_report.get("started_epoch"))
     for raw in candidates:
         row = _candidate_record(raw)
         if row is None:
@@ -167,6 +165,12 @@ def evaluate(
             cf = raw.get("counterfactual_nexus_v1") if isinstance(raw, dict) else None
             if isinstance(cf, dict) and cf.get("cohort") == oos.COHORT:
                 malformed_eligible += 1
+            continue
+        # PostgreSQL REAL is single precision; the table timestamp is suitable
+        # for coarse query pruning but not exact identity. Use the durable JSON
+        # timestamp for the immutable prospective cutoff and maturation proof.
+        if cohort_start is None or row["captured_epoch"] + 1e-9 < cohort_start:
+            malformed_eligible += 1
             continue
         records.append(row)
 
@@ -363,7 +367,7 @@ def evaluate(
 async def snapshot(db, oos_report):
     start = float(oos_report.get("started_epoch") or 0.0)
     rows = await db._fetchall(
-        "SELECT candidate_id,captured_epoch,payload FROM hard_gate_shadow_candidates_v1 "
+        "SELECT candidate_id,payload FROM hard_gate_shadow_candidates_v1 "
         "WHERE population=? AND captured_epoch>=? ORDER BY captured_epoch,candidate_id",
         (oos.POPULATION, start),
     )
@@ -371,16 +375,14 @@ async def snapshot(db, oos_report):
     for item in rows or []:
         if hasattr(item, "keys"):
             table_cid = item["candidate_id"]
-            table_captured = item["captured_epoch"]
             raw = item["payload"]
         else:
-            table_cid, table_captured, raw = item[0], item[1], item[2]
+            table_cid, raw = item[0], item[1]
         try:
             obj = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         obj["_review_table_candidate_id"] = table_cid
-        obj["_review_table_captured_epoch"] = table_captured
         candidates.append(obj)
 
     out_rows = await db._fetchall(
