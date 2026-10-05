@@ -4,6 +4,7 @@ import unittest
 
 from bot import pilot_budget_study_v1 as budget
 from bot import pilot_release_review_v1 as review
+from bot import segregated_pilot_budget_proof_v1 as proof
 from bot import segregated_pilot_ledger_v1 as ledger
 
 
@@ -93,6 +94,40 @@ class PilotBudgetStudyTests(unittest.TestCase):
         self.assertEqual(row["execution_effect"], "NONE")
 
 
+class SegregatedBudgetProofTests(unittest.TestCase):
+    def test_five_r_budget_reserves_five_then_blocks_two(self):
+        study = budget.evaluate(readiness(), oos())
+        row = proof.evaluate(study, attempts=7)
+        self.assertEqual(row["status"], "PROOF_PASS")
+        self.assertTrue(row["proof_pass"])
+        self.assertEqual(row["expected_reservable_units"], 5)
+        self.assertEqual(row["reserved_attempts"], 5)
+        self.assertEqual(row["blocked_attempts"], 2)
+        self.assertAlmostEqual(
+            row["reserved_loss_usdt"],
+            study["shadow_reference_budget_usdt"],
+            places=10,
+        )
+        self.assertAlmostEqual(row["remaining_budget_usdt"], 0.0, places=10)
+        self.assertEqual(
+            [x["status"] for x in row["sequence"]],
+            ["SHADOW_RESERVED"] * 5 + ["SHADOW_BUDGET_BLOCK"] * 2,
+        )
+        self.assertFalse(row["synthetic_entries_persisted"])
+        self.assertFalse(row["oos_enrollment_credit"])
+        self.assertFalse(row["canonical_pipeline_credit"])
+        self.assertFalse(row["live_allowed"])
+        self.assertEqual(row["execution_effect"], "NONE")
+
+    def test_invalid_budget_fails_closed(self):
+        row = proof.evaluate({"risk_unit_usdt": None, "shadow_reference_budget_usdt": None})
+        self.assertEqual(row["status"], "INPUT_UNAVAILABLE")
+        self.assertFalse(row["proof_pass"])
+        self.assertEqual(row["reserved_attempts"], 0)
+        self.assertEqual(row["blocked_attempts"], 0)
+        self.assertFalse(row["live_allowed"])
+
+
 class SegregatedLedgerTests(unittest.IsolatedAsyncioTestCase):
     async def test_five_r_reference_reserves_five_then_blocks_sixth(self):
         db = FakeDB([allowed_candidate(f"C{i}", 1001 + i) for i in range(6)])
@@ -136,7 +171,11 @@ class PilotReleaseReviewTests(unittest.TestCase):
     def test_even_complete_research_package_never_allows_live(self):
         oos_row = oos("READY_FOR_MANUAL_REVIEW")
         study = budget.evaluate(readiness(), oos_row)
-        row = review.evaluate(readiness(), release(), oos_row, study, self._ledger())
+        proof_row = proof.evaluate(study)
+        row = review.evaluate(
+            readiness(), release(), oos_row, study, self._ledger(),
+            budget_proof=proof_row,
+        )
         self.assertEqual(row["status"], "DESIGN_EVIDENCE_READY_FOR_MANUAL_REVIEW")
         self.assertTrue(row["research_package_ready"])
         self.assertIn("INDEPENDENT_CAPITAL_PROOF_NOT_PROVEN", row["blockers"])
@@ -149,11 +188,29 @@ class PilotReleaseReviewTests(unittest.TestCase):
         self.assertFalse(row["external_capital_clears_lifetime_drawdown"])
         self.assertFalse(row["live_allowed"])
         self.assertFalse(row["promotion_allowed"])
+        self.assertEqual(row["budget_guard_proof_status"], "PROOF_PASS")
+        self.assertTrue(row["budget_guard_proof_pass"])
+        self.assertEqual(row["budget_guard_proof_reserved_attempts"], 5)
+        self.assertEqual(row["budget_guard_proof_blocked_attempts"], 2)
+        self.assertFalse(row["budget_guard_proof_synthetic_entries_persisted"])
+
+    def test_missing_budget_proof_keeps_review_blocked(self):
+        oos_row = oos("READY_FOR_MANUAL_REVIEW")
+        study = budget.evaluate(readiness(), oos_row)
+        row = review.evaluate(readiness(), release(), oos_row, study, self._ledger())
+        self.assertEqual(row["status"], "BLOCKED_AWAITING_RESEARCH_EVIDENCE")
+        self.assertIn("SEGREGATED_BUDGET_GUARD_PROOF_NOT_READY", row["blockers"])
+        self.assertFalse(row["research_package_ready"])
+        self.assertFalse(row["live_allowed"])
 
     def test_oos_pending_keeps_review_blocked(self):
         oos_row = oos()
         study = budget.evaluate(readiness(), oos_row)
-        row = review.evaluate(readiness(), release(), oos_row, study, self._ledger())
+        proof_row = proof.evaluate(study)
+        row = review.evaluate(
+            readiness(), release(), oos_row, study, self._ledger(),
+            budget_proof=proof_row,
+        )
         self.assertEqual(row["status"], "BLOCKED_AWAITING_RESEARCH_EVIDENCE")
         self.assertIn("PROSPECTIVE_OOS_NOT_READY", row["blockers"])
         self.assertFalse(row["live_allowed"])
