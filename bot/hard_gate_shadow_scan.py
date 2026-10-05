@@ -55,6 +55,8 @@ _CALIBRATION_FAILURE_INTERVAL_S = 300.0
 _CALIBRATION_FAILURE_LAST_EMIT = 0.0
 _PROSPECTIVE_OOS_INTERVAL_S = 300.0
 _PROSPECTIVE_OOS_LAST_EMIT = 0.0
+_OOS_GATE_CLEAR_CONTINUITY_INTERVAL_S = 30.0
+_OOS_GATE_CLEAR_CONTINUITY_LAST_RUN = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -750,10 +752,20 @@ async def _mature_existing_prospective_oos_when_gate_clear(
     dispatch. It only reads cached 15m bars plus the dedicated research tables
     and appends matured 60m/240m outcome rows for the frozen prospective cohort.
     """
+    global _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN
     from bot import prospective_oos_cohort_v1 as oos
 
     if not oos.enabled():
         return None
+
+    now_monotonic = time.monotonic()
+    if (
+        _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN > 0.0
+        and now_monotonic - _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN
+        < _OOS_GATE_CLEAR_CONTINUITY_INTERVAL_S
+    ):
+        return None
+    _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN = now_monotonic
 
     # Do not create a new prospective cohort merely because LIVE is unblocked.
     # Only continue an already-existing immutable cohort.
