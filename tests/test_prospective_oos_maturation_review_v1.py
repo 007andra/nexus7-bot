@@ -160,7 +160,10 @@ class MaturationReviewTests(unittest.TestCase):
             candidates.append(candidate(cid, allowed=True, symbol=f"A{i}USDT"))
             out60[cid] = outcome(cid, 0.01 + i * 0.001, horizon=60)
             out240[cid] = outcome(cid, 0.02 + i * 0.001, horizon=240)
-            entries[cid] = ledger_entry(cid)
+            entries[cid] = ledger_entry(
+                cid,
+                before=0.10 - i * 0.02,
+            )
         for i in range(oos.MIN_REJECTED_OUTCOMES):
             cid = f"R{i}"
             candidates.append(
@@ -278,6 +281,25 @@ class MaturationReviewTests(unittest.TestCase):
             now_epoch=20_000.0,
         )
         self.assertIn("LEDGER_OUTSIDE_APPROVED_PROSPECTIVE_SCOPE", row["blockers"])
+        self.assertFalse(row["audit_pass"])
+
+    def test_cumulative_ledger_sequence_cannot_reuse_remaining_budget(self):
+        a1, a2 = "A1", "A2"
+        row = review.evaluate(
+            [
+                candidate(a1, allowed=True, captured=2000.0),
+                candidate(a2, allowed=True, captured=2100.0),
+            ],
+            {},
+            {},
+            {
+                a1: ledger_entry(a1, before=0.10),
+                a2: ledger_entry(a2, before=0.10),
+            },
+            cohort_meta(),
+            now_epoch=20_000.0,
+        )
+        self.assertIn("LEDGER_REMAINING_SEQUENCE_INVALID", row["blockers"])
         self.assertFalse(row["audit_pass"])
 
     def test_budget_block_is_valid_fail_closed_reservation_behavior(self):
