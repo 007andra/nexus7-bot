@@ -270,6 +270,56 @@ class FirstApprovalReviewTests(unittest.TestCase):
         self.assertEqual(row["approved_candidates"], 0)
         self.assertTrue(row["audit_pass"])
 
+    def test_postgres_real_timestamp_quantization_does_not_break_identity(self):
+        cid = "A1"
+        raw = candidate(cid, allowed=True, captured=1791211403.123456)
+        raw["_review_table_candidate_id"] = cid
+        # PostgreSQL REAL can quantize epoch seconds materially at ~1.8e9.
+        raw["_review_table_captured_epoch"] = 1791211392.0
+        report = oos_report()
+        report["started_epoch"] = 1791211311.675
+        row = review.evaluate(
+            [raw],
+            {},
+            {},
+            {cid: ledger_entry(cid)},
+            report,
+            now_epoch=1791220000.0,
+        )
+        self.assertEqual(row["status"], "FIRST_APPROVAL_CAPTURED_AWAITING_60M")
+        self.assertTrue(row["audit_pass"])
+        self.assertEqual(row["first_approval_candidate_id"], cid)
+
+    def test_precise_payload_epoch_before_immutable_cutoff_fails_closed(self):
+        cid = "OLD"
+        raw = candidate(cid, allowed=True, captured=999.0)
+        raw["_review_table_candidate_id"] = cid
+        row = review.evaluate(
+            [raw],
+            {},
+            {},
+            {cid: ledger_entry(cid)},
+            oos_report(),
+            now_epoch=10000.0,
+        )
+        self.assertEqual(row["status"], "FIRST_APPROVAL_AUDIT_FAIL")
+        self.assertIn("MALFORMED_OOS_IDENTITY", row["blockers"])
+
+    def test_table_candidate_identity_still_fails_closed(self):
+        cid = "A1"
+        raw = candidate(cid, allowed=True)
+        raw["_review_table_candidate_id"] = "OTHER"
+        row = review.evaluate(
+            [raw],
+            {},
+            {},
+            {cid: ledger_entry(cid)},
+            oos_report(),
+            now_epoch=10000.0,
+        )
+        self.assertEqual(row["status"], "FIRST_APPROVAL_AUDIT_FAIL")
+        self.assertIn("MALFORMED_OOS_IDENTITY", row["blockers"])
+
     def test_oos_identity_mismatch_fails_closed(self):
         row = review.evaluate(
             [candidate("A1", allowed=True, cf_cid="WRONG")],
