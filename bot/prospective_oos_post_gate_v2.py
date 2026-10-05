@@ -207,6 +207,11 @@ async def _persist_candidate(db, row):
     )
 
 
+def _post_gate_active(engine):
+    from bot import hard_gate_shadow_scan as legacy
+    return not legacy.gate_snapshot(engine)["live_entries_blocked"]
+
+
 def _eligible(minimum_order, *, pullback_pass, funnel):
     return (
         pullback_pass
@@ -242,6 +247,16 @@ async def _collect_batch(engine, db):
     stats = {"symbols_examined": 0, "signals": 0, "eligible": 0, "persisted": 0}
 
     for symbol in selected:
+        if not _post_gate_active(engine):
+            _emit(
+                "PROSPECTIVE_OOS_POST_GATE_V2",
+                {
+                    "status": "GATE_REBLOCKED_STOP_COLLECTION",
+                    "new_candidates_after_reblock": 0,
+                    **AUTHORITY,
+                },
+            )
+            break
         stats["symbols_examined"] += 1
         try:
             klines = [
@@ -337,6 +352,10 @@ async def _collect_batch(engine, db):
                         "required_equity_at_min_qty"
                     ),
                     "capital_source": minimum_order.get("capital_source"),
+                    "production_sha": os.environ.get(
+                        "RAILWAY_GIT_COMMIT_SHA", "UNKNOWN"
+                    ) or "UNKNOWN",
+                    "gate_clear_observed_at_capture": True,
                     "evaluation_fidelity": features.get("evaluation_fidelity"),
                     "missing_features": features.get("missing_features"),
                     "cost_snapshot": {
@@ -348,6 +367,17 @@ async def _collect_batch(engine, db):
                         "slippage_source": snap.slippage_source,
                     },
                 }
+                if not _post_gate_active(engine):
+                    _emit(
+                        "PROSPECTIVE_OOS_POST_GATE_V2",
+                        {
+                            "status": "GATE_REBLOCKED_BEFORE_PERSIST",
+                            "candidate_id": row["candidate_id"],
+                            "persisted": False,
+                            **AUTHORITY,
+                        },
+                    )
+                    break
                 await _persist_candidate(db, row)
                 stats["persisted"] += 1
                 _emit(
