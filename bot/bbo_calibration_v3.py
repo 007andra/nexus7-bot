@@ -220,12 +220,23 @@ def format_summary(report):
     def f(value, digits=3):
         return "NA" if value is None else f"{float(value):.{digits}f}"
 
+    def group_counts(key):
+        groups = report["cost_only_groups"].get(key, {})
+        return ",".join(
+            f"{name}:{int(block.get('candidates') or 0)}"
+            for name, block in sorted(groups.items())
+        ) or "NONE"
+
     return (
         "[BBO_CALIBRATION_V3] "
         f"status={report['status']} "
         f"cost_only_unique={report['cost_only_unique_candidates']} "
         f"cost_only_valid={report['cost_only_valid_bbo']} "
         f"target_min={report['target_min']} target_preferred={report['target_preferred']} "
+        f"side_counts={group_counts('side')} "
+        f"regime_counts={group_counts('regime')} "
+        f"setup_counts={group_counts('setup')} "
+        f"distinct_symbols={len(report['cost_only_groups'].get('symbol', {}))} "
         f"static_cost_mean_bps={f(g['static_cost_bps']['mean'])} "
         f"bbo_cost_mean_bps={f(g['bbo_cost_bps']['mean'])} "
         f"cost_reduction_mean_bps={f(g['cost_reduction_bps']['mean'])} "

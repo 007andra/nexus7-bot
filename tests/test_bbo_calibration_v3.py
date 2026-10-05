@@ -131,6 +131,10 @@ def test_snapshot_and_summary_are_research_only():
     line = cal.format_summary(report)
     assert "[BBO_CALIBRATION_V3]" in line
     assert "cost_only_valid=1" in line
+    assert "side_counts=LONG:1" in line
+    assert "regime_counts=TRENDING_UP:1" in line
+    assert "setup_counts=MOMENTUM:1" in line
+    assert "distinct_symbols=1" in line
     assert "decision_impact_valid=0" in line
     assert "promotion_allowed=false" in line
     assert "live_allowed=false" in line
