@@ -55,6 +55,8 @@ _CALIBRATION_FAILURE_INTERVAL_S = 300.0
 _CALIBRATION_FAILURE_LAST_EMIT = 0.0
 _PROSPECTIVE_OOS_INTERVAL_S = 300.0
 _PROSPECTIVE_OOS_LAST_EMIT = 0.0
+_OOS_GATE_CLEAR_CONTINUITY_INTERVAL_S = 30.0
+_OOS_GATE_CLEAR_CONTINUITY_LAST_RUN = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -740,11 +742,230 @@ async def observe_outcomes(engine, db, *, batch_limit=_OUTCOME_BATCH_LIMIT):
     return stats
 
 
+
+async def _mature_existing_prospective_oos_when_gate_clear(
+    engine, db, *, batch_limit=_OUTCOME_BATCH_LIMIT
+):
+    """Mature already-enrolled prospective OOS rows after the LIVE gate clears.
+
+    This path never generates candidates and never calls Analyzer/NEXUS/sizing/
+    dispatch. It only reads cached 15m bars plus the dedicated research tables
+    and appends matured 60m/240m outcome rows for the frozen prospective cohort.
+    """
+    global _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN
+    from bot import prospective_oos_cohort_v1 as oos
+
+    if not oos.enabled():
+        return None
+
+    now_monotonic = time.monotonic()
+    if (
+        _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN > 0.0
+        and now_monotonic - _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN
+        < _OOS_GATE_CLEAR_CONTINUITY_INTERVAL_S
+    ):
+        return None
+    _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN = now_monotonic
+
+    # Do not create a new prospective cohort merely because LIVE is unblocked.
+    # Only continue an already-existing immutable cohort.
+    await db._exec(oos._META)
+    meta_rows = await db._fetchall(
+        "SELECT payload FROM prospective_oos_cohort_v1 WHERE cohort_id=?",
+        (oos.COHORT_ID,),
+    )
+    if not meta_rows:
+        result = {
+            "status": "NO_EXISTING_COHORT",
+            "gate_clear": True,
+            "new_candidates": 0,
+            "written": 0,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        }
+        _emit("PROSPECTIVE_OOS_GATE_CLEAR_CONTINUITY_V1", result)
+        return result
+
+    raw_meta = meta_rows[0]["payload"] if hasattr(meta_rows[0], "keys") else meta_rows[0][0]
+    baseline = json.loads(raw_meta)
+    if (
+        baseline.get("cohort_id") != oos.COHORT_ID
+        or baseline.get("hypothesis_frozen") is not True
+        or baseline.get("reset_allowed") is not False
+    ):
+        result = {
+            "status": "INVALID_EXISTING_COHORT",
+            "gate_clear": True,
+            "new_candidates": 0,
+            "written": 0,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        }
+        _emit("PROSPECTIVE_OOS_GATE_CLEAR_CONTINUITY_V1", result)
+        return result
+    started = float(baseline["started_epoch"])
+    limit = max(1, min(int(batch_limit), 50))
+    stats = {
+        "status": "EXISTING_OOS_CONTINUITY",
+        "gate_clear": True,
+        "batch_limit": limit,
+        "examined": 0,
+        "written": 0,
+        "cache_gap_deferred": 0,
+        "skipped_non_oos": 0,
+        "skipped_identity_or_authority": 0,
+        "new_candidates": 0,
+    }
+
+    await db._exec(_TABLE)
+    await db._exec(_OUTCOMES)
+
+    for horizon in (60, 240):
+        # Fetch a bounded superset because the post-cutoff population also
+        # contains candidates intentionally excluded from the prospective OOS
+        # cohort. Process at most batch_limit exact OOS members per horizon.
+        rows = await db._fetchall(
+            "SELECT c.candidate_id,c.payload FROM hard_gate_shadow_candidates_v1 c "
+            "LEFT JOIN hard_gate_shadow_outcomes_v1 o ON "
+            "o.candidate_id=c.candidate_id AND o.horizon=? "
+            "WHERE c.population=? AND c.captured_epoch>=? AND o.candidate_id IS NULL "
+            "ORDER BY c.captured_epoch,c.candidate_id LIMIT 200",
+            (horizon, POPULATION, started),
+        )
+        processed = 0
+        for item in rows or []:
+            if processed >= limit:
+                break
+            cid = str(item["candidate_id"] if hasattr(item, "keys") else item[0])
+            raw = item["payload"] if hasattr(item, "keys") else item[1]
+            try:
+                row = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                stats["skipped_identity_or_authority"] += 1
+                continue
+
+            cf = row.get("counterfactual_nexus_v1")
+            if not isinstance(cf, dict) or cf.get("cohort") != oos.COHORT:
+                stats["skipped_non_oos"] += 1
+                continue
+            if (
+                str(row.get("candidate_id") or "") != cid
+                or str(cf.get("candidate_id") or "") != cid
+                or row.get("shadow_only") is not True
+                or row.get("live_eligible") is not False
+                or cf.get("risk_epoch_traversal_credit") is not False
+            ):
+                stats["skipped_identity_or_authority"] += 1
+                continue
+
+            processed += 1
+            stats["examined"] += 1
+            bars = deepcopy(engine.client.get_cached_klines(row["symbol"], "15", 200))
+            outcome = outcome_from_cache(row, bars, horizon, time.time())
+            if outcome is None:
+                continue
+            # A restart can temporarily leave the local 15m cache incomplete.
+            # Do not persist UNKNOWN_CACHE_GAP as a terminal outcome here:
+            # defer it so a later continuity pass can mature the same candidate.
+            if outcome.get("outcome") != "OBSERVED":
+                stats["cache_gap_deferred"] += 1
+                continue
+            await db._exec(
+                "INSERT INTO hard_gate_shadow_outcomes_v1 "
+                "(candidate_id,horizon,population,payload) VALUES (?,?,?,?) "
+                "ON CONFLICT(candidate_id,horizon) DO NOTHING",
+                (
+                    cid,
+                    horizon,
+                    POPULATION,
+                    json.dumps(outcome, allow_nan=False),
+                ),
+            )
+            stats["written"] += 1
+
+    report = await oos.snapshot(db)
+    log.warning("%s", oos.format_summary(report))
+    log.info("%s", oos.format_concentration(report))
+
+    from bot import (
+        prospective_oos_enrollment_audit_v1,
+        prospective_oos_first_approval_review_v1,
+        prospective_oos_maturation_review_v1,
+    )
+
+    audit = await asyncio.wait_for(
+        prospective_oos_enrollment_audit_v1.snapshot(db), timeout=3.0
+    )
+    log.warning("%s", prospective_oos_enrollment_audit_v1.format_log(audit))
+    log.warning(
+        "%s",
+        prospective_oos_enrollment_audit_v1.format_distribution(audit),
+    )
+
+    first = await asyncio.wait_for(
+        prospective_oos_first_approval_review_v1.snapshot(db, report),
+        timeout=3.0,
+    )
+    log.warning(
+        "%s", prospective_oos_first_approval_review_v1.format_log(first)
+    )
+
+    maturation = await asyncio.wait_for(
+        prospective_oos_maturation_review_v1.snapshot(db, report),
+        timeout=3.0,
+    )
+    log.warning("%s", prospective_oos_maturation_review_v1.format_log(maturation))
+    for candidate_line in (
+        prospective_oos_maturation_review_v1.format_candidate_rows(maturation)
+    ):
+        log.warning("%s", candidate_line)
+    log.warning(
+        "%s",
+        prospective_oos_maturation_review_v1.format_concentration(maturation),
+    )
+
+    result = {
+        **stats,
+        "cohort_id": report.get("cohort_id"),
+        "enrolled": report.get("enrolled_candidates"),
+        "observed_60m": report.get("observed_60m"),
+        "observed_240m": report.get("observed_240m"),
+        "audit_pass": audit.get("integrity_pass") is True,
+        "research_only": True,
+        "shadow_only": True,
+        "existing_candidates_only": True,
+        "candidate_generation_unchanged": True,
+        "thresholds_unchanged": True,
+        "risk_unchanged": True,
+        "sizing_unchanged": True,
+        "leverage_unchanged": True,
+        "historical_hwm_preserved": True,
+        "lifetime_drawdown_preserved": True,
+        "current_hard_gate_unchanged": True,
+        "automatic_promotion": False,
+        "promotion_allowed": False,
+        "live_allowed": False,
+        "decision_effect": "NONE",
+        "execution_effect": "NONE",
+    }
+    _emit("PROSPECTIVE_OOS_GATE_CLEAR_CONTINUITY_V1", result)
+    return result
+
+
 async def scan_if_enabled(engine):
-    """Contained entrypoint called before the original LIVE skip. Returns evidence only."""
+    """Contained research entrypoint; never grants or mutates LIVE authority."""
     if not enabled():
         return None
     try:
+        if not gate_snapshot(engine)["live_entries_blocked"]:
+            from bot import database as db
+            return await _mature_existing_prospective_oos_when_gate_clear(
+                engine, db
+            )
         return await scan(engine)
     except asyncio.CancelledError:
         raise
