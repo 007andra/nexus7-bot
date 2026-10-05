@@ -2,8 +2,9 @@
 
 Research-only analytics over the separate MIN_ORDER-blocked counterfactual NEXUS
 cohort. It compares NEXUS-approved and NEXUS-rejected candidates against the
-direction-adjusted 60-minute shadow outcome already persisted by
-hard_gate_shadow_scan.
+direction-adjusted 60-minute and 240-minute shadow outcomes already persisted
+by hard_gate_shadow_scan. The original 60m decision-review contract remains
+unchanged; 240m is additional research evidence only.
 
 This module never changes canonical pipeline traversal, candidate authority,
 risk, sizing, drawdown, dispatch, or LIVE eligibility.
@@ -21,6 +22,7 @@ POPULATION = "HARD_GATE_SHADOW"
 COHORT = "MIN_ORDER_BLOCKED_COUNTERFACTUAL_NEXUS"
 TARGET_EVALUATIONS = 20
 TARGET_OBSERVED_60M = 20
+TARGET_OBSERVED_240M = 20
 
 AUTHORITY = {
     "research_only": True,
@@ -82,23 +84,9 @@ def _metrics(rows):
     }
 
 
-def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=None):
-    observations = {}
-    for raw in payloads:
-        obs = raw.get("counterfactual_nexus_v1")
-        if not isinstance(obs, dict):
-            continue
-        if obs.get("cohort") != COHORT:
-            continue
-        if obs.get("risk_epoch_traversal_credit") is not False:
-            continue
-        cid = str(obs.get("candidate_id") or "")
-        if not cid:
-            continue
-        observations[cid] = dict(obs)
-
+def _matched_rows(observations, outcomes):
     outcome_by_id = {}
-    for raw in outcomes60:
+    for raw in outcomes:
         cid = str(raw.get("candidate_id") or "")
         if not cid or raw.get("outcome") != "OBSERVED":
             continue
@@ -131,17 +119,37 @@ def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=N
                 obs.get("required_equity_at_min_qty")
             ),
         })
+    return matched
 
+
+def _group_rows(matched):
+    groups = defaultdict(list)
+    for row in matched:
+        groups[(row["symbol"], row["setup"])].append(row)
+    rows_out = []
+    for (symbol, setup), rows in groups.items():
+        allowed_rows = [r for r in rows if r["execution_allowed"]]
+        rejected_rows = [r for r in rows if not r["execution_allowed"]]
+        rows_out.append({
+            "symbol": symbol,
+            "setup": setup,
+            "observed": len(rows),
+            "allowed_observed": len(allowed_rows),
+            "rejected_observed": len(rejected_rows),
+            "allowed_avg_return": _mean(r["future_return"] for r in allowed_rows),
+            "rejected_avg_return": _mean(r["future_return"] for r in rejected_rows),
+            "all_avg_return": _mean(r["future_return"] for r in rows),
+        })
+    rows_out.sort(key=lambda r: (-r["observed"], r["symbol"], r["setup"]))
+    return rows_out
+
+
+def _horizon_block(matched):
     allowed = [r for r in matched if r["execution_allowed"]]
     rejected = [r for r in matched if not r["execution_allowed"]]
     allowed_metrics = _metrics(allowed)
     rejected_metrics = _metrics(rejected)
     all_metrics = _metrics(matched)
-
-    tp = sum(1 for r in allowed if r["future_return"] > 0)
-    fp = sum(1 for r in allowed if r["future_return"] <= 0)
-    fn = sum(1 for r in rejected if r["future_return"] > 0)
-    tn = sum(1 for r in rejected if r["future_return"] <= 0)
 
     mean_lift = None
     if (
@@ -161,36 +169,57 @@ def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=N
             allowed_metrics["positive_rate"] - rejected_metrics["positive_rate"]
         )
 
-    groups = defaultdict(list)
-    for row in matched:
-        groups[(row["symbol"], row["setup"])].append(row)
-    group_rows = []
-    for (symbol, setup), rows in groups.items():
-        allowed_rows = [r for r in rows if r["execution_allowed"]]
-        rejected_rows = [r for r in rows if not r["execution_allowed"]]
-        group_rows.append({
-            "symbol": symbol,
-            "setup": setup,
-            "observed": len(rows),
-            "allowed_observed": len(allowed_rows),
-            "rejected_observed": len(rejected_rows),
-            "allowed_avg_return": _mean(r["future_return"] for r in allowed_rows),
-            "rejected_avg_return": _mean(r["future_return"] for r in rejected_rows),
-            "all_avg_return": _mean(r["future_return"] for r in rows),
-        })
-    group_rows.sort(
-        key=lambda r: (
-            -r["observed"],
-            r["symbol"],
-            r["setup"],
-        )
-    )
+    return {
+        "observed": len(matched),
+        "all": all_metrics,
+        "allowed": allowed_metrics,
+        "rejected": rejected_metrics,
+        "allowed_vs_rejected_mean_return_lift": mean_lift,
+        "allowed_vs_rejected_positive_rate_lift": positive_rate_lift,
+        "groups": _group_rows(matched),
+    }
+
+
+def build_report(
+    payloads,
+    outcomes60=(),
+    outcomes240=(),
+    *,
+    epoch_id="UNKNOWN",
+    started_epoch=None,
+):
+    observations = {}
+    for raw in payloads:
+        obs = raw.get("counterfactual_nexus_v1")
+        if not isinstance(obs, dict):
+            continue
+        if obs.get("cohort") != COHORT:
+            continue
+        if obs.get("risk_epoch_traversal_credit") is not False:
+            continue
+        cid = str(obs.get("candidate_id") or "")
+        if not cid:
+            continue
+        observations[cid] = dict(obs)
+
+    matched60 = _matched_rows(observations, outcomes60)
+    matched240 = _matched_rows(observations, outcomes240)
+    h60 = _horizon_block(matched60)
+    h240 = _horizon_block(matched240)
+
+    allowed = [r for r in matched60 if r["execution_allowed"]]
+    rejected = [r for r in matched60 if not r["execution_allowed"]]
+    tp = sum(1 for r in allowed if r["future_return"] > 0)
+    fp = sum(1 for r in allowed if r["future_return"] <= 0)
+    fn = sum(1 for r in rejected if r["future_return"] > 0)
+    tn = sum(1 for r in rejected if r["future_return"] <= 0)
 
     evaluated = len(observations)
-    observed = len(matched)
+    observed60 = h60["observed"]
+    observed240 = h240["observed"]
     if evaluated < TARGET_EVALUATIONS:
         status = "COLLECTING_EVALUATIONS"
-    elif observed < TARGET_OBSERVED_60M:
+    elif observed60 < TARGET_OBSERVED_60M:
         status = "OUTCOMES_PENDING"
     elif not allowed or not rejected:
         status = "EVIDENCE_SAMPLE_COMPLETE_GROUP_IMBALANCE"
@@ -204,12 +233,15 @@ def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=N
         "status": status,
         "target_evaluations": TARGET_EVALUATIONS,
         "target_observed_60m": TARGET_OBSERVED_60M,
+        "target_observed_240m": TARGET_OBSERVED_240M,
         "evaluated": evaluated,
-        "observed_60m": observed,
-        "unobserved_60m": max(0, evaluated - observed),
-        "all": all_metrics,
-        "allowed": allowed_metrics,
-        "rejected": rejected_metrics,
+        "observed_60m": observed60,
+        "unobserved_60m": max(0, evaluated - observed60),
+        "observed_240m": observed240,
+        "unobserved_240m": max(0, evaluated - observed240),
+        "all": h60["all"],
+        "allowed": h60["allowed"],
+        "rejected": h60["rejected"],
         "confusion": {
             "true_positive": tp,
             "false_positive": fp,
@@ -220,11 +252,17 @@ def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=N
             "missed_positive_rate": _safe_rate(fn, tp + fn),
             "non_positive_rejection_rate": _safe_rate(tn, tn + fp),
         },
-        "allowed_vs_rejected_mean_return_lift": mean_lift,
-        "allowed_vs_rejected_positive_rate_lift": positive_rate_lift,
-        "groups": group_rows,
-        "outcome_basis": "DIRECTION_ADJUSTED_HYPOTHETICAL_ENTRY_GROSS_60M",
-        "statistical_claims_allowed": observed >= TARGET_OBSERVED_60M,
+        "allowed_vs_rejected_mean_return_lift": (
+            h60["allowed_vs_rejected_mean_return_lift"]
+        ),
+        "allowed_vs_rejected_positive_rate_lift": (
+            h60["allowed_vs_rejected_positive_rate_lift"]
+        ),
+        "groups": h60["groups"],
+        "horizon_240m": h240,
+        "outcome_basis": "DIRECTION_ADJUSTED_HYPOTHETICAL_ENTRY_GROSS_60M_AND_240M",
+        "statistical_claims_allowed": observed60 >= TARGET_OBSERVED_60M,
+        "statistical_240m_claims_allowed": observed240 >= TARGET_OBSERVED_240M,
     }
 
 
@@ -256,25 +294,32 @@ async def snapshot(db):
             continue
 
     outcome_rows = await db._fetchall(
-        "SELECT o.candidate_id,o.payload FROM hard_gate_shadow_outcomes_v1 o "
+        "SELECT o.candidate_id,o.horizon,o.payload "
+        "FROM hard_gate_shadow_outcomes_v1 o "
         "JOIN hard_gate_shadow_candidates_v1 c ON c.candidate_id=o.candidate_id "
-        "WHERE c.population=? AND c.captured_epoch>=? AND o.horizon=?",
-        (POPULATION, started, 60),
+        "WHERE c.population=? AND c.captured_epoch>=? AND o.horizon IN (?,?)",
+        (POPULATION, started, 60, 240),
     )
-    outcomes = []
+    outcomes60 = []
+    outcomes240 = []
     for item in outcome_rows or []:
-        raw = item["payload"] if hasattr(item, "keys") else item[1]
+        raw = item["payload"] if hasattr(item, "keys") else item[2]
         cid = item["candidate_id"] if hasattr(item, "keys") else item[0]
+        horizon = int(item["horizon"] if hasattr(item, "keys") else item[1])
         try:
             obj = json.loads(raw)
             obj["candidate_id"] = cid
-            outcomes.append(obj)
+            if horizon == 60:
+                outcomes60.append(obj)
+            elif horizon == 240:
+                outcomes240.append(obj)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
 
     return build_report(
         payloads,
-        outcomes,
+        outcomes60,
+        outcomes240,
         epoch_id=eid,
         started_epoch=started,
     )
@@ -289,12 +334,18 @@ def format_summary(report):
     a = report["allowed"]
     r = report["rejected"]
     c = report["confusion"]
+    h240 = report["horizon_240m"]
+    a240 = h240["allowed"]
+    r240 = h240["rejected"]
+    all240 = h240["all"]
     return (
         "[MIN_ORDER_COUNTERFACTUAL_VALIDATION_V1] "
         f"epoch_id={report['epoch_id']} status={report['status']} "
         f"evaluated={report['evaluated']} observed_60m={report['observed_60m']} "
         f"target_evaluations={report['target_evaluations']} "
         f"target_observed_60m={report['target_observed_60m']} "
+        f"observed_240m={report['observed_240m']} "
+        f"target_observed_240m={report['target_observed_240m']} "
         f"all_avg_return={_fmt(all_metrics['avg_return'])} "
         f"all_median_return={_fmt(all_metrics['median_return'])} "
         f"all_positive_rate={_fmt(all_metrics['positive_rate'], 4)} "
@@ -313,6 +364,17 @@ def format_summary(report):
         f"allowed_positive_rate={_fmt(a['positive_rate'], 4)} "
         f"rejected_positive_rate={_fmt(r['positive_rate'], 4)} "
         f"positive_rate_lift={_fmt(report['allowed_vs_rejected_positive_rate_lift'], 4)} "
+        f"all_240m_avg_return={_fmt(all240['avg_return'])} "
+        f"all_240m_median_return={_fmt(all240['median_return'])} "
+        f"all_240m_positive_rate={_fmt(all240['positive_rate'], 4)} "
+        f"all_240m_avg_mfe={_fmt(all240['avg_mfe'])} "
+        f"all_240m_avg_mae={_fmt(all240['avg_mae'])} "
+        f"allowed_240m_observed={a240['n']} "
+        f"allowed_240m_avg_return={_fmt(a240['avg_return'])} "
+        f"allowed_240m_positive_rate={_fmt(a240['positive_rate'], 4)} "
+        f"rejected_240m_observed={r240['n']} "
+        f"rejected_240m_avg_return={_fmt(r240['avg_return'])} "
+        f"rejected_240m_positive_rate={_fmt(r240['positive_rate'], 4)} "
         f"tp={c['true_positive']} fp={c['false_positive']} "
         f"fn={c['false_negative']} tn={c['true_negative']} "
         f"precision={_fmt(c['precision_on_positive_return'], 4)} "
@@ -341,15 +403,37 @@ def format_top_groups(report, limit=8):
     )
 
 
+
+
+
+def format_top_groups_240m(report, limit=8):
+    rows = list((report.get("horizon_240m") or {}).get("groups") or [])[
+        : max(1, int(limit))
+    ]
+    parts = [
+        f"{row['symbol']}/{row['setup']}:n={row['observed']}"
+        f":allowed={row['allowed_observed']}"
+        f":rejected={row['rejected_observed']}"
+        f":all_avg={_fmt(row['all_avg_return'])}"
+        for row in rows
+    ]
+    return (
+        "[MIN_ORDER_COUNTERFACTUAL_VALIDATION_V1_TOP_GROUPS_240M] "
+        + ("|".join(parts) if parts else "NONE")
+        + " research_only=true risk_epoch_traversal_credit=false "
+        "decision_effect=NONE execution_effect=NONE"
+    )
 __all__ = [
     "AUTHORITY",
     "COHORT",
     "FLAG",
     "TARGET_EVALUATIONS",
     "TARGET_OBSERVED_60M",
+    "TARGET_OBSERVED_240M",
     "build_report",
     "enabled",
     "format_summary",
     "format_top_groups",
+    "format_top_groups_240m",
     "snapshot",
 ]
