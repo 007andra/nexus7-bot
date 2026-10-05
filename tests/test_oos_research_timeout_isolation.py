@@ -1,7 +1,7 @@
 """Regression guard for prospective OOS research timeout isolation."""
 from pathlib import Path
 
-SOURCE = Path("bot/hard_gate_shadow_scan.py").read_text(encoding="utf-8")
+SOURCE = (Path(__file__).resolve().parents[1] / "bot" / "hard_gate_shadow_scan.py").read_text(encoding="utf-8")
 
 
 def test_oos_research_bundle_is_decoupled_from_upstream_research_reports():
