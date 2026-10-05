@@ -1305,6 +1305,41 @@ class ContextAndOutcomes(unittest.TestCase):
     def test_outcome_before_horizon_not_observed(self):
         self.assertIsNone(shadow.outcome_from_cache({"captured_epoch": 1800}, [], 60, 5399))
 
+    async def test_gate_clear_continues_existing_oos_without_scanning_candidates(self):
+        with patch.object(cfg, "MAX_DRAWDOWN", 1.0), \
+             patch.object(shadow, "_continue_existing_oos_after_gate_clear", new=AsyncMock(return_value={"ok": True})) as cont:
+            result = await shadow.scan(self.e, db=self.db)
+        self.assertEqual(result, {"ok": True})
+        cont.assert_awaited_once_with(self.e, self.db)
+        self.analyzer.assert_not_called()
+        self.nexus.assert_not_called()
+
+    async def test_post_gate_outcome_maturation_only_writes_existing_candidate(self):
+        now = int(time.time() // 900) * 900
+        row = {
+            **AUTHORITY,
+            "candidate_id": "HARD_GATE_SHADOW:SOLUSDT:LONG:MOMENTUM:post-gate",
+            "captured_epoch": now - 7200,
+            "symbol": "SOLUSDT", "side": "LONG", "entry": 100.0,
+        }
+        await self.db._exec(shadow._TABLE)
+        await self.db._exec(
+            "INSERT INTO hard_gate_shadow_candidates_v1 "
+            "(candidate_id,captured_epoch,symbol,population,payload) VALUES (?,?,?,?,?)",
+            (row["candidate_id"], row["captured_epoch"], row["symbol"],
+             row["population"], json.dumps(row)),
+        )
+        with patch.object(cfg, "MAX_DRAWDOWN", 1.0):
+            stats = await shadow.observe_outcomes(
+                self.e, self.db, batch_limit=8, enforce_live_gate=False
+            )
+        self.assertGreaterEqual(stats["written"], 1)
+        stored = await self.db._fetchall(
+            "SELECT candidate_id,horizon FROM hard_gate_shadow_outcomes_v1"
+        )
+        self.assertTrue(any(r["candidate_id"] == row["candidate_id"] and r["horizon"] == 60 for r in stored))
+        self.analyzer.assert_not_called()
+        self.nexus.assert_not_called()
     def test_real_risk_hard_gate_blocked(self):
         from bot.operator_runtime_policy import _install_drawdown_advisory
         from bot.risk import RiskManager
