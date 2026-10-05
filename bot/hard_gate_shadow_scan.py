@@ -51,6 +51,10 @@ _APPROVAL_FAILURE_INTERVAL_S = 300.0
 _APPROVAL_FAILURE_LAST_EMIT = 0.0
 _CAPITAL_LADDER_INTERVAL_S = 300.0
 _CAPITAL_LADDER_LAST_EMIT = 0.0
+_CALIBRATION_FAILURE_INTERVAL_S = 300.0
+_CALIBRATION_FAILURE_LAST_EMIT = 0.0
+_PROSPECTIVE_OOS_INTERVAL_S = 300.0
+_PROSPECTIVE_OOS_LAST_EMIT = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -1011,6 +1015,76 @@ async def _maybe_emit_min_order_capital_ladder(db):
         return None
 
 
+
+async def _maybe_emit_calibration_failure_analysis(db):
+    """Bounded fixed-bin calibration diagnostics over the discovery cohort."""
+    global _CALIBRATION_FAILURE_LAST_EMIT
+    from bot import calibration_failure_analysis_v1 as analysis
+    if not analysis.enabled():
+        return None
+    now = time.monotonic()
+    if (
+        _CALIBRATION_FAILURE_LAST_EMIT > 0.0
+        and now - _CALIBRATION_FAILURE_LAST_EMIT < _CALIBRATION_FAILURE_INTERVAL_S
+    ):
+        return None
+    _CALIBRATION_FAILURE_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(analysis.snapshot(db), timeout=3.0)
+        log.info("%s", analysis.format_summary(report))
+        log.info("%s", analysis.format_features(report, horizon=60))
+        log.info("%s", analysis.format_features(report, horizon=240))
+        return report
+    except Exception as exc:
+        _emit("CALIBRATION_FAILURE_ANALYSIS_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "thresholds_unchanged": True,
+            "risk_epoch_traversal_credit": False,
+            "automatic_promotion": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
+async def _maybe_emit_prospective_oos_cohort(db):
+    """Bounded immutable-start prospective validation; never LIVE authority."""
+    global _PROSPECTIVE_OOS_LAST_EMIT
+    from bot import prospective_oos_cohort_v1 as oos
+    if not oos.enabled():
+        return None
+    now = time.monotonic()
+    if (
+        _PROSPECTIVE_OOS_LAST_EMIT > 0.0
+        and now - _PROSPECTIVE_OOS_LAST_EMIT < _PROSPECTIVE_OOS_INTERVAL_S
+    ):
+        return None
+    _PROSPECTIVE_OOS_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(oos.snapshot(db), timeout=3.0)
+        log.warning("%s", oos.format_summary(report))
+        log.info("%s", oos.format_concentration(report))
+        return report
+    except Exception as exc:
+        _emit("PROSPECTIVE_OOS_COHORT_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "discovery_sample_excluded": True,
+            "hypothesis_frozen": True,
+            "thresholds_unchanged": True,
+            "risk_epoch_traversal_credit": False,
+            "automatic_promotion": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
 async def scan(engine, *, db=None, bbo_views=None):
     if not enabled():
         return None
@@ -1333,6 +1407,10 @@ async def scan(engine, *, db=None, bbo_views=None):
         _check(engine)
         await _maybe_emit_min_order_capital_ladder(db)
         _check(engine)
+        await _maybe_emit_calibration_failure_analysis(db)
+        _check(engine)
+        prospective_oos_report = await _maybe_emit_prospective_oos_cohort(db)
+        _check(engine)
         if epoch_row is not None and validation_report is not None and review_report is not None:
             try:
                 from bot import reentry_readiness, reentry_release_board_v1
@@ -1341,6 +1419,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                     epoch_row,
                     validation_report,
                     review_report,
+                    prospective_oos=prospective_oos_report,
                 )
                 log.warning("%s", reentry_release_board_v1.format_log(release_board))
             except Exception as exc:
