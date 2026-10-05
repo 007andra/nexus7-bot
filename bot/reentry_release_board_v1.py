@@ -42,7 +42,14 @@ def _finite(value):
     return out if math.isfinite(out) else None
 
 
-def evaluate(readiness: dict, epoch: dict, validation: dict, decision_review: dict) -> dict:
+def evaluate(
+    readiness: dict,
+    epoch: dict,
+    validation: dict,
+    decision_review: dict,
+    *,
+    prospective_oos: dict | None = None,
+) -> dict:
     blockers = []
 
     dd = _finite(readiness.get("drawdown"))
@@ -75,7 +82,10 @@ def evaluate(readiness: dict, epoch: dict, validation: dict, decision_review: di
     allowed60 = (validation.get("allowed") or {})
     allowed240 = ((validation.get("horizon_240m") or {}).get("allowed") or {})
 
-    if recommendation == "DISCARD_RR_RELAXATION_IN_THIS_SAMPLE":
+    oos_status = str((prospective_oos or {}).get("status") or "UNAVAILABLE")
+    if oos_status == "READY_FOR_MANUAL_REVIEW":
+        edge_status = "PROSPECTIVE_OOS_PASS_MANUAL_REVIEW"
+    elif recommendation == "DISCARD_RR_RELAXATION_IN_THIS_SAMPLE":
         edge_status = "NEGATIVE_EVIDENCE"
     elif (
         eval_count >= TARGET_PIPELINE
@@ -86,11 +96,11 @@ def evaluate(readiness: dict, epoch: dict, validation: dict, decision_review: di
             "STUDY_RR_1_50_MANUAL_REVIEW",
         }
     ):
-        edge_status = "MANUAL_REVIEW_REQUIRED"
+        edge_status = "HISTORICAL_MANUAL_REVIEW_ONLY"
     else:
         edge_status = "INSUFFICIENT_EVIDENCE"
 
-    if edge_status != "MANUAL_REVIEW_REQUIRED":
+    if edge_status != "PROSPECTIVE_OOS_PASS_MANUAL_REVIEW":
         blockers.append("M3_EDGE_EVIDENCE")
 
     readiness_blockers = set(readiness.get("blockers") or ())
@@ -128,6 +138,10 @@ def evaluate(readiness: dict, epoch: dict, validation: dict, decision_review: di
         "target_pipeline": TARGET_PIPELINE,
         "target_canonical_observed_60m": TARGET_OUTCOMES_60M,
         "m3_edge_evidence": edge_status,
+        "prospective_oos_status": oos_status,
+        "prospective_oos_enrolled": _int((prospective_oos or {}).get("enrolled_candidates")),
+        "prospective_oos_observed_60m": _int((prospective_oos or {}).get("observed_60m")),
+        "prospective_oos_observed_240m": _int((prospective_oos or {}).get("observed_240m")),
         "counterfactual_evaluated": eval_count,
         "counterfactual_observed_60m": cf_obs60,
         "counterfactual_observed_240m": cf_obs240,
@@ -170,7 +184,9 @@ def format_log(row: dict) -> str:
         "external_capital_flow_preserves_drawdown",
         "m2_canonical_pipeline", "canonical_traversed_to_nexus",
         "canonical_observed_60m",
-        "m3_edge_evidence", "counterfactual_evaluated",
+        "m3_edge_evidence", "prospective_oos_status",
+        "prospective_oos_enrolled", "prospective_oos_observed_60m",
+        "prospective_oos_observed_240m", "counterfactual_evaluated",
         "counterfactual_observed_60m", "counterfactual_observed_240m",
         "decision_review_recommendation",
         "allowed_60m_n", "allowed_60m_avg_return", "allowed_60m_positive_rate",
