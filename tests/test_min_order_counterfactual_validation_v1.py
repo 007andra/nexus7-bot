@@ -50,9 +50,16 @@ class ValidationMath(unittest.TestCase):
             outcome("r1", 0.01),
             outcome("r2", -0.03),
         ]
-        report = validation.build_report(payloads, outcomes)
+        outcomes240 = [
+            outcome("a1", 0.08, mfe=0.10, mae=-0.02),
+            outcome("a2", 0.01, mfe=0.04, mae=-0.02),
+            outcome("r1", -0.02, mfe=0.02, mae=-0.05),
+            outcome("r2", -0.04, mfe=0.01, mae=-0.06),
+        ]
+        report = validation.build_report(payloads, outcomes, outcomes240)
         self.assertEqual(report["evaluated"], 4)
         self.assertEqual(report["observed_60m"], 4)
+        self.assertEqual(report["observed_240m"], 4)
         self.assertEqual(report["allowed"]["n"], 2)
         self.assertEqual(report["rejected"]["n"], 2)
         self.assertAlmostEqual(report["allowed"]["avg_return"], 0.015)
@@ -74,6 +81,15 @@ class ValidationMath(unittest.TestCase):
         )
         self.assertAlmostEqual(
             report["confusion"]["positive_capture_rate"], 0.5
+        )
+        self.assertAlmostEqual(
+            report["horizon_240m"]["allowed"]["avg_return"], 0.045
+        )
+        self.assertAlmostEqual(
+            report["horizon_240m"]["rejected"]["avg_return"], -0.03
+        )
+        self.assertAlmostEqual(
+            report["horizon_240m"]["allowed_vs_rejected_mean_return_lift"], 0.075
         )
 
     def test_only_observed_complete_outcomes_are_used(self):
@@ -137,20 +153,33 @@ class FakeDB:
             return [{"payload": json.dumps(candidate("db1", True))}]
         if "hard_gate_shadow_outcomes_v1" in sql:
             self.outcome_args = args
-            return [{
-                "candidate_id": "db1",
-                "payload": json.dumps({
-                    "outcome": "OBSERVED",
-                    "future_return": 0.02,
-                    "MFE": 0.04,
-                    "MAE": -0.01,
-                }),
-            }]
+            return [
+                {
+                    "candidate_id": "db1",
+                    "horizon": 60,
+                    "payload": json.dumps({
+                        "outcome": "OBSERVED",
+                        "future_return": 0.02,
+                        "MFE": 0.04,
+                        "MAE": -0.01,
+                    }),
+                },
+                {
+                    "candidate_id": "db1",
+                    "horizon": 240,
+                    "payload": json.dumps({
+                        "outcome": "OBSERVED",
+                        "future_return": 0.05,
+                        "MFE": 0.08,
+                        "MAE": -0.02,
+                    }),
+                },
+            ]
         raise AssertionError(sql)
 
 
 class SnapshotIsolation(unittest.TestCase):
-    def test_snapshot_uses_active_epoch_and_60m_only(self):
+    def test_snapshot_uses_active_epoch_and_60m_and_240m(self):
         db = FakeDB()
         with patch.dict(os.environ, {
             "RISK_EPOCH_SHADOW_ID": "REENTRY_V1_20261004_R2",
@@ -159,11 +188,15 @@ class SnapshotIsolation(unittest.TestCase):
         self.assertEqual(report["epoch_id"], "REENTRY_V1_20261004_R2")
         self.assertEqual(report["evaluated"], 1)
         self.assertEqual(report["observed_60m"], 1)
+        self.assertEqual(report["observed_240m"], 1)
+        self.assertAlmostEqual(
+            report["horizon_240m"]["all"]["avg_return"], 0.05
+        )
         self.assertEqual(
             db.candidate_args, ("HARD_GATE_SHADOW", 1500.0)
         )
         self.assertEqual(
-            db.outcome_args, ("HARD_GATE_SHADOW", 1500.0, 60)
+            db.outcome_args, ("HARD_GATE_SHADOW", 1500.0, 60, 240)
         )
 
     def test_summary_restates_no_live_or_epoch_authority(self):
@@ -177,6 +210,15 @@ class SnapshotIsolation(unittest.TestCase):
         self.assertIn("all_avg_mae=", line)
         self.assertIn("allowed_median_return=", line)
         self.assertIn("rejected_median_return=", line)
+        self.assertIn("observed_240m=", line)
+        self.assertIn("all_240m_avg_return=", line)
+        self.assertIn("allowed_240m_avg_return=", line)
+        self.assertIn("rejected_240m_avg_return=", line)
+        groups240 = validation.format_top_groups_240m(report)
+        self.assertIn(
+            "[MIN_ORDER_COUNTERFACTUAL_VALIDATION_V1_TOP_GROUPS_240M]",
+            groups240,
+        )
         self.assertIn("risk_epoch_traversal_credit=false", line)
         self.assertIn("automatic_promotion=false", line)
         self.assertIn("promotion_allowed=false", line)
