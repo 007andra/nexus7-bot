@@ -15,7 +15,20 @@ PILOT_RELEASE_TOKEN = "I_APPROVE_TWO_LIVE_PILOT_ORDERS"
 
 
 def _paper_trade_enabled() -> bool:
-    return os.environ.get("PAPER_TRADE", "true").strip().lower() == "true"
+    """Return the exchange adapter's effective PAPER/LIVE state.
+
+    The venue adapter is the canonical authority because it applies the
+    fail-closed LIVE acknowledgement contract. Reading PAPER_TRADE directly
+    can claim LIVE while the adapter has correctly fallen back to PAPER after
+    an invalid or missing LIVE_TRADING_CONFIRMED token.
+    """
+    try:
+        from bot import exchange
+        return bool(exchange.PAPER_TRADE)
+    except Exception:
+        # Observability/gating must fail closed if the canonical venue state
+        # cannot be resolved.
+        return True
 
 
 def _release_approved() -> bool:
