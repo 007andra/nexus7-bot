@@ -135,6 +135,7 @@ async def _maybe_emit_bbo_calibration_v3(db):
         from bot import bbo_calibration_v3
         report = await asyncio.wait_for(bbo_calibration_v3.snapshot(db), timeout=1.5)
         log.info("%s", bbo_calibration_v3.format_summary(report))
+        log.info("%s", bbo_calibration_v3.format_group_audit(report))
         return report
     except Exception as exc:
         _emit("BBO_CALIBRATION_V3", {
@@ -786,6 +787,7 @@ async def _maybe_emit_min_order_counterfactual_nexus(db):
         report = await asyncio.wait_for(study.snapshot(db), timeout=1.5)
         log.info("%s", study.format_summary(report))
         log.info("%s", study.format_top_groups(report))
+        log.info("%s", study.format_groups(report))
         return report
     except Exception as exc:
         _emit("MIN_ORDER_COUNTERFACTUAL_NEXUS_V1", {
@@ -850,6 +852,7 @@ async def _maybe_emit_min_order_counterfactual_gate_attribution(db):
         report = await asyncio.wait_for(attribution.snapshot(db), timeout=1.5)
         log.info("%s", attribution.format_summary(report))
         log.info("%s", attribution.format_closest(report))
+        log.info("%s", attribution.format_outcome_reasons(report))
         return report
     except Exception as exc:
         _emit("MIN_ORDER_COUNTERFACTUAL_GATE_ATTRIBUTION_V1", {
