@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 
 from bot import prospective_oos_cohort_v1 as oos
 from bot import segregated_pilot_ledger_v1 as ledger
@@ -22,11 +23,17 @@ AUTHORITY = {
     "authority": "OBSERVABILITY_ONLY",
     "research_only": True,
     "read_only": True,
+    "shadow_only": True,
     "prospective_only": True,
+    "association_not_causation": True,
     "candidate_generation_unchanged": True,
     "thresholds_unchanged": True,
     "risk_unchanged": True,
     "sizing_unchanged": True,
+    "leverage_unchanged": True,
+    "historical_hwm_preserved": True,
+    "lifetime_drawdown_preserved": True,
+    "current_hard_gate_unchanged": True,
     "collection_acceleration_authorized": False,
     "automatic_promotion": False,
     "promotion_allowed": False,
@@ -66,11 +73,20 @@ def _candidate_record(raw):
         return None
     cid = str(raw.get("candidate_id") or "")
     cf_cid = str(cf.get("candidate_id") or "")
-    if not cid or cf_cid != cid:
+    captured_epoch = _finite(raw.get("captured_epoch"))
+    table_cid = raw.get("_review_table_candidate_id")
+    table_captured = _finite(raw.get("_review_table_captured_epoch"))
+    if not cid or cf_cid != cid or captured_epoch is None:
+        return None
+    if table_cid is not None and str(table_cid) != cid:
+        return None
+    if table_captured is not None and abs(table_captured - captured_epoch) > 1e-9:
+        return None
+    if raw.get("shadow_only") is not True or raw.get("live_eligible") is not False:
         return None
     return {
         "candidate_id": cid,
-        "captured_epoch": _finite(raw.get("captured_epoch")),
+        "captured_epoch": captured_epoch,
         "symbol": cf.get("symbol") or raw.get("symbol"),
         "side": cf.get("side") or raw.get("side"),
         "regime": cf.get("regime") or raw.get("regime"),
@@ -82,20 +98,51 @@ def _candidate_record(raw):
     }
 
 
-def _observed_outcome(raw):
+def _ceil_15m(epoch):
+    return math.ceil(float(epoch) / 900.0) * 900.0
+
+
+def _observed_outcome(raw, *, horizon, captured_epoch, now_epoch):
+    """Validate one observed outcome independently of the producer.
+
+    Existing UNKNOWN/cache-gap rows are simply not mature observations. A row
+    claiming OBSERVED must prove its declared horizon, non-early observation
+    start, finite metrics and elapsed wall-clock maturity before this review
+    will consume it.
+    """
     if not isinstance(raw, dict) or raw.get("outcome") != "OBSERVED":
-        return None
+        return None, None
+
+    try:
+        payload_horizon = int(raw.get("horizon"))
+    except (TypeError, ValueError):
+        payload_horizon = None
+    if payload_horizon != int(horizon):
+        return None, f"OUTCOME_{horizon}M_HORIZON_MISMATCH"
+
+    obs_start = _finite(raw.get("observation_start"))
+    captured = _finite(captured_epoch)
     ret = _finite(raw.get("future_return"))
     mfe = _finite(raw.get("MFE"))
     mae = _finite(raw.get("MAE"))
-    if ret is None or mfe is None or mae is None:
-        return None
+    if obs_start is None or captured is None or ret is None or mfe is None or mae is None:
+        return None, f"OUTCOME_{horizon}M_MALFORMED"
+
+    expected_start = _ceil_15m(captured)
+    if obs_start + 1e-9 < expected_start:
+        return None, f"OUTCOME_{horizon}M_EARLY_OBSERVATION_START"
+
+    maturity_epoch = obs_start + float(horizon) * 60.0
+    if float(now_epoch) + 1e-9 < maturity_epoch:
+        return None, f"OUTCOME_{horizon}M_NOT_MATURE"
+
     return {
         "future_return": ret,
         "MFE": mfe,
         "MAE": mae,
-        "observation_start": _finite(raw.get("observation_start")),
-    }
+        "observation_start": obs_start,
+        "maturity_epoch": maturity_epoch,
+    }, None
 
 
 def evaluate(
@@ -104,7 +151,12 @@ def evaluate(
     outcomes240,
     ledger_entries,
     oos_report,
+    *,
+    now_epoch=None,
 ):
+    now = _finite(now_epoch)
+    if now is None:
+        now = time.time()
     records = []
     malformed_eligible = 0
     for raw in candidates:
@@ -175,19 +227,51 @@ def evaluate(
     cid = first["candidate_id"]
     le = ledger_entries.get(cid)
     ledger_present = isinstance(le, dict)
+    ledger_risk_unit = _finite(le.get("risk_unit_usdt")) if ledger_present else None
+    ledger_reserved = _finite(le.get("reserved_loss_usdt")) if ledger_present else None
+    remaining_before = _finite(le.get("remaining_before_usdt")) if ledger_present else None
+    remaining_after = _finite(le.get("remaining_after_usdt")) if ledger_present else None
+    exact_one_r = bool(
+        ledger_present
+        and le.get("status") == "SHADOW_RESERVED"
+        and ledger_risk_unit is not None
+        and ledger_risk_unit > 0.0
+        and ledger_reserved is not None
+        and abs(ledger_reserved - ledger_risk_unit) <= 1e-12
+        and remaining_before is not None
+        and remaining_before + 1e-12 >= ledger_risk_unit
+        and remaining_after is not None
+        and abs(
+            remaining_after - max(0.0, remaining_before - ledger_reserved)
+        ) <= 1e-12
+    )
     exact_scope = bool(
         ledger_present
         and le.get("ledger_id") == ledger.LEDGER_ID
         and le.get("prospective_oos_cohort") == oos.COHORT
+        and le.get("research_only") is True
+        and le.get("shadow_only") is True
         and le.get("oos_enrollment_credit") is False
         and le.get("canonical_pipeline_credit") is False
         and le.get("production_order_created") is False
         and le.get("live_allowed") is False
+        and le.get("decision_effect") == "NONE"
         and le.get("execution_effect") == "NONE"
+        and exact_one_r
     )
 
-    o60 = _observed_outcome(outcomes60.get(cid))
-    o240 = _observed_outcome(outcomes240.get(cid))
+    o60, o60_violation = _observed_outcome(
+        outcomes60.get(cid),
+        horizon=60,
+        captured_epoch=first.get("captured_epoch"),
+        now_epoch=now,
+    )
+    o240, o240_violation = _observed_outcome(
+        outcomes240.get(cid),
+        horizon=240,
+        captured_epoch=first.get("captured_epoch"),
+        now_epoch=now,
+    )
     rej60 = _finite(base["rejected_avg_return_60m"])
     rej240 = _finite(base["rejected_avg_return_240m"])
 
@@ -204,9 +288,11 @@ def evaluate(
         "first_approval_confidence": first.get("confidence"),
         "ledger_entry_present": ledger_present,
         "ledger_status": le.get("status") if ledger_present else None,
-        "ledger_reserved_loss_usdt": (
-            _finite(le.get("reserved_loss_usdt")) if ledger_present else None
-        ),
+        "ledger_risk_unit_usdt": ledger_risk_unit,
+        "ledger_reserved_loss_usdt": ledger_reserved,
+        "ledger_exact_one_r": exact_one_r,
+        "ledger_remaining_before_usdt": remaining_before,
+        "ledger_remaining_after_usdt": remaining_after,
         "ledger_exact_scope": exact_scope,
         "outcome_60m_observed": o60 is not None,
         "outcome_240m_observed": o240 is not None,
@@ -231,8 +317,14 @@ def evaluate(
     blockers = []
     if not ledger_present:
         blockers.append("FIRST_APPROVAL_NOT_IN_SHADOW_LEDGER")
+    elif not exact_one_r:
+        blockers.append("FIRST_APPROVAL_NOT_EXACTLY_1R_RESERVED")
     elif not exact_scope:
         blockers.append("FIRST_APPROVAL_LEDGER_SCOPE_INVALID")
+    if o60_violation:
+        blockers.append(o60_violation)
+    if o240_violation:
+        blockers.append(o240_violation)
 
     if blockers:
         return {
@@ -271,17 +363,25 @@ def evaluate(
 async def snapshot(db, oos_report):
     start = float(oos_report.get("started_epoch") or 0.0)
     rows = await db._fetchall(
-        "SELECT payload FROM hard_gate_shadow_candidates_v1 "
+        "SELECT candidate_id,captured_epoch,payload FROM hard_gate_shadow_candidates_v1 "
         "WHERE population=? AND captured_epoch>=? ORDER BY captured_epoch,candidate_id",
         (oos.POPULATION, start),
     )
     candidates = []
     for item in rows or []:
-        raw = item["payload"] if hasattr(item, "keys") else item[0]
+        if hasattr(item, "keys"):
+            table_cid = item["candidate_id"]
+            table_captured = item["captured_epoch"]
+            raw = item["payload"]
+        else:
+            table_cid, table_captured, raw = item[0], item[1], item[2]
         try:
-            candidates.append(json.loads(raw))
+            obj = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
+        obj["_review_table_candidate_id"] = table_cid
+        obj["_review_table_captured_epoch"] = table_captured
+        candidates.append(obj)
 
     out_rows = await db._fetchall(
         "SELECT candidate_id,horizon,payload FROM hard_gate_shadow_outcomes_v1 "
@@ -313,7 +413,14 @@ async def snapshot(db, oos_report):
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
 
-    return evaluate(candidates, out60, out240, entries, oos_report)
+    return evaluate(
+        candidates,
+        out60,
+        out240,
+        entries,
+        oos_report,
+        now_epoch=time.time(),
+    )
 
 
 def _fmt(value):
@@ -334,13 +441,18 @@ def format_log(row: dict) -> str:
         "approved_candidates", "first_approval_seen",
         "first_approval_candidate_id", "first_approval_symbol",
         "first_approval_side", "first_approval_regime", "first_approval_setup",
-        "ledger_entry_present", "ledger_status", "ledger_reserved_loss_usdt",
+        "ledger_entry_present", "ledger_status", "ledger_risk_unit_usdt",
+        "ledger_reserved_loss_usdt", "ledger_exact_one_r",
+        "ledger_remaining_before_usdt", "ledger_remaining_after_usdt",
         "ledger_exact_scope", "outcome_60m_observed", "outcome_240m_observed",
         "first_approval_return_60m", "rejected_avg_return_60m",
         "first_vs_rejected_delta_60m", "first_approval_return_240m",
         "rejected_avg_return_240m", "first_vs_rejected_delta_240m",
-        "audit_pass", "candidate_generation_unchanged", "thresholds_unchanged",
-        "risk_unchanged", "sizing_unchanged",
+        "audit_pass", "research_only", "shadow_only",
+        "association_not_causation", "candidate_generation_unchanged",
+        "thresholds_unchanged", "risk_unchanged", "sizing_unchanged",
+        "leverage_unchanged", "historical_hwm_preserved",
+        "lifetime_drawdown_preserved", "current_hard_gate_unchanged",
         "collection_acceleration_authorized", "promotion_allowed",
         "live_allowed", "decision_effect", "execution_effect",
     )
