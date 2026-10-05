@@ -189,6 +189,11 @@ def build_report(payloads, outcomes60=(), *, epoch_id="UNKNOWN", started_epoch=N
 
     outcome_reason = defaultdict(list)
     for cid, row in by_id.items():
+        if (
+            row.get("execution_allowed") is True
+            or row.get("status") == "ERROR"
+        ):
+            continue
         outcome = outcome_by_id.get(cid)
         if outcome is None:
             continue
@@ -346,7 +351,7 @@ def format_outcome_reasons(report):
     return (
         "[MIN_ORDER_COUNTERFACTUAL_GATE_ATTRIBUTION_V1_OUTCOMES] "
         + ("|".join(parts) if parts else "NONE")
-        + " diagnostic_only=true thresholds_unchanged=true "
+        + " rejected_only=true diagnostic_only=true thresholds_unchanged=true "
         "risk_epoch_traversal_credit=false promotion_allowed=false "
         "live_allowed=false decision_effect=NONE execution_effect=NONE"
     )
