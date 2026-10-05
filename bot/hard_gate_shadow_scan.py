@@ -39,6 +39,7 @@ _MIN_ORDER_CF_NEXUS_INTERVAL_S = 300.0
 _MIN_ORDER_CF_NEXUS_LAST_EMIT = 0.0
 _MIN_ORDER_CF_VALIDATION_INTERVAL_S = 300.0
 _MIN_ORDER_CF_VALIDATION_LAST_EMIT = 0.0
+_MIN_ORDER_CF_VALIDATION_TIMEOUT_S = 3.0
 _MIN_ORDER_CF_ATTRIBUTION_INTERVAL_S = 300.0
 _MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT = 0.0
 _MIN_ORDER_CF_SENSITIVITY_INTERVAL_S = 300.0
@@ -813,7 +814,9 @@ async def _maybe_emit_min_order_counterfactual_validation(db):
         return None
     _MIN_ORDER_CF_VALIDATION_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(validation.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(
+            validation.snapshot(db), timeout=_MIN_ORDER_CF_VALIDATION_TIMEOUT_S
+        )
         log.info("%s", validation.format_summary(report))
         log.info("%s", validation.format_top_groups(report))
         return report
