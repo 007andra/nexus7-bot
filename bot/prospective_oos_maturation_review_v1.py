@@ -357,6 +357,7 @@ def evaluate(
 
     a60_rows, r60_rows, a240_rows, r240_rows = [], [], [], []
     details = []
+    approved_ledger_states = {}
     for row in records:
         cid = row["candidate_id"]
         o60, v60 = _observed_outcome(
@@ -391,6 +392,8 @@ def evaluate(
         lstate, lv = _ledger_state(normalized_ledger.get(cid), candidate_id=cid)
         if lv:
             violations.append(lv)
+        if lstate is not None:
+            approved_ledger_states[cid] = lstate
         details.append({
             "candidate_id": cid,
             "symbol": row.get("symbol"),
@@ -414,6 +417,47 @@ def evaluate(
             "mfe_240m": o240.get("MFE") if o240 else None,
             "mae_240m": o240.get("MAE") if o240 else None,
         })
+
+    # Prove cumulative budget arithmetic independent of insertion/timestamp
+    # ordering. Reserved entries must form a complete 1R descending sequence
+    # from the largest remaining_before; blocked entries may only exist below 1R.
+    ledger_states = list(approved_ledger_states.values())
+    risk_units = [x["risk_unit_usdt"] for x in ledger_states]
+    reference_budget = (
+        max((x["remaining_before_usdt"] for x in ledger_states), default=None)
+    )
+    reserved_states = [x for x in ledger_states if x["status"] == "SHADOW_RESERVED"]
+    blocked_states = [x for x in ledger_states if x["status"] == "SHADOW_BUDGET_BLOCK"]
+    ledger_total_reserved = sum(x["reserved_loss_usdt"] for x in reserved_states)
+    ledger_remaining = (
+        min((x["remaining_after_usdt"] for x in ledger_states), default=None)
+    )
+    if risk_units:
+        base_risk = risk_units[0]
+        if any(abs(x - base_risk) > 1e-12 for x in risk_units[1:]):
+            violations.append("LEDGER_RISK_UNIT_DRIFT")
+        ordered_before = sorted(
+            (x["remaining_before_usdt"] for x in reserved_states),
+            reverse=True,
+        )
+        if reference_budget is not None:
+            for i, actual in enumerate(ordered_before):
+                expected = max(0.0, reference_budget - i * base_risk)
+                if abs(actual - expected) > 1e-9:
+                    violations.append("LEDGER_REMAINING_SEQUENCE_INVALID")
+                    break
+            if ledger_total_reserved > reference_budget + 1e-9:
+                violations.append("LEDGER_BUDGET_EXCEEDED")
+            final_expected = max(
+                0.0, reference_budget - len(reserved_states) * base_risk
+            )
+            for state in blocked_states:
+                if (
+                    state["remaining_before_usdt"] + 1e-9 >= base_risk
+                    or abs(state["remaining_after_usdt"] - final_expected) > 1e-9
+                ):
+                    violations.append("LEDGER_BUDGET_BLOCK_SEQUENCE_INVALID")
+                    break
 
     # Deterministic order and unique blocker names keep telemetry idempotent.
     violations = tuple(dict.fromkeys(violations))
@@ -473,6 +517,12 @@ def evaluate(
         "malformed_exact_oos": malformed_exact_oos,
         "duplicate_candidate_ids": duplicate_candidate_ids,
         "duplicate_ledger_ids": duplicate_ledger_ids,
+        "ledger_reference_budget_usdt": reference_budget,
+        "ledger_risk_unit_usdt": risk_units[0] if risk_units else None,
+        "ledger_reserved_entries": len(reserved_states),
+        "ledger_budget_blocked_entries": len(blocked_states),
+        "ledger_total_reserved_loss_usdt": ledger_total_reserved,
+        "ledger_remaining_budget_usdt": ledger_remaining,
         "approved_candidate_details": tuple(details),
         "approved_60m": pa60,
         "rejected_60m": pr60,
@@ -608,6 +658,10 @@ def format_log(row):
         f"blockers={_fmt(row['blockers'])} audit_pass={_fmt(row['audit_pass'])} "
         f"cohort_id={row['cohort_id']} enrolled={row['enrolled_candidates']} "
         f"approved={row['approved_candidates']} rejected={row['rejected_candidates']} "
+        f"ledger_reserved={row['ledger_reserved_entries']} "
+        f"ledger_blocked={row['ledger_budget_blocked_entries']} "
+        f"ledger_reserved_loss={_fmt(row['ledger_total_reserved_loss_usdt'])} "
+        f"ledger_remaining={_fmt(row['ledger_remaining_budget_usdt'])} "
         f"approved60_n={a60['n']} rejected60_n={r60['n']} "
         f"approved60_avg={_fmt(a60['avg_return'])} rejected60_avg={_fmt(r60['avg_return'])} "
         f"mean_lift60={_fmt(row['mean_return_lift_60m'])} "
