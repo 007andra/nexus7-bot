@@ -104,11 +104,26 @@ def test_invalid_cost_only_bbo_is_visible_but_not_valid_sample():
     assert report["cost_only_global"]["valid_rate"] == 0.5
 
 
-def test_thresholds_are_cost_only_candidate_level():
+def test_thresholds_require_preferred_sample_and_diversity():
     rows50 = [cost_payload(f"c{i}") for i in range(50)]
-    rows100 = [cost_payload(f"p{i}") for i in range(100)]
+    rows100_one_sided = [cost_payload(f"p{i}") for i in range(100)]
+    rows100_diverse = [
+        cost_payload(
+            f"d{i}",
+            side="LONG" if i % 2 == 0 else "SHORT",
+            regime="TRENDING_UP" if i % 3 else "RANGING",
+        )
+        for i in range(100)
+    ]
     assert cal.build_report(rows50)["status"] == "MIN_SAMPLE_REACHED"
-    assert cal.build_report(rows100)["status"] == "PREFERRED_SAMPLE_REACHED"
+    one_sided = cal.build_report(rows100_one_sided)
+    assert one_sided["status"] == "PREFERRED_SAMPLE_REACHED_DIVERSITY_INCOMPLETE"
+    assert one_sided["diversity_ready"] is False
+    assert one_sided["diversity_blockers"] == ["SIDE_DIVERSITY", "REGIME_DIVERSITY"]
+    diverse = cal.build_report(rows100_diverse)
+    assert diverse["status"] == "PREFERRED_SAMPLE_DIVERSE_REACHED"
+    assert diverse["diversity_ready"] is True
+    assert diverse["diversity_blockers"] == []
 
 
 def test_duplicate_candidate_not_double_counted():
@@ -131,6 +146,8 @@ def test_snapshot_and_summary_are_research_only():
     line = cal.format_summary(report)
     assert "[BBO_CALIBRATION_V3]" in line
     assert "cost_only_valid=1" in line
+    assert "diversity_ready=false" in line
+    assert "diversity_blockers=SIDE_DIVERSITY,REGIME_DIVERSITY" in line
     assert "side_counts=LONG:1" in line
     assert "regime_counts=TRENDING_UP:1" in line
     assert "setup_counts=MOMENTUM:1" in line
