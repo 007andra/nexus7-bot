@@ -1127,6 +1127,20 @@ class TradingEngine:
                     type(_matrix_exc).__name__,
                 )
 
+            # Full Binance USDT-perpetual low-capital screen is research-only.
+            # It runs in the background and never mutates cfg.SYMBOLS,
+            # engine.instruments, viable_symbols, risk, sizing, or dispatch.
+            try:
+                from bot import low_capital_universe_v1 as _low_capital_universe
+                _low_capital_universe.schedule_if_enabled(self, log)
+            except Exception as _low_capital_exc:
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1] status=DEFER reason=%s "
+                    "research_only=true observability_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    type(_low_capital_exc).__name__,
+                )
+
             if buying_power <= 0:
                 log.warning(
                     f"⛔ INSUFFICIENT_BUYING_POWER: poder de compra "
