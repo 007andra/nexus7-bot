@@ -121,6 +121,7 @@ class ApprovalFailureAnalysisTests(unittest.TestCase):
         self.assertTrue(report["association_not_causation"])
         self.assertFalse(report["promotion_allowed"])
         self.assertFalse(report["live_allowed"])
+        self.assertFalse(report["risk_epoch_traversal_credit"])
         self.assertEqual(report["decision_effect"], "NONE")
         self.assertEqual(report["execution_effect"], "NONE")
 
@@ -194,6 +195,7 @@ class CapitalLadderTests(unittest.TestCase):
         self.assertTrue(report["capital_metric_is_counterfactual_not_recommendation"])
         self.assertFalse(report["promotion_allowed"])
         self.assertFalse(report["live_allowed"])
+        self.assertFalse(report["risk_epoch_traversal_credit"])
         self.assertEqual(report["decision_effect"], "NONE")
         self.assertEqual(report["execution_effect"], "NONE")
 
