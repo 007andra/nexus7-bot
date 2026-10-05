@@ -32,7 +32,7 @@ class DB:
 class CacheClient:
     def __init__(self):
         self.bars = [
-            {"ts": ts * 1000, "o": 100.0, "h": 102.0, "l": 99.0, "c": 101.0}
+            {"ts": ts, "o": 100.0, "h": 102.0, "l": 99.0, "c": 101.0}
             for ts in (2700, 3600, 4500, 5400)
         ]
 
