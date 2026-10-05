@@ -19,7 +19,9 @@ def baseline(start=1000.0):
     }
 
 
-def candidate(cid, captured, *, allowed=False, payload_cid=None):
+def candidate(
+    cid, captured, *, allowed=False, payload_cid=None, cf_cid=None, eligible=True
+):
     return {
         "row_candidate_id": cid,
         "captured_epoch": captured,
@@ -34,10 +36,20 @@ def candidate(cid, captured, *, allowed=False, payload_cid=None):
             "population": cohort.POPULATION,
             "shadow_only": True,
             "live_eligible": False,
-            "counterfactual_nexus_v1": {
-                "execution_allowed": allowed,
-                "risk_epoch_traversal_credit": False,
-            },
+            "counterfactual_nexus_v1": (
+                {
+                    "cohort": cohort.COHORT,
+                    "candidate_id": cf_cid or cid,
+                    "symbol": "BTCUSDT" if cid != "C3" else "ETHUSDT",
+                    "side": "LONG" if cid != "C2" else "SHORT",
+                    "regime": "TRENDING_UP" if cid != "C2" else "TRENDING_DOWN",
+                    "setup": "BOS_BREAK" if cid != "C3" else "MOMENTUM",
+                    "execution_allowed": allowed,
+                    "risk_epoch_traversal_credit": False,
+                }
+                if eligible
+                else None
+            ),
         },
     }
 
@@ -132,25 +144,59 @@ class EnrollmentAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(row["live_allowed"])
         self.assertEqual(row["execution_effect"], "NONE")
 
-    async def test_identity_orphan_and_early_outcome_fail_closed(self):
+    async def test_identity_and_early_outcome_fail_closed(self):
         db = FakeDB(
             baseline_row=baseline(),
             candidates=[
-                candidate("C1", 2000.0, payload_cid="WRONG"),
+                candidate(
+                    "C1", 2000.0, payload_cid="WRONG", cf_cid="CF_WRONG"
+                ),
                 candidate("C2", 2900.0, allowed=True),
             ],
             outcomes=[
                 outcome("C1", 60, 1800.0),
-                outcome("ORPHAN", 60, 2700.0),
             ],
         )
         row = await audit.snapshot(db, now_epoch=20000.0)
         self.assertEqual(row["status"], "FAIL_CLOSED")
         self.assertFalse(row["integrity_pass"])
         self.assertGreater(row["violations"]["candidate_id_mismatches"], 0)
-        self.assertGreater(row["violations"]["orphan_outcomes"], 0)
+        self.assertGreater(row["violations"]["counterfactual_id_mismatches"], 0)
         self.assertGreater(row["violations"]["early_observation_start"], 0)
         self.assertFalse(row["live_allowed"])
+
+    async def test_population_scope_35_rows_only_14_are_oos_enrolled(self):
+        candidates = [
+            candidate(
+                f"OOS{i}",
+                2000.0 + i * 900.0,
+                allowed=(i % 5 == 0),
+                eligible=True,
+            )
+            for i in range(14)
+        ]
+        candidates.extend(
+            candidate(
+                f"OTHER{i}",
+                2000.0 + (14 + i) * 900.0,
+                eligible=False,
+            )
+            for i in range(21)
+        )
+        db = FakeDB(
+            baseline_row=baseline(),
+            candidates=candidates,
+            outcomes=[],
+        )
+        row = await audit.snapshot(db, now_epoch=40000.0)
+        self.assertEqual(row["status"], "PASS")
+        self.assertTrue(row["integrity_pass"])
+        self.assertEqual(row["population_candidates_after_cutoff"], 35)
+        self.assertEqual(row["excluded_non_oos_candidates"], 21)
+        self.assertEqual(row["enrolled_candidates"], 14)
+        self.assertEqual(row["allowed_candidates"], 3)
+        self.assertEqual(row["rejected_candidates"], 11)
+        self.assertEqual(row["total_violations"], 0)
 
     async def test_immature_observed_outcome_fails_closed(self):
         db = FakeDB(

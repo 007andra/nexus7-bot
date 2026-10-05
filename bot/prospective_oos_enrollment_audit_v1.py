@@ -7,7 +7,8 @@ This audit verifies:
 - enrolled candidates are after the immutable cutoff;
 - table candidate_id matches payload candidate_id;
 - no duplicate payload candidate ids are observed;
-- every OOS outcome belongs to an enrolled candidate;
+- enrollment scope exactly matches the frozen counterfactual cohort predicate;
+- every audited OOS outcome belongs to an enrolled candidate;
 - outcome horizon matches its row key;
 - observation_start is not before the candidate's next 15m boundary;
 - observed outcomes are mature for their declared horizon;
@@ -69,11 +70,15 @@ async def snapshot(db, *, now_epoch=None):
 
     candidates = {}
     payload_ids = []
+    counterfactual_ids = []
+    population_candidates_after_cutoff = len(candidate_rows or [])
+    excluded_non_oos_candidates = 0
+    excluded_malformed_population_rows = 0
     malformed_candidates = 0
     id_mismatches = 0
+    counterfactual_id_mismatches = 0
     before_cutoff = 0
     authority_violations = 0
-    missing_counterfactual = 0
 
     for row in candidate_rows or []:
         cid = str(row["candidate_id"] if hasattr(row, "keys") else row[0])
@@ -82,41 +87,57 @@ async def snapshot(db, *, now_epoch=None):
         try:
             payload = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError):
-            malformed_candidates += 1
+            excluded_malformed_population_rows += 1
+            continue
+
+        obs = payload.get("counterfactual_nexus_v1")
+        if (
+            not isinstance(obs, dict)
+            or obs.get("cohort") != cohort.COHORT
+            or obs.get("risk_epoch_traversal_credit") is not False
+        ):
+            excluded_non_oos_candidates += 1
             continue
 
         payload_cid = str(payload.get("candidate_id") or "")
+        cf_cid = str(obs.get("candidate_id") or "")
         payload_ids.append(payload_cid)
-        if payload_cid != cid:
+        counterfactual_ids.append(cf_cid)
+        if not payload_cid or payload_cid != cid:
             id_mismatches += 1
+        if not cf_cid or cf_cid != cid:
+            counterfactual_id_mismatches += 1
         if captured is None or captured < start:
             before_cutoff += 1
         if payload.get("population") != cohort.POPULATION:
             authority_violations += 1
         if payload.get("shadow_only") is not True or payload.get("live_eligible") is not False:
             authority_violations += 1
-        if not isinstance(payload.get("counterfactual_nexus_v1"), dict):
-            missing_counterfactual += 1
         candidates[cid] = {
             "captured_epoch": captured,
             "payload": payload,
+            "counterfactual": obs,
         }
 
     payload_counts = Counter(x for x in payload_ids if x)
     duplicate_payload_ids = sum(1 for n in payload_counts.values() if n > 1)
+    cf_counts = Counter(x for x in counterfactual_ids if x)
+    duplicate_counterfactual_ids = sum(1 for n in cf_counts.values() if n > 1)
 
     distributions = {}
     for dim in ("symbol", "side", "regime", "setup"):
         counts = Counter(
-            str(item["payload"].get(dim) or "UNKNOWN")
+            str(
+                item["counterfactual"].get(dim)
+                or item["payload"].get(dim)
+                or "UNKNOWN"
+            )
             for item in candidates.values()
         )
         distributions[dim] = dict(sorted(counts.items()))
     allowed_n = sum(
         1 for item in candidates.values()
-        if (item["payload"].get("counterfactual_nexus_v1") or {}).get(
-            "execution_allowed"
-        ) is True
+        if item["counterfactual"].get("execution_allowed") is True
     )
     rejected_n = len(candidates) - allowed_n
 
@@ -131,7 +152,7 @@ async def snapshot(db, *, now_epoch=None):
     )
 
     malformed_outcomes = 0
-    orphan_outcomes = 0
+    excluded_non_oos_outcomes = 0
     horizon_mismatches = 0
     early_observation_start = 0
     immature_observed = 0
@@ -144,7 +165,7 @@ async def snapshot(db, *, now_epoch=None):
         raw = row["payload"] if hasattr(row, "keys") else row[2]
         candidate = candidates.get(cid)
         if candidate is None:
-            orphan_outcomes += 1
+            excluded_non_oos_outcomes += 1
             continue
         oos_outcomes += 1
         try:
@@ -188,12 +209,12 @@ async def snapshot(db, *, now_epoch=None):
         "metadata": 0 if metadata_ok else 1,
         "malformed_candidates": malformed_candidates,
         "candidate_id_mismatches": id_mismatches,
+        "counterfactual_id_mismatches": counterfactual_id_mismatches,
         "duplicate_payload_ids": duplicate_payload_ids,
+        "duplicate_counterfactual_ids": duplicate_counterfactual_ids,
         "before_cutoff": before_cutoff,
         "authority_violations": authority_violations,
-        "missing_counterfactual": missing_counterfactual,
         "malformed_outcomes": malformed_outcomes,
-        "orphan_outcomes": orphan_outcomes,
         "horizon_mismatches": horizon_mismatches,
         "early_observation_start": early_observation_start,
         "immature_observed": immature_observed,
@@ -212,7 +233,11 @@ async def snapshot(db, *, now_epoch=None):
         "cohort_id": baseline.get("cohort_id"),
         "started_epoch": start,
         "metadata_frozen": metadata_ok,
+        "population_candidates_after_cutoff": population_candidates_after_cutoff,
+        "excluded_non_oos_candidates": excluded_non_oos_candidates,
+        "excluded_malformed_population_rows": excluded_malformed_population_rows,
         "enrolled_candidates": len(candidates),
+        "excluded_non_oos_outcomes": excluded_non_oos_outcomes,
         "oos_outcomes": oos_outcomes,
         "first_capture_epoch": min(captured_values) if captured_values else None,
         "last_capture_epoch": max(captured_values) if captured_values else None,
@@ -244,6 +269,8 @@ def format_log(row: dict) -> str:
         "[PROSPECTIVE_OOS_ENROLLMENT_AUDIT_V1] "
         f"status={_fmt(row.get('status'))} "
         f"cohort_id={_fmt(row.get('cohort_id'))} "
+        f"population_after_cutoff={_fmt(row.get('population_candidates_after_cutoff'))} "
+        f"excluded_non_oos={_fmt(row.get('excluded_non_oos_candidates'))} "
         f"enrolled={_fmt(row.get('enrolled_candidates'))} "
         f"oos_outcomes={_fmt(row.get('oos_outcomes'))} "
         f"allowed_candidates={_fmt(row.get('allowed_candidates'))} "
@@ -251,10 +278,11 @@ def format_log(row: dict) -> str:
         f"metadata_frozen={_fmt(row.get('metadata_frozen'))} "
         f"total_violations={_fmt(row.get('total_violations'))} "
         f"candidate_id_mismatches={_fmt(v.get('candidate_id_mismatches'))} "
+        f"counterfactual_id_mismatches={_fmt(v.get('counterfactual_id_mismatches'))} "
         f"duplicate_payload_ids={_fmt(v.get('duplicate_payload_ids'))} "
+        f"duplicate_counterfactual_ids={_fmt(v.get('duplicate_counterfactual_ids'))} "
         f"before_cutoff={_fmt(v.get('before_cutoff'))} "
         f"authority_violations={_fmt(v.get('authority_violations'))} "
-        f"missing_counterfactual={_fmt(v.get('missing_counterfactual'))} "
         f"horizon_mismatches={_fmt(v.get('horizon_mismatches'))} "
         f"early_observation_start={_fmt(v.get('early_observation_start'))} "
         f"immature_observed={_fmt(v.get('immature_observed'))} "
