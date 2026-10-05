@@ -188,6 +188,35 @@ class PostGateV2(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report["promotion_allowed"])
         self.assertFalse(report["live_allowed"])
 
+    async def test_snapshot_fails_closed_on_invalid_authority_row(self):
+        await v2.ensure_cohort(self.db, started_epoch=1000.0)
+        await self.db._exec(
+            "INSERT INTO post_gate_shadow_candidates_v2 "
+            "(candidate_id,captured_epoch,symbol,population,payload) VALUES (?,?,?,?,?)",
+            (
+                "bad-row",
+                1100.0,
+                "FILUSDT",
+                v2.POPULATION,
+                json.dumps(
+                    {
+                        "candidate_id": "bad-row",
+                        "captured_epoch": 1100.0,
+                        "symbol": "FILUSDT",
+                        "population": v2.POPULATION,
+                        "post_gate_v2": True,
+                        "shadow_only": True,
+                        "live_eligible": True,
+                        "execution_effect": "NONE",
+                    }
+                ),
+            ),
+        )
+        report = await v2.snapshot(self.db)
+        self.assertFalse(report["audit_pass"])
+        self.assertEqual(report["invalid_candidate_rows"], 1)
+        self.assertEqual(report["enrolled_candidates"], 0)
+
     def test_scheduler_refuses_when_live_gate_is_blocked(self):
         e = engine()
         with patch.object(v2, "enabled", return_value=True), \
