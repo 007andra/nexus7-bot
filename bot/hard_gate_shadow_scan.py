@@ -1413,15 +1413,34 @@ async def scan(engine, *, db=None, bbo_views=None):
         _check(engine)
         if epoch_row is not None and validation_report is not None and review_report is not None:
             try:
-                from bot import reentry_readiness, reentry_release_board_v1
+                from bot import (
+                    oos_progress_board_v2,
+                    reentry_governance_v2,
+                    reentry_readiness,
+                    reentry_release_board_v1,
+                )
+                readiness_row = reentry_readiness.snapshot(engine)
                 release_board = reentry_release_board_v1.evaluate(
-                    reentry_readiness.snapshot(engine),
+                    readiness_row,
                     epoch_row,
                     validation_report,
                     review_report,
                     prospective_oos=prospective_oos_report,
                 )
                 log.warning("%s", reentry_release_board_v1.format_log(release_board))
+                if prospective_oos_report is not None:
+                    progress_board = oos_progress_board_v2.evaluate(
+                        prospective_oos_report,
+                        readiness_row,
+                        release_board,
+                    )
+                    log.warning("%s", oos_progress_board_v2.format_log(progress_board))
+                    governance = reentry_governance_v2.evaluate(
+                        readiness_row,
+                        prospective_oos_report,
+                        release_board,
+                    )
+                    log.warning("%s", reentry_governance_v2.format_log(governance))
             except Exception as exc:
                 _emit("REENTRY_RELEASE_BOARD_V1", {
                     "status": "ERROR",
