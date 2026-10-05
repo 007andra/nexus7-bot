@@ -134,6 +134,9 @@ class SnapshotTests(unittest.TestCase):
     def test_summary_restates_no_authority(self):
         report = sensitivity.build_report([payload("x", 1.5, 0.1)])
         line = sensitivity.format_summary(report)
+        self.assertIn("median_ret=", line)
+        self.assertIn("avg_mfe=", line)
+        self.assertIn("avg_mae=", line)
         self.assertIn("production_thresholds_unchanged=true", line)
         self.assertIn("risk_epoch_traversal_credit=false", line)
         self.assertIn("promotion_allowed=false", line)
