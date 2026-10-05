@@ -822,6 +822,11 @@ async def observe_existing_prospective_oos_outcomes(
         "excluded_non_oos": 0,
     }
     await db._exec(_OUTCOMES)
+    # The population table also contains non-OOS HARD_GATE_SHADOW rows. Fetch a
+    # wider bounded window, then apply the exact frozen-cohort predicate before
+    # consuming the per-run eligible limit; otherwise older non-OOS rows could
+    # starve later approved candidates forever.
+    query_limit = min(500, max(100, limit * 10))
     for horizon in (60, 240):
         rows = await db._fetchall(
             "SELECT c.candidate_id,c.payload FROM hard_gate_shadow_candidates_v1 c "
@@ -829,8 +834,9 @@ async def observe_existing_prospective_oos_outcomes(
             "o.candidate_id=c.candidate_id AND o.horizon=? "
             "WHERE c.population=? AND c.captured_epoch>=? AND o.candidate_id IS NULL "
             "ORDER BY c.captured_epoch,c.candidate_id LIMIT ?",
-            (horizon, POPULATION, started, limit),
+            (horizon, POPULATION, started, query_limit),
         )
+        eligible_examined = 0
         for raw in rows or []:
             stats["examined"] += 1
             table_cid = raw["candidate_id"] if hasattr(raw, "keys") else raw[0]
@@ -848,6 +854,9 @@ async def observe_existing_prospective_oos_outcomes(
             ):
                 stats["excluded_non_oos"] += 1
                 continue
+            if eligible_examined >= limit:
+                break
+            eligible_examined += 1
             bars = deepcopy(engine.client.get_cached_klines(row["symbol"], "15", 200))
             outcome = outcome_from_cache(row, bars, horizon, time.time())
             if outcome is None:
