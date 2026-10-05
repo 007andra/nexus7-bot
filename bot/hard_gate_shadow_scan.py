@@ -821,6 +821,7 @@ async def _maybe_emit_min_order_counterfactual_validation(db):
         )
         log.info("%s", validation.format_summary(report))
         log.info("%s", validation.format_top_groups(report))
+        log.info("%s", validation.format_top_groups_240m(report))
         return report
     except Exception as exc:
         _emit("MIN_ORDER_COUNTERFACTUAL_VALIDATION_V1", {
