@@ -121,10 +121,13 @@ async def snapshot(db, *, now_epoch=None):
     rejected_n = len(candidates) - allowed_n
 
     outcome_rows = await db._fetchall(
-        "SELECT candidate_id,horizon,payload "
-        "FROM hard_gate_shadow_outcomes_v1 "
-        "WHERE population=? ORDER BY candidate_id,horizon",
-        (cohort.POPULATION,),
+        "SELECT o.candidate_id,o.horizon,o.payload,c.captured_epoch "
+        "FROM hard_gate_shadow_outcomes_v1 o "
+        "LEFT JOIN hard_gate_shadow_candidates_v1 c "
+        "ON c.candidate_id=o.candidate_id "
+        "WHERE o.population=? AND (c.captured_epoch>=? OR c.candidate_id IS NULL) "
+        "ORDER BY o.candidate_id,o.horizon",
+        (cohort.POPULATION, start),
     )
 
     malformed_outcomes = 0
@@ -141,7 +144,7 @@ async def snapshot(db, *, now_epoch=None):
         raw = row["payload"] if hasattr(row, "keys") else row[2]
         candidate = candidates.get(cid)
         if candidate is None:
-            # Outcomes for historical pre-cutoff candidates are outside this audit.
+            orphan_outcomes += 1
             continue
         oos_outcomes += 1
         try:
