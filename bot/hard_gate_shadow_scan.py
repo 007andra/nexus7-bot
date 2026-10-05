@@ -1411,6 +1411,94 @@ async def scan(engine, *, db=None, bbo_views=None):
         _check(engine)
         prospective_oos_report = await _maybe_emit_prospective_oos_cohort(db)
         _check(engine)
+
+        # Prospective OOS ledger/review/maturation are independent research
+        # observers. They must not depend on unrelated legacy decision-review
+        # telemetry succeeding in the same scan.
+        independent_budget_study = None
+        independent_shadow_ledger = None
+        independent_first_approval_review = None
+        independent_maturation_review = None
+        if prospective_oos_report is not None:
+            try:
+                from bot import (
+                    pilot_budget_study_v1 as _pilot_budget_study_v1,
+                    prospective_oos_first_approval_review_v1 as _first_review_v1,
+                    prospective_oos_maturation_review_v1 as _maturation_review_v1,
+                    reentry_readiness as _reentry_readiness,
+                    segregated_pilot_ledger_v1 as _pilot_ledger_v1,
+                )
+                independent_readiness = _reentry_readiness.snapshot(engine)
+                independent_budget_study = _pilot_budget_study_v1.evaluate(
+                    independent_readiness,
+                    prospective_oos_report,
+                )
+                independent_shadow_ledger = await asyncio.wait_for(
+                    _pilot_ledger_v1.snapshot(
+                        db,
+                        independent_readiness,
+                        independent_budget_study,
+                        prospective_oos_report,
+                    ),
+                    timeout=5.0,
+                )
+                log.warning(
+                    "%s",
+                    _pilot_ledger_v1.format_log(independent_shadow_ledger),
+                )
+                independent_first_approval_review = await asyncio.wait_for(
+                    _first_review_v1.snapshot(db, prospective_oos_report),
+                    timeout=5.0,
+                )
+                log.warning(
+                    "%s",
+                    _first_review_v1.format_log(
+                        independent_first_approval_review
+                    ),
+                )
+                independent_maturation_review = await asyncio.wait_for(
+                    _maturation_review_v1.snapshot(db, prospective_oos_report),
+                    timeout=5.0,
+                )
+                log.warning(
+                    "%s",
+                    _maturation_review_v1.format_log(
+                        independent_maturation_review
+                    ),
+                )
+                for candidate_line in _maturation_review_v1.format_candidate_rows(
+                    independent_maturation_review
+                ):
+                    log.warning("%s", candidate_line)
+                log.warning(
+                    "%s",
+                    _maturation_review_v1.format_concentration(
+                        independent_maturation_review
+                    ),
+                )
+            except Exception as exc:
+                _emit("PROSPECTIVE_OOS_INDEPENDENT_OBSERVERS_V1", {
+                    "status": "ERROR",
+                    "error": type(exc).__name__,
+                    "research_only": True,
+                    "shadow_only": True,
+                    "association_not_causation": True,
+                    "candidate_generation_unchanged": True,
+                    "thresholds_unchanged": True,
+                    "risk_unchanged": True,
+                    "sizing_unchanged": True,
+                    "leverage_unchanged": True,
+                    "historical_hwm_preserved": True,
+                    "lifetime_drawdown_preserved": True,
+                    "current_hard_gate_unchanged": True,
+                    "automatic_promotion": False,
+                    "promotion_allowed": False,
+                    "live_allowed": False,
+                    "decision_effect": "NONE",
+                    "execution_effect": "NONE",
+                })
+        _check(engine)
+
         if epoch_row is not None and validation_report is not None and review_report is not None:
             try:
                 from bot import (
@@ -1467,11 +1555,19 @@ async def scan(engine, *, db=None, bbo_views=None):
                         "%s",
                         oos_progress_forecast_v1.format_log(progress_forecast),
                     )
-                    budget_study = pilot_budget_study_v1.evaluate(
-                        readiness_row,
-                        prospective_oos_report,
+                    budget_study = (
+                        independent_budget_study
+                        if independent_budget_study is not None
+                        else pilot_budget_study_v1.evaluate(
+                            readiness_row,
+                            prospective_oos_report,
+                        )
                     )
-                    log.warning("%s", pilot_budget_study_v1.format_log(budget_study))
+                    if independent_budget_study is None:
+                        log.warning(
+                            "%s",
+                            pilot_budget_study_v1.format_log(budget_study),
+                        )
                     budget_proof = segregated_pilot_budget_proof_v1.evaluate(
                         budget_study
                     )
@@ -1479,78 +1575,84 @@ async def scan(engine, *, db=None, bbo_views=None):
                         "%s",
                         segregated_pilot_budget_proof_v1.format_log(budget_proof),
                     )
-                    shadow_ledger = await asyncio.wait_for(
-                        segregated_pilot_ledger_v1.snapshot(
-                            db,
-                            readiness_row,
-                            budget_study,
-                            prospective_oos_report,
-                        ),
-                        timeout=3.0,
-                    )
-                    log.warning(
-                        "%s", segregated_pilot_ledger_v1.format_log(shadow_ledger)
-                    )
-                    first_approval_review = await asyncio.wait_for(
-                        prospective_oos_first_approval_review_v1.snapshot(
-                            db,
-                            prospective_oos_report,
-                        ),
-                        timeout=3.0,
-                    )
-                    log.warning(
-                        "%s",
-                        prospective_oos_first_approval_review_v1.format_log(
-                            first_approval_review
-                        ),
-                    )
-                    try:
-                        maturation_review = await asyncio.wait_for(
-                            prospective_oos_maturation_review_v1.snapshot(
+                    shadow_ledger = independent_shadow_ledger
+                    if shadow_ledger is None:
+                        shadow_ledger = await asyncio.wait_for(
+                            segregated_pilot_ledger_v1.snapshot(
+                                db,
+                                readiness_row,
+                                budget_study,
+                                prospective_oos_report,
+                            ),
+                            timeout=5.0,
+                        )
+                        log.warning(
+                            "%s",
+                            segregated_pilot_ledger_v1.format_log(shadow_ledger),
+                        )
+                    first_approval_review = independent_first_approval_review
+                    if first_approval_review is None:
+                        first_approval_review = await asyncio.wait_for(
+                            prospective_oos_first_approval_review_v1.snapshot(
                                 db,
                                 prospective_oos_report,
                             ),
-                            timeout=3.0,
+                            timeout=5.0,
                         )
                         log.warning(
                             "%s",
-                            prospective_oos_maturation_review_v1.format_log(
-                                maturation_review
+                            prospective_oos_first_approval_review_v1.format_log(
+                                first_approval_review
                             ),
                         )
-                        for candidate_line in (
-                            prospective_oos_maturation_review_v1.format_candidate_rows(
-                                maturation_review
+                    if independent_maturation_review is None:
+                        try:
+                            maturation_review = await asyncio.wait_for(
+                                prospective_oos_maturation_review_v1.snapshot(
+                                    db,
+                                    prospective_oos_report,
+                                ),
+                                timeout=5.0,
                             )
-                        ):
-                            log.warning("%s", candidate_line)
-                        log.warning(
-                            "%s",
-                            prospective_oos_maturation_review_v1.format_concentration(
-                                maturation_review
-                            ),
-                        )
-                    except Exception as exc:
-                        _emit("PROSPECTIVE_OOS_MATURATION_REVIEW_V1", {
-                            "status": "ERROR",
-                            "error": type(exc).__name__,
-                            "research_only": True,
-                            "shadow_only": True,
-                            "association_not_causation": True,
-                            "candidate_generation_unchanged": True,
-                            "thresholds_unchanged": True,
-                            "risk_unchanged": True,
-                            "sizing_unchanged": True,
-                            "leverage_unchanged": True,
-                            "historical_hwm_preserved": True,
-                            "lifetime_drawdown_preserved": True,
-                            "current_hard_gate_unchanged": True,
-                            "automatic_promotion": False,
-                            "promotion_allowed": False,
-                            "live_allowed": False,
-                            "decision_effect": "NONE",
-                            "execution_effect": "NONE",
-                        })
+                            log.warning(
+                                "%s",
+                                prospective_oos_maturation_review_v1.format_log(
+                                    maturation_review
+                                ),
+                            )
+                            for candidate_line in (
+                                prospective_oos_maturation_review_v1.format_candidate_rows(
+                                    maturation_review
+                                )
+                            ):
+                                log.warning("%s", candidate_line)
+                            log.warning(
+                                "%s",
+                                prospective_oos_maturation_review_v1.format_concentration(
+                                    maturation_review
+                                ),
+                            )
+                        except Exception as exc:
+                            _emit("PROSPECTIVE_OOS_MATURATION_REVIEW_V1", {
+                                "status": "ERROR",
+                                "error": type(exc).__name__,
+                                "research_only": True,
+                                "shadow_only": True,
+                                "association_not_causation": True,
+                                "candidate_generation_unchanged": True,
+                                "thresholds_unchanged": True,
+                                "risk_unchanged": True,
+                                "sizing_unchanged": True,
+                                "leverage_unchanged": True,
+                                "historical_hwm_preserved": True,
+                                "lifetime_drawdown_preserved": True,
+                                "current_hard_gate_unchanged": True,
+                                "automatic_promotion": False,
+                                "promotion_allowed": False,
+                                "live_allowed": False,
+                                "decision_effect": "NONE",
+                                "execution_effect": "NONE",
+                            })
                     governance = reentry_governance_v2.evaluate(
                         readiness_row,
                         prospective_oos_report,
