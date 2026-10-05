@@ -1415,7 +1415,9 @@ async def scan(engine, *, db=None, bbo_views=None):
             try:
                 from bot import (
                     oos_progress_board_v2,
+                    oos_progress_forecast_v1,
                     pilot_budget_study_v1,
+                    prospective_oos_enrollment_audit_v1,
                     pilot_release_review_v1,
                     segregated_pilot_budget_proof_v1,
                     reentry_governance_v2,
@@ -1439,6 +1441,30 @@ async def scan(engine, *, db=None, bbo_views=None):
                         release_board,
                     )
                     log.warning("%s", oos_progress_board_v2.format_log(progress_board))
+                    enrollment_audit = await asyncio.wait_for(
+                        prospective_oos_enrollment_audit_v1.snapshot(db),
+                        timeout=3.0,
+                    )
+                    log.warning(
+                        "%s",
+                        prospective_oos_enrollment_audit_v1.format_log(
+                            enrollment_audit
+                        ),
+                    )
+                    log.warning(
+                        "%s",
+                        prospective_oos_enrollment_audit_v1.format_distribution(
+                            enrollment_audit
+                        ),
+                    )
+                    progress_forecast = oos_progress_forecast_v1.evaluate(
+                        prospective_oos_report,
+                        enrollment_audit,
+                    )
+                    log.warning(
+                        "%s",
+                        oos_progress_forecast_v1.format_log(progress_forecast),
+                    )
                     budget_study = pilot_budget_study_v1.evaluate(
                         readiness_row,
                         prospective_oos_report,
