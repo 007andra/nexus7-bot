@@ -29,6 +29,15 @@ def epoch(*, complete=False):
     }
 
 
+def oos(*, ready=False):
+    return {
+        "status": "READY_FOR_MANUAL_REVIEW" if ready else "COLLECTING_PROSPECTIVE_OOS",
+        "enrolled_candidates": 50 if ready else 0,
+        "observed_60m": 30 if ready else 0,
+        "observed_240m": 30 if ready else 0,
+    }
+
+
 def validation(*, complete=True, positive=False):
     return {
         "evaluated": 40 if complete else 5,
@@ -75,16 +84,33 @@ class ReleaseBoardTests(unittest.TestCase):
             epoch(complete=True),
             validation(positive=True),
             {"recommendation": "KEEP_RR_1_60_PENDING_MORE_EVIDENCE"},
+            prospective_oos=oos(ready=True),
         )
         self.assertEqual(row["status"], "MANUAL_REVIEW_READY")
         self.assertEqual(row["blockers"], ())
         self.assertEqual(row["m1_risk_gate"], "PASS")
         self.assertEqual(row["m2_canonical_pipeline"], "PASS")
-        self.assertEqual(row["m3_edge_evidence"], "MANUAL_REVIEW_REQUIRED")
+        self.assertEqual(
+            row["m3_edge_evidence"], "PROSPECTIVE_OOS_PASS_MANUAL_REVIEW"
+        )
         self.assertEqual(row["m4_runtime_precheck"], "PASS")
         self.assertFalse(row["live_allowed"])
         self.assertFalse(row["promotion_allowed"])
         self.assertTrue(row["explicit_live_authorization_required"])
+
+
+    def test_historical_evidence_alone_cannot_clear_m3(self):
+        row = board.evaluate(
+            readiness(ready=True),
+            epoch(complete=True),
+            validation(positive=True),
+            {"recommendation": "KEEP_RR_1_60_PENDING_MORE_EVIDENCE"},
+            prospective_oos=oos(ready=False),
+        )
+        self.assertEqual(row["status"], "BLOCKED")
+        self.assertEqual(row["m3_edge_evidence"], "HISTORICAL_MANUAL_REVIEW_ONLY")
+        self.assertIn("M3_EDGE_EVIDENCE", row["blockers"])
+        self.assertFalse(row["live_allowed"])
 
     def test_runtime_preflight_failure_blocks_m4(self):
         row = board.evaluate(
