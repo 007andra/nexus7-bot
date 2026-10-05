@@ -250,7 +250,10 @@ def format_summary(report):
             f"rr={s['rr_floor']:.2f}:selected={s['selected']}"
             f":obs60={s['observed_60m']}"
             f":avg_ret={_fmt(s['avg_return'],6)}"
+            f":median_ret={_fmt(s['median_return'],6)}"
             f":pos_rate={_fmt(s['positive_rate'],4)}"
+            f":avg_mfe={_fmt(s['avg_mfe'],6)}"
+            f":avg_mae={_fmt(s['avg_mae'],6)}"
         )
     return (
         "[MIN_ORDER_COUNTERFACTUAL_THRESHOLD_SENSITIVITY_V1] "

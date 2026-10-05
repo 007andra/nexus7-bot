@@ -285,6 +285,7 @@ def _fmt(value, digits=6):
 
 
 def format_summary(report):
+    all_metrics = report["all"]
     a = report["allowed"]
     r = report["rejected"]
     c = report["confusion"]
@@ -294,9 +295,20 @@ def format_summary(report):
         f"evaluated={report['evaluated']} observed_60m={report['observed_60m']} "
         f"target_evaluations={report['target_evaluations']} "
         f"target_observed_60m={report['target_observed_60m']} "
+        f"all_avg_return={_fmt(all_metrics['avg_return'])} "
+        f"all_median_return={_fmt(all_metrics['median_return'])} "
+        f"all_positive_rate={_fmt(all_metrics['positive_rate'], 4)} "
+        f"all_avg_mfe={_fmt(all_metrics['avg_mfe'])} "
+        f"all_avg_mae={_fmt(all_metrics['avg_mae'])} "
         f"allowed_observed={a['n']} rejected_observed={r['n']} "
         f"allowed_avg_return={_fmt(a['avg_return'])} "
+        f"allowed_median_return={_fmt(a['median_return'])} "
+        f"allowed_avg_mfe={_fmt(a['avg_mfe'])} "
+        f"allowed_avg_mae={_fmt(a['avg_mae'])} "
         f"rejected_avg_return={_fmt(r['avg_return'])} "
+        f"rejected_median_return={_fmt(r['median_return'])} "
+        f"rejected_avg_mfe={_fmt(r['avg_mfe'])} "
+        f"rejected_avg_mae={_fmt(r['avg_mae'])} "
         f"mean_return_lift={_fmt(report['allowed_vs_rejected_mean_return_lift'])} "
         f"allowed_positive_rate={_fmt(a['positive_rate'], 4)} "
         f"rejected_positive_rate={_fmt(r['positive_rate'], 4)} "

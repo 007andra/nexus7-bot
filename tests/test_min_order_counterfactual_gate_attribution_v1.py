@@ -130,6 +130,32 @@ class AttributionTests(unittest.TestCase):
             by_reason["RR_BELOW_MIN"]["positive_rate"], 1.0
         )
 
+    def test_outcome_reason_formatter_exposes_return_mfe_mae(self):
+        rows = [
+            payload(
+                "ev1",
+                reason="EV negativo após custos",
+                rr=0.8,
+                ev=-0.2,
+            ),
+            payload(
+                "rr1",
+                reason="R:R líquido 1.4 < mínimo líquido 1.60",
+                rr=1.4,
+                ev=0.1,
+            ),
+        ]
+        outcomes = [outcome("ev1", -0.03), outcome("rr1", 0.04)]
+        with patch.dict(os.environ, {"NEXUS_MIN_RR_NET": "1.60"}):
+            report = attribution.build_report(rows, outcomes)
+        line = attribution.format_outcome_reasons(report)
+        self.assertIn("EV_NEGATIVE:obs60=1", line)
+        self.assertIn("RR_BELOW_MIN:obs60=1", line)
+        self.assertIn(":avg_mfe=", line)
+        self.assertIn(":avg_mae=", line)
+        self.assertIn("promotion_allowed=false live_allowed=false", line)
+        self.assertIn("decision_effect=NONE execution_effect=NONE", line)
+
     def test_flag_defaults_off(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(attribution.enabled())

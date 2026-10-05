@@ -274,8 +274,40 @@ def format_summary(report):
     )
 
 
+def format_group_audit(report):
+    groups = report.get("cost_only_groups") or {}
+
+    def f(value, digits=3):
+        return "NA" if value is None else f"{float(value):.{digits}f}"
+
+    def rows(key):
+        blocks = groups.get(key) or {}
+        parts = []
+        for name, block in sorted(blocks.items()):
+            parts.append(
+                f"{name}:n={int(block.get('candidates') or 0)}"
+                f":valid={int(block.get('valid_bbo') or 0)}"
+                f":static={f((block.get('static_cost_bps') or {}).get('mean'))}"
+                f":bbo={f((block.get('bbo_cost_bps') or {}).get('mean'))}"
+                f":reduction={f((block.get('cost_reduction_bps') or {}).get('mean'))}"
+                f":age_p95={f((block.get('bbo_age_ms') or {}).get('p95'), 1)}"
+                f":spread_p95={f((block.get('spread_bps') or {}).get('p95'))}"
+            )
+        return "|".join(parts) if parts else "NONE"
+
+    return (
+        "[BBO_CALIBRATION_V3_GROUP_AUDIT] "
+        f"symbol={rows('symbol')} "
+        f"setup={rows('setup')} "
+        f"side={rows('side')} "
+        f"regime={rows('regime')} "
+        "research_only=true promotion_allowed=false live_allowed=false "
+        "decision_effect=NONE execution_effect=NONE"
+    )
+
+
 __all__ = [
     "AUTHORITY", "FLAG", "MIN_SAMPLE", "PREFERRED_SAMPLE", "MIN_DISTINCT_SIDES",
     "MIN_DISTINCT_REGIMES", "build_report",
-    "enabled", "format_summary", "load_payloads", "snapshot",
+    "enabled", "format_group_audit", "format_summary", "load_payloads", "snapshot",
 ]

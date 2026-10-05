@@ -322,8 +322,25 @@ def format_top_groups(report, limit=8):
     )
 
 
+def format_groups(report):
+    rows = list(report.get("groups") or [])
+    parts = [
+        f"{r['symbol']}/{r['setup']}:n={r['evaluated']}:allowed={r['allowed']}"
+        f":rate={_fmt(r['approval_rate'], 3)}"
+        for r in rows
+    ]
+    return (
+        "[MIN_ORDER_COUNTERFACTUAL_NEXUS_V1_GROUPS] "
+        + ("|".join(parts) if parts else "NONE")
+        + " research_only=true risk_epoch_traversal_credit=false "
+        "promotion_allowed=false live_allowed=false "
+        "decision_effect=NONE execution_effect=NONE"
+    )
+
+
 __all__ = [
     "AUTHORITY", "FLAG", "TARGET_EVALUATIONS", "TARGET_OUTCOMES_60M",
     "build_observation", "build_report", "enabled", "error_observation",
+    "format_groups",
     "format_summary", "format_top_groups", "snapshot",
 ]
