@@ -962,6 +962,11 @@ async def scan_if_enabled(engine):
         return None
     try:
         if not gate_snapshot(engine)["live_entries_blocked"]:
+            # V1 remains immutable and only matures existing rows. V2 is a
+            # separate post-gate research population scheduled in background so
+            # it cannot delay the LIVE entry funnel.
+            from bot import prospective_oos_post_gate_v2
+            prospective_oos_post_gate_v2.schedule_if_enabled(engine)
             from bot import database as db
             return await _mature_existing_prospective_oos_when_gate_clear(
                 engine, db
