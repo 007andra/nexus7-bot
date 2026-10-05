@@ -47,6 +47,10 @@ _MIN_ORDER_CF_SENSITIVITY_INTERVAL_S = 300.0
 _MIN_ORDER_CF_SENSITIVITY_LAST_EMIT = 0.0
 _MIN_ORDER_CF_REVIEW_INTERVAL_S = 300.0
 _MIN_ORDER_CF_REVIEW_LAST_EMIT = 0.0
+_APPROVAL_FAILURE_INTERVAL_S = 300.0
+_APPROVAL_FAILURE_LAST_EMIT = 0.0
+_CAPITAL_LADDER_INTERVAL_S = 300.0
+_CAPITAL_LADDER_LAST_EMIT = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
  candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
  symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
@@ -934,6 +938,79 @@ async def _maybe_emit_min_order_counterfactual_decision_review(db):
         return None
 
 
+
+async def _maybe_emit_counterfactual_approval_failure_analysis(db):
+    """Bounded association diagnostics over existing counterfactual evidence."""
+    global _APPROVAL_FAILURE_LAST_EMIT
+    from bot import counterfactual_approval_failure_analysis_v1 as analysis
+    if not analysis.enabled():
+        return None
+    now = time.monotonic()
+    if (
+        _APPROVAL_FAILURE_LAST_EMIT > 0.0
+        and now - _APPROVAL_FAILURE_LAST_EMIT < _APPROVAL_FAILURE_INTERVAL_S
+    ):
+        return None
+    _APPROVAL_FAILURE_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(analysis.snapshot(db), timeout=3.0)
+        log.info("%s", analysis.format_summary(report))
+        log.info("%s", analysis.format_feature_comparison(report))
+        log.info("%s", analysis.format_concentration(report))
+        log.info("%s", analysis.format_worst_groups(report, horizon=60))
+        log.info("%s", analysis.format_worst_groups(report, horizon=240))
+        return report
+    except Exception as exc:
+        _emit("COUNTERFACTUAL_APPROVAL_FAILURE_ANALYSIS_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "association_not_causation": True,
+            "thresholds_unchanged": True,
+            "risk_epoch_traversal_credit": False,
+            "automatic_promotion": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
+async def _maybe_emit_min_order_capital_ladder(db):
+    """Bounded hypothetical-capital ladder; never credits drawdown or LIVE."""
+    global _CAPITAL_LADDER_LAST_EMIT
+    from bot import min_order_capital_ladder_v1 as ladder
+    if not ladder.enabled():
+        return None
+    now = time.monotonic()
+    if (
+        _CAPITAL_LADDER_LAST_EMIT > 0.0
+        and now - _CAPITAL_LADDER_LAST_EMIT < _CAPITAL_LADDER_INTERVAL_S
+    ):
+        return None
+    _CAPITAL_LADDER_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(ladder.snapshot(db), timeout=3.0)
+        log.info("%s", ladder.format_summary(report))
+        log.info("%s", ladder.format_ladder(report))
+        return report
+    except Exception as exc:
+        _emit("MIN_ORDER_CAPITAL_LADDER_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "external_capital_does_not_clear_drawdown": True,
+            "capital_metric_is_counterfactual_not_recommendation": True,
+            "thresholds_unchanged": True,
+            "risk_epoch_traversal_credit": False,
+            "automatic_promotion": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
 async def scan(engine, *, db=None, bbo_views=None):
     if not enabled():
         return None
@@ -1251,6 +1328,10 @@ async def scan(engine, *, db=None, bbo_views=None):
         await _maybe_emit_min_order_counterfactual_threshold_sensitivity(db)
         _check(engine)
         review_report = await _maybe_emit_min_order_counterfactual_decision_review(db)
+        _check(engine)
+        await _maybe_emit_counterfactual_approval_failure_analysis(db)
+        _check(engine)
+        await _maybe_emit_min_order_capital_ladder(db)
         _check(engine)
         if epoch_row is not None and validation_report is not None and review_report is not None:
             try:
