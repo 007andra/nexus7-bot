@@ -111,7 +111,17 @@ async def snapshot(db, readiness: dict, budget_study: dict, oos: dict):
         except Exception:
             continue
         cf = obj.get("counterfactual_nexus_v1")
-        if isinstance(cf, dict) and cf.get("execution_allowed") is True:
+        cid = str(obj.get("candidate_id") or "")
+        if (
+            isinstance(cf, dict)
+            and cid
+            and str(cf.get("candidate_id") or "") == cid
+            and cf.get("cohort") == "MIN_ORDER_BLOCKED_COUNTERFACTUAL_NEXUS"
+            and cf.get("risk_epoch_traversal_credit") is False
+            and cf.get("execution_allowed") is True
+            and obj.get("shadow_only") is True
+            and obj.get("live_eligible") is False
+        ):
             candidates.append(obj)
 
     existing_rows = await db._fetchall(
@@ -157,6 +167,8 @@ async def snapshot(db, readiness: dict, budget_study: dict, oos: dict):
             "remaining_before_usdt": remaining_before,
             "remaining_after_usdt": max(0.0, remaining_before - amount),
             "production_order_created": False,
+            "prospective_oos_cohort": "MIN_ORDER_BLOCKED_COUNTERFACTUAL_NEXUS",
+            "oos_enrollment_credit": False,
             "canonical_pipeline_credit": False,
         }
         await db._exec(
@@ -186,6 +198,7 @@ async def snapshot(db, readiness: dict, budget_study: dict, oos: dict):
         "remaining_budget_usdt": remaining,
         "budget_guard_configured": True,
         "isolation_contract_active": True,
+        "enrollment_scope": "EXACT_PROSPECTIVE_OOS_COHORT",
         "reset_allowed": False,
     }
 
@@ -202,6 +215,7 @@ def format_log(row: dict) -> str:
         f"reserved_loss_usdt={row.get('reserved_loss_usdt')} "
         f"remaining_budget_usdt={row.get('remaining_budget_usdt')} "
         "budget_guard_configured=true isolation_contract_active=true "
+        "enrollment_scope=EXACT_PROSPECTIVE_OOS_COHORT "
         "historical_loss_ledger_untouched=true historical_hwm_preserved=true "
         "lifetime_drawdown_preserved=true current_hard_gate_unchanged=true "
         "promotion_allowed=false live_allowed=false decision_effect=NONE execution_effect=NONE"

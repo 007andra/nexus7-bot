@@ -77,7 +77,14 @@ def allowed_candidate(cid, epoch):
         "symbol": "BTCUSDT",
         "side": "LONG",
         "setup": "BOS_BREAK",
-        "counterfactual_nexus_v1": {"execution_allowed": True},
+        "shadow_only": True,
+        "live_eligible": False,
+        "counterfactual_nexus_v1": {
+            "cohort": "MIN_ORDER_BLOCKED_COUNTERFACTUAL_NEXUS",
+            "candidate_id": cid,
+            "execution_allowed": True,
+            "risk_epoch_traversal_credit": False,
+        },
     }
 
 
@@ -140,6 +147,9 @@ class SegregatedLedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(row["historical_hwm_preserved"])
         self.assertTrue(row["lifetime_drawdown_preserved"])
         self.assertTrue(row["current_hard_gate_unchanged"])
+        self.assertEqual(
+            row["enrollment_scope"], "EXACT_PROSPECTIVE_OOS_COHORT"
+        )
         self.assertFalse(row["live_allowed"])
         self.assertEqual(row["execution_effect"], "NONE")
         self.assertTrue(all(
@@ -164,6 +174,7 @@ class PilotReleaseReviewTests(unittest.TestCase):
             "status": "SHADOW_LEDGER_ACTIVE",
             "budget_guard_configured": True,
             "isolation_contract_active": True,
+            "enrollment_scope": "EXACT_PROSPECTIVE_OOS_COHORT",
             "remaining_budget_usdt": 0.05,
             "budget_blocked_entries": 0,
         }
