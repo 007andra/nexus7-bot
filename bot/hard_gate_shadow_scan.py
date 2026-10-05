@@ -1411,6 +1411,168 @@ async def scan(engine, *, db=None, bbo_views=None):
         _check(engine)
         prospective_oos_report = await _maybe_emit_prospective_oos_cohort(db)
         _check(engine)
+
+        # The prospective OOS cohort/ledger/reviews are independent research
+        # evidence. A timeout in the legacy risk-epoch or counterfactual summary
+        # must not suppress their maturation or consume/alter LIVE authority.
+        if prospective_oos_report is not None and (
+            epoch_row is None
+            or validation_report is None
+            or review_report is None
+        ):
+            try:
+                from bot import (
+                    oos_progress_forecast_v1,
+                    pilot_budget_study_v1,
+                    prospective_oos_enrollment_audit_v1,
+                    prospective_oos_first_approval_review_v1,
+                    prospective_oos_maturation_review_v1,
+                    reentry_readiness,
+                    segregated_pilot_budget_proof_v1,
+                    segregated_pilot_ledger_v1,
+                )
+                isolated_readiness = reentry_readiness.snapshot(engine)
+                isolated_enrollment_audit = await asyncio.wait_for(
+                    prospective_oos_enrollment_audit_v1.snapshot(db),
+                    timeout=3.0,
+                )
+                log.warning(
+                    "%s",
+                    prospective_oos_enrollment_audit_v1.format_log(
+                        isolated_enrollment_audit
+                    ),
+                )
+                log.warning(
+                    "%s",
+                    prospective_oos_enrollment_audit_v1.format_distribution(
+                        isolated_enrollment_audit
+                    ),
+                )
+                isolated_forecast = oos_progress_forecast_v1.evaluate(
+                    prospective_oos_report,
+                    isolated_enrollment_audit,
+                )
+                log.warning(
+                    "%s",
+                    oos_progress_forecast_v1.format_log(isolated_forecast),
+                )
+                isolated_budget_study = pilot_budget_study_v1.evaluate(
+                    isolated_readiness,
+                    prospective_oos_report,
+                )
+                log.warning(
+                    "%s",
+                    pilot_budget_study_v1.format_log(isolated_budget_study),
+                )
+                isolated_budget_proof = segregated_pilot_budget_proof_v1.evaluate(
+                    isolated_budget_study
+                )
+                log.warning(
+                    "%s",
+                    segregated_pilot_budget_proof_v1.format_log(
+                        isolated_budget_proof
+                    ),
+                )
+                isolated_shadow_ledger = await asyncio.wait_for(
+                    segregated_pilot_ledger_v1.snapshot(
+                        db,
+                        isolated_readiness,
+                        isolated_budget_study,
+                        prospective_oos_report,
+                    ),
+                    timeout=3.0,
+                )
+                log.warning(
+                    "%s",
+                    segregated_pilot_ledger_v1.format_log(
+                        isolated_shadow_ledger
+                    ),
+                )
+                isolated_first_approval = await asyncio.wait_for(
+                    prospective_oos_first_approval_review_v1.snapshot(
+                        db,
+                        prospective_oos_report,
+                    ),
+                    timeout=3.0,
+                )
+                log.warning(
+                    "%s",
+                    prospective_oos_first_approval_review_v1.format_log(
+                        isolated_first_approval
+                    ),
+                )
+                isolated_maturation = await asyncio.wait_for(
+                    prospective_oos_maturation_review_v1.snapshot(
+                        db,
+                        prospective_oos_report,
+                    ),
+                    timeout=3.0,
+                )
+                log.warning(
+                    "%s",
+                    prospective_oos_maturation_review_v1.format_log(
+                        isolated_maturation
+                    ),
+                )
+                for isolated_candidate_line in (
+                    prospective_oos_maturation_review_v1.format_candidate_rows(
+                        isolated_maturation
+                    )
+                ):
+                    log.warning("%s", isolated_candidate_line)
+                log.warning(
+                    "%s",
+                    prospective_oos_maturation_review_v1.format_concentration(
+                        isolated_maturation
+                    ),
+                )
+                _emit("PROSPECTIVE_OOS_RESEARCH_ISOLATION_V1", {
+                    "status": "PASS",
+                    "risk_epoch_available": epoch_row is not None,
+                    "validation_report_available": validation_report is not None,
+                    "decision_review_available": review_report is not None,
+                    "research_only": True,
+                    "shadow_only": True,
+                    "association_not_causation": True,
+                    "thresholds_unchanged": True,
+                    "risk_unchanged": True,
+                    "sizing_unchanged": True,
+                    "leverage_unchanged": True,
+                    "historical_hwm_preserved": True,
+                    "lifetime_drawdown_preserved": True,
+                    "current_hard_gate_unchanged": True,
+                    "automatic_promotion": False,
+                    "promotion_allowed": False,
+                    "live_allowed": False,
+                    "decision_effect": "NONE",
+                    "execution_effect": "NONE",
+                })
+            except GateCleared:
+                raise
+            except Exception as exc:
+                _emit("PROSPECTIVE_OOS_RESEARCH_ISOLATION_V1", {
+                    "status": "ERROR",
+                    "error": type(exc).__name__,
+                    "risk_epoch_available": epoch_row is not None,
+                    "validation_report_available": validation_report is not None,
+                    "decision_review_available": review_report is not None,
+                    "research_only": True,
+                    "shadow_only": True,
+                    "thresholds_unchanged": True,
+                    "risk_unchanged": True,
+                    "sizing_unchanged": True,
+                    "leverage_unchanged": True,
+                    "historical_hwm_preserved": True,
+                    "lifetime_drawdown_preserved": True,
+                    "current_hard_gate_unchanged": True,
+                    "automatic_promotion": False,
+                    "promotion_allowed": False,
+                    "live_allowed": False,
+                    "decision_effect": "NONE",
+                    "execution_effect": "NONE",
+                })
+        _check(engine)
+
         if epoch_row is not None and validation_report is not None and review_report is not None:
             try:
                 from bot import (
