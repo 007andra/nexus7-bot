@@ -45,6 +45,40 @@ _CANDIDATES = "hard_gate_shadow_candidates_v1"
 _OUTCOMES = "hard_gate_shadow_outcomes_v1"
 
 
+_CANDIDATES_TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
+ candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
+ symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
+)"""
+_OUTCOMES_TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_outcomes_v1 (
+ candidate_id TEXT NOT NULL, horizon INTEGER NOT NULL,
+ population TEXT NOT NULL, payload TEXT NOT NULL,
+ PRIMARY KEY(candidate_id,horizon)
+)"""
+_CANDIDATE_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_hgs_candidates_population_epoch "
+    "ON hard_gate_shadow_candidates_v1(population,captured_epoch)"
+)
+_OUTCOME_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_hgs_outcomes_population_horizon_candidate "
+    "ON hard_gate_shadow_outcomes_v1(population,horizon,candidate_id)"
+)
+
+
+async def _ensure_schema(db):
+    """Install research tables/indexes once per DB object/process."""
+    if getattr(db, "_risk_epoch_schema_ready", False):
+        return
+    await db._exec(_META)
+    await db._exec(_CANDIDATES_TABLE)
+    await db._exec(_OUTCOMES_TABLE)
+    await db._exec(_CANDIDATE_INDEX)
+    await db._exec(_OUTCOME_INDEX)
+    try:
+        setattr(db, "_risk_epoch_schema_ready", True)
+    except Exception:
+        pass
+
+
 def enabled() -> bool:
     return os.environ.get("RISK_EPOCH_SHADOW_V1", "false").strip().lower() in {
         "1", "true", "yes", "on",
@@ -75,7 +109,7 @@ def _loads(raw):
 
 
 async def _ensure_epoch(db, engine, start_equity: float, *, started_epoch: float | None = None):
-    await db._exec(_META)
+    await _ensure_schema(db)
     eid = epoch_id()
     rows = await db._fetchall(
         "SELECT payload FROM risk_epoch_shadow_v1 WHERE epoch_id=?",
@@ -153,19 +187,6 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
 
     baseline = await _ensure_epoch(db, engine, float(start_equity))
     started = float(baseline["started_epoch"])
-    await db._exec(
-        """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
-         candidate_id TEXT PRIMARY KEY, captured_epoch REAL NOT NULL,
-         symbol TEXT NOT NULL, population TEXT NOT NULL, payload TEXT NOT NULL
-        )"""
-    )
-    await db._exec(
-        """CREATE TABLE IF NOT EXISTS hard_gate_shadow_outcomes_v1 (
-         candidate_id TEXT NOT NULL, horizon INTEGER NOT NULL,
-         population TEXT NOT NULL, payload TEXT NOT NULL,
-         PRIMARY KEY(candidate_id,horizon)
-        )"""
-    )
     rows = await db._fetchall(
         "SELECT payload FROM hard_gate_shadow_candidates_v1 "
         "WHERE population=? AND captured_epoch>=? ORDER BY captured_epoch",
@@ -183,8 +204,9 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
             "SELECT o.candidate_id,o.horizon,o.payload "
             "FROM hard_gate_shadow_outcomes_v1 o "
             "JOIN hard_gate_shadow_candidates_v1 c ON c.candidate_id=o.candidate_id "
-            "WHERE o.population=? AND c.population=? AND c.captured_epoch>=?",
-            (POPULATION, POPULATION, started),
+            "WHERE o.population=? AND c.population=? AND c.captured_epoch>=? "
+            "AND o.horizon IN (?,?)",
+            (POPULATION, POPULATION, started, 60, 240),
         )
         for raw in out_rows or []:
             if hasattr(raw, "keys"):

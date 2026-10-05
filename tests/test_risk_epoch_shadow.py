@@ -48,6 +48,15 @@ class RiskEpochShadowTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_schema_and_indexes_are_installed_once_per_db_object(self):
+        db = FakeDB()
+        await epoch._ensure_schema(db)
+        first = db.exec_calls
+        self.assertEqual(first, 5)
+        await epoch._ensure_schema(db)
+        self.assertEqual(db.exec_calls, first)
+        self.assertTrue(getattr(db, "_risk_epoch_schema_ready", False))
+
     async def test_disabled_is_inert(self):
         db = FakeDB()
         with patch.dict(os.environ, {"RISK_EPOCH_SHADOW_V1": "false"}, clear=False):
@@ -152,7 +161,7 @@ class RiskEpochShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("JOIN hard_gate_shadow_candidates_v1", outcome_queries[0][0])
         self.assertEqual(
             outcome_queries[0][1],
-            (epoch.POPULATION, epoch.POPULATION, 100.0),
+            (epoch.POPULATION, epoch.POPULATION, 100.0, 60, 240),
         )
         self.assertAlmostEqual(row["approved_60m_avg_gross_return"], 0.01)
         self.assertEqual(row["historical_hwm"], 22.7986938551)
