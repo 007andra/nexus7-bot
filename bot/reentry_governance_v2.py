@@ -70,7 +70,14 @@ def _int(value, default=0):
         return default
 
 
-def evaluate(readiness: dict, oos: dict, release_board: dict) -> dict:
+def evaluate(
+    readiness: dict,
+    oos: dict,
+    release_board: dict,
+    *,
+    budget_study: dict | None = None,
+    segregated_ledger: dict | None = None,
+) -> dict:
     dd = _finite(readiness.get("drawdown"))
     limit = _finite(readiness.get("configured_limit"))
     equity = _finite(readiness.get("equity"))
@@ -92,10 +99,21 @@ def evaluate(readiness: dict, oos: dict, release_board: dict) -> dict:
         blockers.append("PROSPECTIVE_OOS_NOT_READY")
     if not runtime_pass:
         blockers.append("RUNTIME_PRECHECK_NOT_READY")
-    if SEGREGATED_PILOT_CONTROLS["absolute_loss_budget_usdt"] is None:
-        blockers.append("ABSOLUTE_LOSS_BUDGET_UNSET")
+    shadow_budget_ready = (
+        (budget_study or {}).get("status") == "AVAILABLE_RESEARCH_ONLY"
+        and (budget_study or {}).get("shadow_reference_budget_usdt") is not None
+    )
+    shadow_ledger_ready = (
+        (segregated_ledger or {}).get("status") == "SHADOW_LEDGER_ACTIVE"
+        and (segregated_ledger or {}).get("budget_guard_configured") is True
+        and (segregated_ledger or {}).get("isolation_contract_active") is True
+    )
+    if not shadow_budget_ready:
+        blockers.append("SHADOW_BUDGET_STUDY_NOT_READY")
+    if not shadow_ledger_ready:
+        blockers.append("SHADOW_SEGREGATED_LEDGER_NOT_READY")
     blockers.extend((
-        "DISTINCT_PILOT_LEDGER_NOT_PROVEN",
+        "LIVE_ABSOLUTE_LOSS_BUDGET_UNSET",
         "INDEPENDENT_CAPITAL_PROOF_NOT_PROVEN",
         "EXPLICIT_LIVE_AUTHORIZATION_NOT_GRANTED",
     ))
@@ -133,6 +151,14 @@ def evaluate(readiness: dict, oos: dict, release_board: dict) -> dict:
         "prospective_oos_enrolled": _int(oos.get("enrolled_candidates")),
         "prospective_oos_observed_60m": _int(oos.get("observed_60m")),
         "prospective_oos_observed_240m": _int(oos.get("observed_240m")),
+        "shadow_budget_study_ready": shadow_budget_ready,
+        "shadow_reference_budget_usdt": (
+            (budget_study or {}).get("shadow_reference_budget_usdt")
+        ),
+        "shadow_segregated_ledger_ready": shadow_ledger_ready,
+        "shadow_segregated_ledger_status": (
+            (segregated_ledger or {}).get("status")
+        ),
         "segregated_pilot": dict(SEGREGATED_PILOT_CONTROLS),
         "m1_resolution_path": (
             "SEPARATE_GOVERNANCE_LEDGER_ONLY; "
@@ -177,6 +203,10 @@ def format_log(row: dict) -> str:
         "prospective_oos_enrolled": row.get("prospective_oos_enrolled"),
         "prospective_oos_observed_60m": row.get("prospective_oos_observed_60m"),
         "prospective_oos_observed_240m": row.get("prospective_oos_observed_240m"),
+        "shadow_budget_study_ready": row.get("shadow_budget_study_ready"),
+        "shadow_reference_budget_usdt": row.get("shadow_reference_budget_usdt"),
+        "shadow_segregated_ledger_ready": row.get("shadow_segregated_ledger_ready"),
+        "shadow_segregated_ledger_status": row.get("shadow_segregated_ledger_status"),
         "distinct_pilot_ledger_required": pilot.get("distinct_pilot_ledger_required"),
         "independent_capital_proof_required": pilot.get("independent_capital_proof_required"),
         "absolute_loss_budget_required": pilot.get("absolute_loss_budget_required"),

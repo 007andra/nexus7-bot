@@ -1415,9 +1415,12 @@ async def scan(engine, *, db=None, bbo_views=None):
             try:
                 from bot import (
                     oos_progress_board_v2,
+                    pilot_budget_study_v1,
+                    pilot_release_review_v1,
                     reentry_governance_v2,
                     reentry_readiness,
                     reentry_release_board_v1,
+                    segregated_pilot_ledger_v1,
                 )
                 readiness_row = reentry_readiness.snapshot(engine)
                 release_board = reentry_release_board_v1.evaluate(
@@ -1435,12 +1438,41 @@ async def scan(engine, *, db=None, bbo_views=None):
                         release_board,
                     )
                     log.warning("%s", oos_progress_board_v2.format_log(progress_board))
+                    budget_study = pilot_budget_study_v1.evaluate(
+                        readiness_row,
+                        prospective_oos_report,
+                    )
+                    log.warning("%s", pilot_budget_study_v1.format_log(budget_study))
+                    shadow_ledger = await asyncio.wait_for(
+                        segregated_pilot_ledger_v1.snapshot(
+                            db,
+                            readiness_row,
+                            budget_study,
+                            prospective_oos_report,
+                        ),
+                        timeout=3.0,
+                    )
+                    log.warning(
+                        "%s", segregated_pilot_ledger_v1.format_log(shadow_ledger)
+                    )
                     governance = reentry_governance_v2.evaluate(
                         readiness_row,
                         prospective_oos_report,
                         release_board,
+                        budget_study=budget_study,
+                        segregated_ledger=shadow_ledger,
                     )
                     log.warning("%s", reentry_governance_v2.format_log(governance))
+                    pilot_review = pilot_release_review_v1.evaluate(
+                        readiness_row,
+                        release_board,
+                        prospective_oos_report,
+                        budget_study,
+                        shadow_ledger,
+                    )
+                    log.warning(
+                        "%s", pilot_release_review_v1.format_log(pilot_review)
+                    )
             except Exception as exc:
                 _emit("REENTRY_RELEASE_BOARD_V1", {
                     "status": "ERROR",
