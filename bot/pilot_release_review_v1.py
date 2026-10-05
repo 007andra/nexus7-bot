@@ -34,6 +34,7 @@ def evaluate(
         ledger.get("status") == "SHADOW_LEDGER_ACTIVE"
         and ledger.get("budget_guard_configured") is True
         and ledger.get("isolation_contract_active") is True
+        and ledger.get("enrollment_scope") == "EXACT_PROSPECTIVE_OOS_COHORT"
         and ledger.get("historical_loss_ledger_untouched") is True
         and ledger.get("historical_hwm_preserved") is True
         and ledger.get("lifetime_drawdown_preserved") is True
@@ -100,6 +101,7 @@ def evaluate(
         "segregated_ledger_budget_blocked_entries": ledger.get(
             "budget_blocked_entries"
         ),
+        "segregated_ledger_enrollment_scope": ledger.get("enrollment_scope"),
         "budget_guard_proof_status": (budget_proof or {}).get("status"),
         "budget_guard_proof_pass": bool((budget_proof or {}).get("proof_pass")),
         "budget_guard_proof_reserved_attempts": (budget_proof or {}).get(
@@ -138,6 +140,7 @@ def format_log(row: dict) -> str:
         "budget_study_status", "shadow_reference_budget_usdt",
         "segregated_ledger_status", "segregated_ledger_remaining_budget_usdt",
         "segregated_ledger_budget_blocked_entries",
+        "segregated_ledger_enrollment_scope",
         "budget_guard_proof_status", "budget_guard_proof_pass",
         "budget_guard_proof_reserved_attempts", "budget_guard_proof_blocked_attempts",
         "budget_guard_proof_synthetic_entries_persisted",
