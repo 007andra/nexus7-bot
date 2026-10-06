@@ -31,7 +31,17 @@ class FeasibilityDecision:
     proven: bool = True
 
 
-def _effective_stop_risk_pct(engine) -> float:
+def _effective_stop_risk_pct(engine, *, equity: float | None = None) -> float:
+    # The controlled one-shot pilot uses a bounded absolute-USDT risk envelope.
+    # This branch is feasibility-only; it grants no execution permission and
+    # all final gates re-check the authority after fresh authenticated reads.
+    if equity is not None:
+        try:
+            from bot import controlled_live_reentry_v1 as controlled_reentry
+            return float(controlled_reentry.candidate_risk_pct(engine, equity))
+        except Exception:
+            pass
+
     base = float(engine._effective_risk_pct())
     drawdown = float(getattr(getattr(engine, "risk", None), "drawdown", 0.0) or 0.0)
     multiplier = float(recovery_size_multiplier(drawdown))
@@ -130,7 +140,9 @@ async def evaluate_candidate(engine, sig) -> FeasibilityDecision:
         return FeasibilityDecision(True, "DEFER_CAPITAL_UNCONFIRMED", {}, proven=False)
 
     try:
-        risk_pct = _effective_stop_risk_pct(engine)
+        risk_pct = _effective_stop_risk_pct(
+            engine, equity=float(capital.equity)
+        )
     except (TypeError, ValueError, ArithmeticError):
         return FeasibilityDecision(True, "DEFER_RISK_CONTEXT", {}, proven=False)
 
