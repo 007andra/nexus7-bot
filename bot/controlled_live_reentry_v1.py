@@ -144,6 +144,49 @@ def _capital(engine) -> tuple[float, float, bool]:
     return equity, available, valid
 
 
+def candidate_risk_pct(engine, equity: float) -> float:
+    """Return the configured one-shot risk pct for early feasibility only.
+
+    This helper does not authorize execution and intentionally does not require
+    the later preflight/capital snapshot. Final execution calls readiness()
+    again after fresh authenticated account reads.
+    """
+    policy = policy_from_env()
+    if not policy.configured:
+        raise RuntimeError(f"controlled re-entry unavailable: {policy.reason}")
+    try:
+        equity_f = float(equity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid feasibility equity") from exc
+    if not math.isfinite(equity_f) or equity_f <= 0:
+        raise ValueError("invalid feasibility equity")
+
+    from bot import pilot
+    from bot.pilot_release_control import live_pilot_release_authorized
+    from bot.operator_runtime_policy import _risk_override_enabled
+    from bot.drawdown_recovery import policy_from_env as recovery_policy
+
+    if getattr(engine, "paper_trade", True):
+        raise RuntimeError("paper_mode")
+    if not live_pilot_release_authorized():
+        raise RuntimeError("controlled_pilot_release_missing")
+    if not bool(getattr(getattr(engine, "pilot", None), "enabled", False)):
+        raise RuntimeError("pilot_guard_disabled")
+    if int(pilot.PILOT_MAX_CONCURRENT_POSITIONS) != 1:
+        raise RuntimeError("pilot_position_cap_not_one")
+    if int(pilot.MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION) != 1:
+        raise RuntimeError("pilot_submission_cap_not_one")
+    if _risk_override_enabled():
+        raise RuntimeError("generic_risk_override_forbidden")
+    if recovery_policy().authorized:
+        raise RuntimeError("overlapping_recovery_authority_forbidden")
+
+    effective = min(float(policy.max_risk_pct), float(policy.loss_budget_usdt) / equity_f)
+    if not math.isfinite(effective) or not 0 < effective <= HARD_MAX_RISK_PCT:
+        raise RuntimeError("effective_risk_invalid")
+    return effective
+
+
 def readiness(engine) -> tuple[bool, str, dict]:
     """Validate only the segregated one-shot re-entry contract.
 
@@ -346,6 +389,7 @@ __all__ = [
     "ReentryPolicy",
     "policy_from_env",
     "readiness",
+    "candidate_risk_pct",
     "effective_risk_pct",
     "drawdown_bridge_allowed",
     "projected_loss_allowed",
