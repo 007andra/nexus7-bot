@@ -333,7 +333,14 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
             risk_reward=2,
             reasoning=["synthetic approval for offline post-NEXUS proof"],
         )
-        self.engine._nexus_validate = AsyncMock(return_value=decision)
+        # Preserve RuntimeTradingEngine._nexus_validate so the real
+        # post-decision wrapper executes _prepare_professional_risk(). Mock only
+        # the CoreTradingEngine decision source; replacing the instance method
+        # would bypass the RiskManagerV3 plan and make final sizing fail for a
+        # reason that cannot occur on the canonical approved path.
+        self.engine._nexus_validate = RuntimeTradingEngine._nexus_validate.__get__(
+            self.engine, RuntimeTradingEngine
+        )
 
         async def production_account():
             self.events.append("ACCOUNT_REFRESH")
@@ -369,6 +376,10 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch.dict(os.environ, controlled_env, clear=False), \
+             patch.object(
+                 core.TradingEngine, "_nexus_validate",
+                 AsyncMock(return_value=decision),
+             ), \
              patch.object(pilot_module, "PILOT_MAX_CONCURRENT_POSITIONS", 1), \
              patch.object(pilot_module, "MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1), \
              patch.object(final_loss_budget, "diagnose", side_effect=capture_loss), \
