@@ -457,6 +457,147 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.assertIn("STRESS_FINAL_PREDISPATCH", self.events)
         self.assertIn("PLACE_ORDER", self.events)
 
+    async def test_natural_r3_uni_approved_post_nexus_replay_stops_before_http(self):
+        """Replay natural R3 approval HARD_GATE_SHADOW:UNIUSDT:SHORT:BOS_BREAK:1990333.
+
+        Production shadow evidence:
+        score=72, entry=8.776, stop=8.834, target=8.601999,
+        risk_budget=0.10 USDT, min_valid_qty=1,
+        risk_at_min_qty=0.08608320, nexus_net_rr=1.695, nexus_ev=0.4911.
+
+        The decision is fixed to the already-observed natural NEXUS approval.
+        This test proves only the downstream execution mechanics and blocks the
+        one-shot transport boundary before any Binance order POST.
+        """
+        from bot import controlled_live_reentry_v1 as controlled
+        from bot import final_loss_budget
+        from bot import pilot as pilot_module
+
+        equity = 5.39561426
+        symbol = "UNIUSDT"
+        self.engine.viable_symbols = [symbol]
+        self.engine.instruments = {
+            symbol: {
+                "quantityUnit": "BASE_ASSET",
+                "qtyStep": "1",
+                "minQty": "1",
+                "minNotional": "5",
+                "tickSize": "0.001",
+                "multiplier": 1.0,
+            }
+        }
+        self.client._instruments = self.engine.instruments
+        self.engine.risk.init(equity)
+        self.engine.risk.update_capital(CapitalState(equity, equity))
+        self.engine._pilot_live_prelive_ready = True
+        self.signal = Signal(
+            symbol, "SHORT", 8.776, 8.834, 8.601999, 72,
+            "R3 natural UNI BOS_BREAK 1990333", 90,
+        )
+        decision = NexusDecision(
+            symbol=symbol,
+            decision="SHORT",
+            execution_allowed=True,
+            confidence=90,
+            setup_quality=72,
+            entry=8.776,
+            stop_loss=8.834,
+            take_profit=8.601999,
+            expected_value=0.4911,
+            risk_reward=1.695,
+            reasoning=["natural R3 NEXUS approval replay"],
+        )
+        self.engine._nexus_validate = AsyncMock(return_value=decision)
+
+        async def production_account():
+            self.events.append("ACCOUNT_REFRESH")
+            return {
+                "equity": equity,
+                "available": equity,
+                "crossWalletBalance": equity,
+                "orderMargin": 0,
+                "positionMargin": 0,
+                "canTrade": True,
+                "multiAssetsMargin": False,
+            }
+
+        self.client.get_account_state = AsyncMock(side_effect=production_account)
+
+        captured_loss = []
+        current_diagnose = final_loss_budget.diagnose
+
+        def capture_loss(*args, **kwargs):
+            result = current_diagnose(*args, **kwargs)
+            captured_loss.append(result)
+            return result
+
+        stop_before_http = AsyncMock(
+            return_value=(False, "OFFLINE_NATURAL_R3_PROOF_STOP_BEFORE_HTTP")
+        )
+        controlled_env = {
+            controlled.ENABLED_ENV: "true",
+            controlled.EPISODE_ENV: "OFFLINE_R3_UNI_1990333_POST_NEXUS_PROOF",
+            controlled.ARM_ENV: controlled.ARM_TOKEN,
+            controlled.LOSS_BUDGET_ENV: "0.10",
+            controlled.MAX_RISK_PCT_ENV: "0.02",
+        }
+
+        with patch.dict(os.environ, controlled_env, clear=False), \
+             patch.object(pilot_module, "PILOT_MAX_CONCURRENT_POSITIONS", 1), \
+             patch.object(pilot_module, "MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1), \
+             patch.object(final_loss_budget, "diagnose", side_effect=capture_loss), \
+             patch(
+                 "bot.pilot_risk_cap_hardening.live_microstructure_recheck",
+                 AsyncMock(return_value=SimpleNamespace(
+                     allowed=True,
+                     metrics={"executable_price": float(self.signal.entry)},
+                     blockers=[],
+                 )),
+             ), \
+             patch(
+                 "bot.controlled_live_reentry_v1.consume_dispatch_once",
+                 stop_before_http,
+             ):
+            risk_pct = controlled.candidate_risk_pct(self.engine, equity)
+            self.assertAlmostEqual(risk_pct, 0.10 / equity, places=12)
+            self.engine.risk.set_plan(
+                symbol=symbol,
+                entry=float(self.signal.entry),
+                stop=float(self.signal.sl),
+                risk_pct=risk_pct,
+            )
+            self.engine.risk.update_capital(CapitalState(equity, equity))
+            await asyncio.wait_for(self.engine._open(self.signal), timeout=10.0)
+
+        self.assertEqual(self.sized_qty, 1.0, self.events)
+        self.assertEqual(
+            self.evaluations,
+            [("PRE_ORDER", 1.0), ("FINAL_PREDISPATCH", 1.0)],
+            self.events,
+        )
+        self.assertTrue(getattr(self.last_result, "allowed", False), self.events)
+        projected = [
+            float(metrics["projected_loss"])
+            for _result, _reason, metrics in captured_loss
+            if isinstance(metrics, dict) and "projected_loss" in metrics
+        ]
+        self.assertTrue(projected, captured_loss)
+        self.assertLessEqual(max(projected), 0.10 + 1e-9, captured_loss)
+        self.assertAlmostEqual(projected[-1], 0.0860832, places=7)
+
+        self.assertEqual(self.client.place_order.call_count, 1, self.events)
+        self.assertEqual(stop_before_http.await_count, 1, self.events)
+        self.assertFalse(
+            any(method == "POST" and endpoint == "/fapi/v1/order"
+                for method, endpoint, _params in self.requests),
+            self.requests,
+        )
+        self.assertIn("FINAL_SIZING_ENTER", self.events)
+        self.assertIn("FINAL_SIZING_RETURN", self.events)
+        self.assertIn("STRESS_PRE_ORDER", self.events)
+        self.assertIn("STRESS_FINAL_PREDISPATCH", self.events)
+        self.assertIn("PLACE_ORDER", self.events)
+
     async def test_pre_order_block(self):
         self.stage, self.scenario = "PRE_ORDER", "block"
         await self.engine._open(self.signal)
