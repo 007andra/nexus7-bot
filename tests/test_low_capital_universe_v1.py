@@ -160,6 +160,22 @@ class LowCapitalUniverseV1Tests(unittest.IsolatedAsyncioTestCase):
 
             Engine._start_background = _restore
 
+
+    def test_engine_runtime_wiring_is_after_engine_ready_and_single(self):
+        engine_source = (
+            Path(subject.__file__).with_name("engine.py").read_text(encoding="utf-8")
+        )
+        ready_marker = 'log.info("✅ Engine PRONTO — loop de scan liberado")'
+        call_marker = "_low_capital_universe.schedule_if_enabled("
+        wiring_marker = "[LOW_CAPITAL_UNIVERSE_V1] status=WIRING_CALL"
+        self.assertIn(ready_marker, engine_source)
+        self.assertEqual(engine_source.count(call_marker), 1)
+        self.assertEqual(engine_source.count(wiring_marker), 1)
+        self.assertGreater(
+            engine_source.index(call_marker),
+            engine_source.index(ready_marker),
+        )
+
     def test_module_has_no_execution_authority(self):
         source = Path(subject.__file__).read_text(encoding="utf-8")
         forbidden = (
