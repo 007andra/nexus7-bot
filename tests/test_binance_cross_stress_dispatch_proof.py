@@ -399,7 +399,14 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
                  "bot.controlled_live_reentry_v1.consume_dispatch_once",
                  stop_before_http,
              ):
-            await self.engine._open(self.signal)
+            try:
+                await asyncio.wait_for(self.engine._open(self.signal), timeout=10.0)
+            except asyncio.TimeoutError:
+                self.fail(
+                    "post-NEXUS replay timed out before HTTP boundary; "
+                    f"events={self.events} evaluations={self.evaluations} "
+                    f"requests={self.requests}"
+                )
 
         self.assertTrue(hasattr(self, "sized_qty"), self.events)
         self.assertGreater(self.sized_qty, 0.0, self.events)
