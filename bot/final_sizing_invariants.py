@@ -168,17 +168,36 @@ def install(engine_module, pilot_cap, log) -> None:
             return 0.0
 
         try:
-            from bot.drawdown_recovery import recovery_size_multiplier
-            drawdown = float(getattr(engine.risk, "drawdown", 0.0) or 0.0)
-            recovery_mult = recovery_size_multiplier(drawdown)
-            if recovery_mult <= 0:
-                log.critical(
-                    "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK "
-                    "reason=drawdown_authorization_invalid",
-                    symbol,
+            controlled_ok = False
+            controlled_reason = "not_configured"
+            try:
+                from bot import controlled_live_reentry_v1 as controlled_reentry
+                controlled_ok, controlled_reason, _controlled_evidence = (
+                    controlled_reentry.readiness(engine)
                 )
-                pilot_cap._PILOT_FINAL_QTY.set(0.0)
-                return 0.0
+            except Exception as exc:
+                controlled_ok = False
+                controlled_reason = f"controlled_reentry_{type(exc).__name__}"
+
+            if controlled_ok:
+                # The planned RiskManagerV3 percentage already encodes the
+                # absolute one-shot USDT ceiling, so no drawdown multiplier is
+                # applied a second time.
+                recovery_mult = 1.0
+            else:
+                from bot.drawdown_recovery import recovery_size_multiplier
+                drawdown = float(getattr(engine.risk, "drawdown", 0.0) or 0.0)
+                recovery_mult = recovery_size_multiplier(drawdown)
+                if recovery_mult <= 0:
+                    log.critical(
+                        "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK "
+                        "reason=drawdown_authorization_invalid controlled_reason=%s",
+                        symbol,
+                        controlled_reason,
+                    )
+                    pilot_cap._PILOT_FINAL_QTY.set(0.0)
+                    return 0.0
+
             risk_qty = float(engine.risk.size(
                 symbol,
                 price_f,
@@ -245,11 +264,48 @@ def install(engine_module, pilot_cap, log) -> None:
             specific_reason=specific_reason,
             risk_v3_advisory_qty=risk_qty,
         )
-        # The loss-budget geometry is quantity-invariant: shrinking qty reduces
-        # projected loss and entry margin by the same factor. Therefore WARN or
-        # UNAVAILABLE cannot be repaired by resizing. Reject only this candidate;
-        # the runtime/scanner remains active.
-        if result != "PASS":
+        # Normal LIVE keeps the historical margin-relative loss ceiling.
+        # The explicitly armed one-shot re-entry instead uses RiskManagerV3 plus
+        # an absolute USDT ceiling. A legacy WARN is telemetry there, never a
+        # reason to exceed the absolute budget; UNAVAILABLE remains fail-closed.
+        if controlled_ok:
+            if result == "UNAVAILABLE" or not isinstance(_metrics, dict):
+                log.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
+                    "result=BLOCK reason=loss_geometry_unavailable",
+                    symbol,
+                )
+                pilot_cap._PILOT_FINAL_QTY.set(0.0)
+                return 0.0
+            absolute_ok, absolute_reason, absolute_evidence = (
+                controlled_reentry.projected_loss_allowed(
+                    engine, float(_metrics["projected_loss"])
+                )
+            )
+            if not absolute_ok:
+                log.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
+                    "result=BLOCK reason=%s projected_loss_usdt=%s "
+                    "absolute_loss_budget_usdt=%s",
+                    symbol,
+                    absolute_reason,
+                    absolute_evidence.get("projected_loss_usdt", "NA"),
+                    absolute_evidence.get("loss_budget_usdt", "NA"),
+                )
+                pilot_cap._PILOT_FINAL_QTY.set(0.0)
+                return 0.0
+            log.critical(
+                "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
+                "result=PASS projected_loss_usdt=%.12g absolute_loss_budget_usdt=%.12g "
+                "headroom_usdt=%.12g legacy_margin_ceiling=%s "
+                "risk_authority=RiskManagerV3",
+                symbol,
+                float(absolute_evidence["projected_loss_usdt"]),
+                float(absolute_evidence["loss_budget_usdt"]),
+                float(absolute_evidence["headroom_usdt"]),
+                result,
+            )
+        elif result != "PASS":
             log.critical(
                 "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK "
                 "reason=final_loss_budget_%s candidate_only=true "
