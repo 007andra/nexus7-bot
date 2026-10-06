@@ -89,6 +89,21 @@ class ControlledLiveReentryPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(evidence["effective_risk_budget_usdt"], 0.10)
         self.assertLessEqual(pct, controlled.HARD_MAX_RISK_PCT)
 
+    def test_unarmed_envelope_can_drive_feasibility_but_not_live_readiness(self):
+        engine = _engine()
+        patches = self._authority_patches()
+        env = _env(**{controlled.ARM_ENV: ""})
+        with patch.dict(os.environ, env, clear=True), \
+             patches[0], patches[1], patches[2], patches[3], patches[4]:
+            policy = controlled.policy_from_env()
+            pct = controlled.candidate_risk_pct(engine, 5.39561426)
+            ok, reason, _ = controlled.readiness(engine)
+        self.assertTrue(policy.envelope_configured)
+        self.assertFalse(policy.configured)
+        self.assertAlmostEqual(pct, 0.10 / 5.39561426)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "manual_arm_missing")
+
     def test_candidate_risk_pct_does_not_require_later_preflight_but_is_not_authority(self):
         engine = _engine()
         engine._pilot_live_prelive_ready = False
