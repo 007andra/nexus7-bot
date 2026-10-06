@@ -184,6 +184,43 @@ class FinalSizingInvariantTests(unittest.TestCase):
         self.assertEqual(stored, 0.0)
 
 
+    def test_controlled_absolute_budget_cap_floors_to_exchange_step(self):
+        info = {
+            "quantityUnit": "BASE_ASSET",
+            "qtyStep": "0.1",
+            "minQty": "0.1",
+            "minNotional": "5",
+        }
+        qty = final_sizing._controlled_absolute_budget_quantity(
+            info,
+            entry=0.20053,
+            stop=0.203079,
+            direction="SHORT",
+            cost_fraction=0.0032,
+            loss_budget_usdt=0.10,
+        )
+        self.assertAlmostEqual(qty, 31.3)
+        projected = qty * (abs(0.20053 - 0.203079) + 0.20053 * 0.0032)
+        self.assertLessEqual(projected, 0.10)
+        self.assertGreaterEqual(qty * 0.20053, 5.0)
+
+    def test_controlled_absolute_budget_cap_never_forces_minimum_order(self):
+        info = {
+            "quantityUnit": "BASE_ASSET",
+            "qtyStep": "0.1",
+            "minQty": "25",
+            "minNotional": "5",
+        }
+        qty = final_sizing._controlled_absolute_budget_quantity(
+            info,
+            entry=0.20053,
+            stop=0.203079,
+            direction="SHORT",
+            cost_fraction=0.0032,
+            loss_budget_usdt=0.01,
+        )
+        self.assertEqual(qty, 0.0)
+
     def test_invalid_allocation_fails_closed(self):
         module, engine = self._install(risk_size=lambda *a, **k: 10.0, available=6.0)
         for value in ("0", "1.01", "nan", "bad"):

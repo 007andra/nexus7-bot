@@ -11,6 +11,7 @@ INV-QTY-EXACT-001 / ROUNDTRIP-001 / NO-UPROUND-001 / FEASIBILITY-PARITY-001
 import os
 import random
 import unittest
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlencode
@@ -67,6 +68,15 @@ class RetrySigningTests(unittest.IsolatedAsyncioTestCase):
         c._ensure_session = AsyncMock()
         c._throttle = AsyncMock()
         c._now_ms = lambda: next(self.clock)
+
+        @asynccontextmanager
+        async def allow_transport_fence(endpoint, body, url=None, **kwargs):
+            async with c._entry_safe_post(endpoint, body, url, **kwargs) as response:
+                yield response
+
+        # These tests verify signing/retry/ambiguity semantics below the
+        # ownership boundary; the boundary itself has separate LIVE proofs.
+        c._fenced_entry_post = allow_transport_fence
         return c
 
     async def test_retry_after_429_refreshes_timestamp_and_signature(self):

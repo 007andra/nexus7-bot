@@ -102,6 +102,64 @@ def binding_constraint(*, target_qty: float, risk_qty: float) -> str:
     return "RISK_BUDGET" if float(risk_qty) <= float(target_qty) else "OPERATOR_MARGIN_CAP"
 
 
+def _controlled_absolute_budget_quantity(
+    info: dict,
+    *,
+    entry: float,
+    stop: float,
+    direction: str,
+    cost_fraction: float,
+    loss_budget_usdt: float,
+) -> float:
+    """Floor base quantity to the largest exchange lot inside an absolute loss budget.
+
+    This is a one-shot controlled-reentry safety cap only. It can only reduce
+    the quantity already authorized by RiskManagerV3/operator margin sizing; it
+    never raises quantity, moves the technical stop, changes leverage, or grants
+    execution authority.
+    """
+    try:
+        entry_d = Decimal(str(entry))
+        stop_d = Decimal(str(stop))
+        cost_d = Decimal(str(cost_fraction))
+        budget_d = Decimal(str(loss_budget_usdt))
+        direction_s = str(direction).upper()
+    except Exception:
+        return 0.0
+
+    if any(not value.is_finite() for value in (entry_d, stop_d, cost_d, budget_d)):
+        return 0.0
+    if entry_d <= 0 or stop_d <= 0 or cost_d < 0 or budget_d <= 0:
+        return 0.0
+    if not (
+        (direction_s == "LONG" and stop_d < entry_d)
+        or (direction_s == "SHORT" and stop_d > entry_d)
+    ):
+        return 0.0
+
+    loss_per_base = abs(entry_d - stop_d) + entry_d * cost_d
+    if loss_per_base <= 0:
+        return 0.0
+
+    try:
+        multiplier, lot, minimum, min_notional = quantity_rules(info)
+    except Exception:
+        return 0.0
+    if any(value <= 0 for value in (multiplier, lot, minimum)):
+        return 0.0
+
+    raw_base_qty = budget_d / loss_per_base
+    contracts = raw_base_qty / multiplier
+    contracts = (contracts / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
+    if contracts < minimum:
+        return 0.0
+
+    base_qty = contracts * multiplier
+    if base_qty * entry_d < min_notional:
+        return 0.0
+    return float(base_qty)
+
+
 def _operator_target_quantity(
     info: dict, price: float, available: float, leverage: float,
     *, fraction: float | None = None,
@@ -282,7 +340,93 @@ def install(engine_module, pilot_cap, log) -> None:
                     engine, float(_metrics["projected_loss"])
                 )
             )
-            if not absolute_ok:
+            if not absolute_ok and absolute_reason == "absolute_loss_budget_exceeded":
+                initial_qty = final_qty
+                budget_qty = _controlled_absolute_budget_quantity(
+                    info,
+                    entry=price_f,
+                    stop=getattr(signal, "sl", float("nan")),
+                    direction=getattr(signal, "direction", "UNKNOWN"),
+                    cost_fraction=cost_fraction,
+                    loss_budget_usdt=float(
+                        absolute_evidence.get("loss_budget_usdt", 0.0) or 0.0
+                    ),
+                )
+                clamped_qty = min(float(final_qty), float(budget_qty))
+                if not math.isfinite(clamped_qty) or clamped_qty <= 0 or clamped_qty >= final_qty:
+                    log.critical(
+                        "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
+                        "result=BLOCK reason=absolute_loss_budget_no_feasible_lot "
+                        "initial_qty=%.12g budget_qty=%.12g projected_loss_usdt=%s "
+                        "absolute_loss_budget_usdt=%s",
+                        symbol, initial_qty, budget_qty,
+                        absolute_evidence.get("projected_loss_usdt", "NA"),
+                        absolute_evidence.get("loss_budget_usdt", "NA"),
+                    )
+                    pilot_cap._PILOT_FINAL_QTY.set(0.0)
+                    return 0.0
+
+                clamp_result, clamp_reason, clamp_metrics = diagnose(
+                    clamped_qty,
+                    price_f,
+                    getattr(signal, "sl", float("nan")),
+                    getattr(signal, "direction", "UNKNOWN"),
+                    leverage,
+                    cost_fraction,
+                )
+                if clamp_result == "UNAVAILABLE" or not isinstance(clamp_metrics, dict):
+                    log.critical(
+                        "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
+                        "result=BLOCK reason=absolute_loss_budget_clamp_unavailable",
+                        symbol,
+                    )
+                    pilot_cap._PILOT_FINAL_QTY.set(0.0)
+                    return 0.0
+
+                absolute_ok, absolute_reason, absolute_evidence = (
+                    controlled_reentry.projected_loss_allowed(
+                        engine, float(clamp_metrics["projected_loss"])
+                    )
+                )
+                if not absolute_ok:
+                    log.critical(
+                        "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
+                        "result=BLOCK reason=%s initial_qty=%.12g clamped_qty=%.12g "
+                        "projected_loss_usdt=%s absolute_loss_budget_usdt=%s",
+                        symbol, absolute_reason, initial_qty, clamped_qty,
+                        absolute_evidence.get("projected_loss_usdt", "NA"),
+                        absolute_evidence.get("loss_budget_usdt", "NA"),
+                    )
+                    pilot_cap._PILOT_FINAL_QTY.set(0.0)
+                    return 0.0
+
+                final_qty = clamped_qty
+                final_margin = (final_qty * price_f) / leverage
+                result, specific_reason, _metrics = (
+                    clamp_result, clamp_reason, clamp_metrics
+                )
+                emit_telemetry(
+                    log, symbol=symbol, setup_id=setup_id,
+                    stage="CONTROLLED_ABSOLUTE_LOSS_CLAMP",
+                    qty=final_qty, entry=price_f,
+                    stop=getattr(signal, "sl", float("nan")),
+                    direction=getattr(signal, "direction", "UNKNOWN"),
+                    leverage=leverage, cost_fraction=cost_fraction,
+                    result=result, specific_reason=specific_reason,
+                    risk_v3_advisory_qty=risk_qty,
+                )
+                log.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
+                    "result=CLAMPED_PASS initial_qty=%.12g final_qty=%.12g "
+                    "projected_loss_usdt=%.12g absolute_loss_budget_usdt=%.12g "
+                    "headroom_usdt=%.12g quantity_only_reduced=true "
+                    "risk_authority=RiskManagerV3",
+                    symbol, initial_qty, final_qty,
+                    float(absolute_evidence["projected_loss_usdt"]),
+                    float(absolute_evidence["loss_budget_usdt"]),
+                    float(absolute_evidence["headroom_usdt"]),
+                )
+            elif not absolute_ok:
                 log.critical(
                     "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
                     "result=BLOCK reason=%s projected_loss_usdt=%s "
@@ -294,6 +438,7 @@ def install(engine_module, pilot_cap, log) -> None:
                 )
                 pilot_cap._PILOT_FINAL_QTY.set(0.0)
                 return 0.0
+
             log.critical(
                 "[CONTROLLED_LIVE_REENTRY_V1] symbol=%s stage=FINAL_SIZING "
                 "result=PASS projected_loss_usdt=%.12g absolute_loss_budget_usdt=%.12g "

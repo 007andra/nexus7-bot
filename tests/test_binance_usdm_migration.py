@@ -5,6 +5,7 @@ No Binance credentials and no network access are used.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import os
 import subprocess
 import sys
@@ -32,6 +33,13 @@ class FakeBinance(bn.BinanceClient):
         if callable(value):
             value = value(params or {}, auth)
         return value
+
+    @asynccontextmanager
+    async def _fenced_entry_post(self, endpoint, body, url=None, **kwargs):
+        # This fake isolates Binance adapter/retry semantics from distributed
+        # ownership, which has dedicated transport-boundary coverage.
+        async with self._entry_safe_post(endpoint, body, url, **kwargs) as response:
+            yield response
 
     async def close(self):
         return None
