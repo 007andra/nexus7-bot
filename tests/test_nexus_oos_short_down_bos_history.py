@@ -51,6 +51,13 @@ class SegmentedHistoricalOOSTests(unittest.TestCase):
         self.assertIn("APPROVED_AVG_240M_NOT_POSITIVE", report["blockers"])
         self.assertEqual(report["status"], "HISTORICAL_SUPPORT_NOT_ESTABLISHED")
 
+    def test_cutoff_requires_full_240m_path_before_r3_day(self):
+        four_hours_ms = 240 * 60 * 1000
+        self.assertLess(
+            seg.HISTORICAL_CUTOFF_MS - four_hours_ms,
+            seg.HISTORICAL_CUTOFF_MS,
+        )
+
     def test_directional_outcome_matches_shadow_semantics_for_short(self):
         bars=[
             {"h": 99.0, "l": 97.0, "c": 98.0},
