@@ -55,6 +55,8 @@ _CALIBRATION_FAILURE_INTERVAL_S = 300.0
 _CALIBRATION_FAILURE_LAST_EMIT = 0.0
 _PROSPECTIVE_OOS_INTERVAL_S = 300.0
 _PROSPECTIVE_OOS_LAST_EMIT = 0.0
+_SHORT_DOWN_BOS_INTERVAL_S = 60.0
+_SHORT_DOWN_BOS_LAST_EMIT = 0.0
 _OOS_GATE_CLEAR_CONTINUITY_INTERVAL_S = 30.0
 _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
@@ -1323,6 +1325,42 @@ async def _maybe_emit_prospective_oos_cohort(db):
         return None
 
 
+async def _maybe_emit_short_down_bos_prospective(db):
+    """Read-only frozen segment validation; never grants LIVE authority."""
+    global _SHORT_DOWN_BOS_LAST_EMIT
+    from bot import short_down_bos_prospective_v1 as study
+    if not study.enabled():
+        return None
+    now = time.monotonic()
+    if (
+        _SHORT_DOWN_BOS_LAST_EMIT > 0.0
+        and now - _SHORT_DOWN_BOS_LAST_EMIT < _SHORT_DOWN_BOS_INTERVAL_S
+    ):
+        return None
+    _SHORT_DOWN_BOS_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(study.snapshot(db), timeout=3.0)
+        log.warning("%s", study.format_log(report))
+        return report
+    except Exception as exc:
+        _emit("SHORT_DOWN_BOS_PROSPECTIVE_V1", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "hypothesis_frozen": True,
+            "prior_r3_seed_excluded": True,
+            "candidate_generation_unchanged": True,
+            "thresholds_unchanged": True,
+            "risk_unchanged": True,
+            "sizing_unchanged": True,
+            "automatic_promotion": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
 async def scan(engine, *, db=None, bbo_views=None):
     if not enabled():
         return None
@@ -1352,6 +1390,30 @@ async def scan(engine, *, db=None, bbo_views=None):
         from bot.champion_challenger_forward_v1 import build_forward_record
         if db is None:
             from bot import database as db
+
+        # Freeze the new segmented hypothesis before this scan can enroll a
+        # candidate. The durable cutoff excludes all prior R3 observations,
+        # including the three UNI winners that motivated the hypothesis.
+        try:
+            from bot import short_down_bos_prospective_v1 as short_bos
+            if short_bos.enabled():
+                await asyncio.wait_for(
+                    short_bos.ensure_cohort(db, started_epoch=time.time()),
+                    timeout=1.5,
+                )
+        except GateCleared:
+            raise
+        except Exception as exc:
+            _emit("SHORT_DOWN_BOS_PROSPECTIVE_V1", {
+                "status": "BASELINE_ERROR",
+                "error": type(exc).__name__,
+                "hypothesis_frozen": True,
+                "prior_r3_seed_excluded": True,
+                "promotion_allowed": False,
+                "live_allowed": False,
+                "decision_effect": "NONE",
+                "execution_effect": "NONE",
+            })
 
         # Establish the research epoch baseline before enrolling any candidate
         # from this scan. Cache-only capital; no exchange I/O and no LIVE effect.
@@ -1648,6 +1710,8 @@ async def scan(engine, *, db=None, bbo_views=None):
         await _maybe_emit_calibration_failure_analysis(db)
         _check(engine)
         prospective_oos_report = await _maybe_emit_prospective_oos_cohort(db)
+        _check(engine)
+        await _maybe_emit_short_down_bos_prospective(db)
         _check(engine)
 
         # The prospective OOS cohort/ledger/reviews are independent research
