@@ -37,6 +37,12 @@ class Engine:
     def _effective_risk_pct(self):
         return 0.0025
 
+    def _start_background(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self._background_tasks = getattr(self, "_background_tasks", set())
+        self._background_tasks.add(task)
+        return task
+
 
 class LowCapitalUniverseV1Tests(unittest.IsolatedAsyncioTestCase):
     def test_build_snapshot_is_research_only_and_does_not_mutate_live_universe(self):
@@ -117,14 +123,42 @@ class LowCapitalUniverseV1Tests(unittest.IsolatedAsyncioTestCase):
         async def fake_run(_engine, _log):
             await gate.wait()
 
-        log = SimpleNamespace(warning=lambda *a, **k: None)
+        warnings = []
+        log = SimpleNamespace(warning=lambda *a, **k: warnings.append(a))
 
         with patch.object(subject, "_run", fake_run):
             self.assertTrue(subject.schedule_if_enabled(engine, log))
             self.assertFalse(subject.schedule_if_enabled(engine, log))
             self.assertEqual(engine.viable_symbols, ["BTCUSDT"])
+            self.assertIn(
+                engine._low_capital_universe_v1_task,
+                engine._background_tasks,
+            )
+            self.assertTrue(
+                any("status=SCHEDULED" in args[0] for args in warnings)
+            )
             gate.set()
             await engine._low_capital_universe_v1_task
+
+    def test_scheduler_requires_engine_background_manager(self):
+        engine = Engine()
+        delattr(engine.__class__, "_start_background")
+        log = SimpleNamespace(warning=lambda *a, **k: None)
+
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "engine background manager unavailable",
+            ):
+                subject.schedule_if_enabled(engine, log)
+        finally:
+            def _restore(self, coroutine):
+                task = asyncio.create_task(coroutine)
+                self._background_tasks = getattr(self, "_background_tasks", set())
+                self._background_tasks.add(task)
+                return task
+
+            Engine._start_background = _restore
 
     def test_module_has_no_execution_authority(self):
         source = Path(subject.__file__).read_text(encoding="utf-8")
