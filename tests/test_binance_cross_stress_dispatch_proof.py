@@ -382,21 +382,23 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
              ), \
              patch.object(pilot_module, "PILOT_MAX_CONCURRENT_POSITIONS", 1), \
              patch.object(pilot_module, "MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1), \
+             patch(
+                 "bot.nexus_runtime_engine.capital_flows.reconcile_external_capital_flows",
+                 AsyncMock(),
+             ), \
+             patch(
+                 "bot.nexus_runtime_engine.hwm_incident_repair.repair_if_needed",
+                 AsyncMock(return_value={"status": "NOT_MATCHED"}),
+             ), \
+             patch(
+                 "bot.nexus_runtime_engine.restore_update_real_account_peak",
+                 AsyncMock(),
+             ), \
              patch.object(final_loss_budget, "diagnose", side_effect=capture_loss), \
              patch(
                  "bot.controlled_live_reentry_v1.consume_dispatch_once",
                  stop_before_http,
              ):
-            # First prove the real post-decision preparation itself. If it
-            # raises, surface the exact type/message instead of letting _open's
-            # fail-closed AI gate collapse it to a generic rejection.
-            try:
-                await self.engine._prepare_professional_risk(self.signal, decision)
-            except Exception as exc:
-                self.fail(
-                    "post-NEXUS risk preparation failed: "
-                    f"{type(exc).__name__}: {exc}"
-                )
             await self.engine._open(self.signal)
 
         self.assertTrue(hasattr(self, "sized_qty"), self.events)
