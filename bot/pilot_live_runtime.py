@@ -239,6 +239,24 @@ def _entry_drawdown_allows(engine, log) -> bool:
         )
         return True
 
+    # Final one-shot pilot bridge. This is NOT a generic account drawdown
+    # override: it requires the explicit episode arm, absolute loss ceiling,
+    # one-position/one-submission caps, flat account and current preflight.
+    try:
+        from bot import controlled_live_reentry_v1 as controlled_reentry
+        controlled_ok, controlled_reason = controlled_reentry.drawdown_bridge_allowed(engine)
+    except Exception as exc:
+        controlled_ok, controlled_reason = False, f"controlled_reentry_{type(exc).__name__}"
+    if controlled_ok:
+        log.critical(
+            "[CONTROLLED_LIVE_REENTRY_V1] stage=FRESH_PREDISPATCH_DRAWDOWN "
+            "result=PASS drawdown=%.4f%% normal_limit=%.4f%% bridge=%s "
+            "scope=DRAWDOWN_THRESHOLD_ONLY historical_hwm_preserved=true "
+            "other_gates_unchanged=true",
+            drawdown * 100.0, limit * 100.0, controlled_reason,
+        )
+        return True
+
     # Recovery is a narrow drawdown-threshold exception only. It cannot
     # supersede external-performance quarantine (checked above) or any of the
     # independent preflight/integrity/ownership/fencing/private-stream/
@@ -309,6 +327,20 @@ async def _entry_drawdown_allows_durable(engine, log) -> bool:
     drawdown = max(values)
 
     if drawdown < float(cfg.MAX_DRAWDOWN) or _risk_override_enabled():
+        return True
+
+    try:
+        from bot import controlled_live_reentry_v1 as controlled_reentry
+        controlled_ok, controlled_reason = controlled_reentry.drawdown_bridge_allowed(engine)
+    except Exception as exc:
+        controlled_ok, controlled_reason = False, f"controlled_reentry_{type(exc).__name__}"
+    if controlled_ok:
+        log.critical(
+            "[CONTROLLED_LIVE_REENTRY_V1] stage=DURABLE_PREDISPATCH_DRAWDOWN "
+            "result=PASS bridge=%s durable_dispatch_consumption=pending "
+            "scope=DRAWDOWN_THRESHOLD_ONLY",
+            controlled_reason,
+        )
         return True
 
     from bot.drawdown_recovery import (
