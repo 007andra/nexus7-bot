@@ -379,6 +379,14 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
              patch.object(pilot_module, "MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1), \
              patch.object(final_loss_budget, "diagnose", side_effect=capture_loss), \
              patch(
+                 "bot.pilot_risk_cap_hardening.live_microstructure_recheck",
+                 AsyncMock(return_value=SimpleNamespace(
+                     allowed=True,
+                     metrics={"executable_price": float(self.signal.entry)},
+                     blockers=[],
+                 )),
+             ), \
+             patch(
                  "bot.controlled_live_reentry_v1.consume_dispatch_once",
                  stop_before_http,
              ):
