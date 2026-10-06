@@ -1128,11 +1128,42 @@ class TradingEngine:
                 )
 
             # Full Binance USDT-perpetual low-capital screen is research-only.
-            # It runs in the background and never mutates cfg.SYMBOLS,
-            # engine.instruments, viable_symbols, risk, sizing, or dispatch.
+            # Synchronous trace markers prove exactly how far the hook runs;
+            # they do not change LIVE universe, risk, sizing, or dispatch.
             try:
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1_HOOK] stage=HOOK_ENTER "
+                    "research_only=true observability_only=true "
+                    "decision_effect=NONE execution_effect=NONE"
+                )
                 from bot import low_capital_universe_v1 as _low_capital_universe
-                _low_capital_universe.schedule_if_enabled(self, log)
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1_HOOK] stage=IMPORT_OK "
+                    "research_only=true observability_only=true "
+                    "decision_effect=NONE execution_effect=NONE"
+                )
+                _low_capital_enabled = _low_capital_universe.enabled()
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1_HOOK] stage=ENABLED enabled=%s "
+                    "research_only=true observability_only=true "
+                    "decision_effect=NONE execution_effect=NONE",
+                    str(_low_capital_enabled).lower(),
+                )
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1_HOOK] stage=SCHEDULE_CALL "
+                    "research_only=true observability_only=true "
+                    "decision_effect=NONE execution_effect=NONE"
+                )
+                _low_capital_scheduled = _low_capital_universe.schedule_if_enabled(
+                    self, log
+                )
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1_HOOK] "
+                    "stage=SCHEDULE_RETURN scheduled=%s "
+                    "research_only=true observability_only=true "
+                    "decision_effect=NONE execution_effect=NONE",
+                    str(_low_capital_scheduled).lower(),
+                )
             except Exception as _low_capital_exc:
                 log.warning(
                     "[LOW_CAPITAL_UNIVERSE_V1] status=DEFER reason=%s "
