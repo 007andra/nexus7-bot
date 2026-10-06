@@ -509,9 +509,14 @@ async def evaluate(engine, account_state: dict, *, log=None) -> str:
         log.critical(
             "[EXTERNAL_PERFORMANCE_QUARANTINE] status=%s symbols=%s "
             "reason=external_episode_requires_reconciliation "
-            "execution_effect=BLOCK_NEW_ENTRIES",
+            "state_reason=%s started_at_ms=%s pre_event_equity=%s "
+            "pre_event_peak=%s execution_effect=BLOCK_NEW_ENTRIES",
             state.get("status"),
             ",".join(state.get("symbols") or []),
+            state.get("reason", "NA"),
+            state.get("started_at_ms", "NA"),
+            state.get("pre_event_equity", "NA"),
+            state.get("pre_event_peak", "NA"),
         )
         return "QUARANTINE"
 
