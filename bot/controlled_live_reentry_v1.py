@@ -130,7 +130,10 @@ def _capital(engine) -> tuple[float, float, bool]:
             ):
                 return equity, available, True
         except (AttributeError, TypeError, ValueError):
-            pass
+            # A present professional snapshot is the authoritative LIVE capital
+            # source. If it is malformed/unreadable, fail closed instead of
+            # falling back to less authoritative cached/legacy balances.
+            return 0.0, 0.0, False
 
     try:
         equity = float(
