@@ -387,8 +387,19 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
                  "bot.controlled_live_reentry_v1.consume_dispatch_once",
                  stop_before_http,
              ):
+            # First prove the real post-decision preparation itself. If it
+            # raises, surface the exact type/message instead of letting _open's
+            # fail-closed AI gate collapse it to a generic rejection.
+            try:
+                await self.engine._prepare_professional_risk(self.signal, decision)
+            except Exception as exc:
+                self.fail(
+                    "post-NEXUS risk preparation failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
             await self.engine._open(self.signal)
 
+        self.assertTrue(hasattr(self, "sized_qty"), self.events)
         self.assertGreater(self.sized_qty, 0.0, self.events)
         self.assertEqual(
             self.evaluations,
