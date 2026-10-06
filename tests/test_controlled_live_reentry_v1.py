@@ -78,6 +78,24 @@ class ControlledLiveReentryPolicyTests(unittest.TestCase):
         self.assertFalse(policy.configured)
         self.assertEqual(policy.reason, "invalid_max_risk_pct")
 
+    def test_malformed_professional_snapshot_fails_closed_without_legacy_fallback(self):
+        engine = _engine()
+        engine.risk.professional_snapshot = SimpleNamespace(
+            confirmed=True,
+            capital=SimpleNamespace(equity="not-a-number"),
+        )
+        engine._pilot_account_equity = 5.39561426
+        engine._pilot_available_balance = 5.39561426
+        engine.risk.balance = 5.39561426
+        engine.risk.available_balance = 5.39561426
+        engine.risk.balance_confirmed = True
+
+        equity, available, confirmed = controlled._capital(engine)
+
+        self.assertEqual(equity, 0.0)
+        self.assertEqual(available, 0.0)
+        self.assertFalse(confirmed)
+
     def test_effective_risk_is_absolute_budget_over_confirmed_equity(self):
         engine = _engine()
         patches = self._authority_patches()
