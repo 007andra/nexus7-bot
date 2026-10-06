@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -76,10 +77,15 @@ class FakeBinance:
             source = self.orders
         else:
             raise AssertionError(endpoint)
+        symbol = str((params or {}).get("symbol") or "").upper()
         return [
             dict(row)
             for row in source
             if start <= int(row["time"]) <= end
+            and (
+                not symbol
+                or str(row.get("symbol") or "").upper() == symbol
+            )
         ]
 
 
@@ -193,6 +199,124 @@ def incident_trade_evidence(*, bgx_identity: bool = False):
         "updateTime": close_ts,
     })
     return trades, orders
+
+
+def pinned_flat_evidence():
+    start = epp._FLAT_INCIDENT_STARTED_MS
+    trades = []
+    orders = []
+    rows = []
+    specs = [
+        ("OPUSDT", 3572.6, start - 300_000, start + 1_800_000, -1.25),
+        ("SEIUSDT", 100.0, start + 2_000_000, start + 4_000_000, -0.35),
+    ]
+    for index, (symbol, qty, opened, closed, realized) in enumerate(specs, start=1):
+        open_order = 30000 + index * 10
+        close_order = open_order + 1
+        trades.extend([
+            {
+                "symbol": symbol,
+                "id": 40000 + index * 10,
+                "orderId": open_order,
+                "side": "BUY",
+                "price": "1",
+                "qty": str(qty),
+                "quoteQty": str(qty),
+                "realizedPnl": "0",
+                "commission": "0.01000000",
+                "commissionAsset": "USDT",
+                "time": opened,
+                "buyer": True,
+                "maker": False,
+                "positionSide": "BOTH",
+            },
+            {
+                "symbol": symbol,
+                "id": 40000 + index * 10 + 1,
+                "orderId": close_order,
+                "side": "SELL",
+                "price": "1",
+                "qty": str(qty),
+                "quoteQty": str(qty),
+                "realizedPnl": str(realized),
+                "commission": "0.01000000",
+                "commissionAsset": "USDT",
+                "time": closed,
+                "buyer": False,
+                "maker": False,
+                "positionSide": "BOTH",
+            },
+        ])
+        orders.extend([
+            {
+                "symbol": symbol,
+                "orderId": open_order,
+                "clientOrderId": f"manual-{symbol}-open",
+                "status": "FILLED",
+                "side": "BUY",
+                "positionSide": "BOTH",
+                "type": "MARKET",
+                "origType": "MARKET",
+                "reduceOnly": False,
+                "closePosition": False,
+                "executedQty": str(qty),
+                "avgPrice": "1",
+                "time": opened,
+                "updateTime": opened,
+            },
+            {
+                "symbol": symbol,
+                "orderId": close_order,
+                "clientOrderId": f"manual-{symbol}-close",
+                "status": "FILLED",
+                "side": "SELL",
+                "positionSide": "BOTH",
+                "type": "MARKET",
+                "origType": "MARKET",
+                "reduceOnly": True,
+                "closePosition": False,
+                "executedQty": str(qty),
+                "avgPrice": "1",
+                "time": closed,
+                "updateTime": closed,
+            },
+        ])
+        rows.extend([
+            {
+                "symbol": symbol,
+                "incomeType": "COMMISSION",
+                "income": "-0.02000000",
+                "asset": "USDT",
+                "info": "",
+                "time": closed,
+                "tranId": 50000 + index * 10,
+                "tradeId": str(40000 + index * 10 + 1),
+            },
+            {
+                "symbol": symbol,
+                "incomeType": "REALIZED_PNL",
+                "income": str(realized),
+                "asset": "USDT",
+                "info": "",
+                "time": closed,
+                "tranId": 50000 + index * 10 + 1,
+                "tradeId": str(40000 + index * 10 + 1),
+            },
+        ])
+    return trades, orders, rows
+
+
+def pinned_quarantine_state():
+    return {
+        "version": 1,
+        "status": "UNRESOLVED",
+        "reason": "external_symbol_set_changed",
+        "symbols": ["OPUSDT", "SEIUSDT"],
+        "started_at_ms": epp._FLAT_INCIDENT_STARTED_MS,
+        "pre_event_equity": None,
+        "pre_event_peak": None,
+        "execution_effect": "BLOCK_NEW_ENTRIES",
+    }
 
 
 class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
@@ -537,6 +661,130 @@ class ExternalPerformanceHwmTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(await self.peak(), 6.4680, places=6)
         self.assertTrue(engine._external_performance_quarantine)
         self.assertFalse(plr._entry_drawdown_allows(engine, LOG))
+
+    async def test_pinned_op_sei_flat_resolution_preserves_hwm_and_writes_receipt(self):
+        await self.set_peak(22.7987)
+        client = FakeBinance(wallet=5.3956)
+        client.now_ms = epp._FLAT_INCIDENT_STARTED_MS + 16 * 3600 * 1000
+        client.trades, client.orders, client.rows = pinned_flat_evidence()
+        engine = self.engine(client, prior_equity=5.3956)
+        await db.save_key_value(
+            epp.state_key(),
+            json.dumps(pinned_quarantine_state(), sort_keys=True, separators=(",", ":")),
+            strict=True,
+        )
+
+        with patch.dict(
+            os.environ,
+            {epp._FLAT_RECONCILE_ENV: epp._FLAT_RECONCILE_TOKEN},
+            clear=False,
+        ):
+            result = await epp.evaluate(
+                engine, await client.get_account_state(), log=LOG
+            )
+
+        self.assertEqual(result, "NORMAL")
+        self.assertFalse(engine._external_performance_quarantine)
+        self.assertAlmostEqual(await self.peak(), 22.7987, places=6)
+        state = await self.quarantine()
+        self.assertEqual(state["status"], "RESOLVED")
+        self.assertFalse(state["hwm_rebased"])
+        receipt = json.loads(
+            await db.load_key_value(epp.flat_resolution_key(), strict=True)
+        )
+        self.assertEqual(receipt["ownership"], "MANUAL_EXTERNAL_ONLY")
+        self.assertTrue(receipt["account_flat"])
+        self.assertFalse(receipt["hwm_rebased"])
+        self.assertEqual(receipt["symbols"], ["OPUSDT", "SEIUSDT"])
+
+    async def test_pinned_flat_resolution_requires_explicit_operator_approval(self):
+        await self.set_peak(22.7987)
+        client = FakeBinance(wallet=5.3956)
+        client.now_ms = epp._FLAT_INCIDENT_STARTED_MS + 16 * 3600 * 1000
+        client.trades, client.orders, client.rows = pinned_flat_evidence()
+        engine = self.engine(client, prior_equity=5.3956)
+        await db.save_key_value(
+            epp.state_key(),
+            json.dumps(pinned_quarantine_state(), sort_keys=True, separators=(",", ":")),
+            strict=True,
+        )
+
+        with patch.dict(os.environ, {epp._FLAT_RECONCILE_ENV: ""}, clear=False):
+            result = await epp.evaluate(
+                engine, await client.get_account_state(), log=LOG
+            )
+
+        self.assertEqual(result, "QUARANTINE")
+        self.assertTrue(engine._external_performance_quarantine)
+        self.assertAlmostEqual(await self.peak(), 22.7987, places=6)
+        self.assertIsNone(
+            await db.load_key_value(epp.flat_resolution_key(), strict=True)
+        )
+
+    async def test_pinned_flat_resolution_refuses_bgx_or_unknown_trade_identity(self):
+        await self.set_peak(22.7987)
+        client = FakeBinance(wallet=5.3956)
+        client.now_ms = epp._FLAT_INCIDENT_STARTED_MS + 16 * 3600 * 1000
+        client.trades, client.orders, client.rows = pinned_flat_evidence()
+        client.orders[0]["clientOrderId"] = "bgx7-conflict"
+        engine = self.engine(client, prior_equity=5.3956)
+        await db.save_key_value(
+            epp.state_key(),
+            json.dumps(pinned_quarantine_state(), sort_keys=True, separators=(",", ":")),
+            strict=True,
+        )
+
+        with patch.dict(
+            os.environ,
+            {epp._FLAT_RECONCILE_ENV: epp._FLAT_RECONCILE_TOKEN},
+            clear=False,
+        ):
+            with self.assertRaises(db.PersistenceError):
+                await epp.evaluate(
+                    engine, await client.get_account_state(), log=LOG
+                )
+
+        self.assertAlmostEqual(await self.peak(), 22.7987, places=6)
+        state = await self.quarantine()
+        self.assertNotEqual(state["status"], "RESOLVED")
+
+    async def test_resolved_state_does_not_mask_future_external_position(self):
+        await self.set_peak(22.7987)
+        client = FakeBinance(wallet=5.3956)
+        client.now_ms = epp._FLAT_INCIDENT_STARTED_MS + 16 * 3600 * 1000
+        client.trades, client.orders, client.rows = pinned_flat_evidence()
+        engine = self.engine(client, prior_equity=5.3956)
+        await db.save_key_value(
+            epp.state_key(),
+            json.dumps(pinned_quarantine_state(), sort_keys=True, separators=(",", ":")),
+            strict=True,
+        )
+        with patch.dict(
+            os.environ,
+            {epp._FLAT_RECONCILE_ENV: epp._FLAT_RECONCILE_TOKEN},
+            clear=False,
+        ):
+            self.assertEqual(
+                await epp.evaluate(
+                    engine, await client.get_account_state(), log=LOG
+                ),
+                "NORMAL",
+            )
+
+        client.now_ms += 60_000
+        client.positions = [{
+            "symbol": "OPUSDT",
+            "size": 1.0,
+            "sizeUnit": "BASE_ASSET",
+            "side": "Buy",
+        }]
+        result = await epp.evaluate(
+            engine, await client.get_account_state(), log=LOG
+        )
+        self.assertEqual(result, "FREEZE")
+        state = await self.quarantine()
+        self.assertIn(state["status"], {"ACTIVE", "UNRESOLVED"})
+        self.assertNotEqual(state["status"], "RESOLVED")
 
     async def test_known_atom_incident_rebases_to_pre_episode_drawdown(self):
         await self.set_peak(epp._INCIDENT_BAD_HWM)
