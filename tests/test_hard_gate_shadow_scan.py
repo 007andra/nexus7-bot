@@ -276,6 +276,36 @@ class Proof(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(float(row["min_valid_qty"]), 0)
         self.assert_isolated()
 
+    async def test_controlled_unarmed_envelope_drives_shadow_min_order_only(self):
+        from bot import execution_cost
+        snap = NS(
+            taker_fee=0.0006,
+            slippage_allowance=0.001,
+            entry_slippage=0.001,
+            exit_slippage=0.001,
+            one_way_slippage=0.001,
+            fee_source="test",
+            slippage_source="test",
+            spread_bps=1.0,
+        )
+        with patch(
+            "bot.controlled_live_reentry_v1.candidate_risk_pct",
+            return_value=0.10 / 8.7583,
+        ):
+            row = shadow.counterfactual_min_order(self.e, signal(), snap)
+
+        self.assertEqual(
+            row["counterfactual_risk_budget_source"],
+            "CONTROLLED_LIVE_REENTRY_ENVELOPE",
+        )
+        self.assertAlmostEqual(row["counterfactual_risk_pct"], 0.10 / 8.7583)
+        self.assertAlmostEqual(float(row["risk_budget"]), 0.10)
+        self.assertEqual(
+            row["live_risk_authority"], "BLOCKED_BY_DRAWDOWN_HARD_GATE"
+        )
+        self.assertTrue(row["shadow_min_order_feasible"])
+        self.assert_isolated()
+
     async def test_missing_capital_is_unknown(self):
         self.e.risk.professional_snapshot.confirmed = False
         out = await self.run_scan()

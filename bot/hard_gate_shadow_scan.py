@@ -332,11 +332,15 @@ def counterfactual_min_order(engine, sig, snap):
     from bot.config import cfg
     from bot.sizing_decomposition import decompose
 
-    # Normal configured hypothetical budget, explicitly NOT recovery-adjusted
-    # LIVE sizing. Missing confirmed cached capital is UNKNOWN, never a PASS.
+    # Start from the canonical configured hypothetical budget. When the
+    # controlled one-shot pilot envelope exists, reuse that bounded budget for
+    # research-only executability proof even while the final LIVE ARM is absent.
+    # This function remains shadow-only and can never bridge drawdown or dispatch.
     risk_pct = float(cfg.POST_TARGET_RISK if getattr(engine, "daily_target_hit", False)
                      else cfg.MAX_RISK_PCT)
+    risk_budget_source = "CONFIGURED_DEFAULT"
     result = {"counterfactual": True, "counterfactual_risk_pct": risk_pct,
+              "counterfactual_risk_budget_source": risk_budget_source,
               "live_risk_authority": "BLOCKED_BY_DRAWDOWN_HARD_GATE",
               "shadow_min_order_feasible": None, "binding": "CAPITAL_UNCONFIRMED",
               "risk_budget": None, "min_valid_qty": None, "risk_at_min_qty": None,
@@ -347,7 +351,15 @@ def counterfactual_min_order(engine, sig, snap):
     if capital is None:
         return result
     equity, available, source, age_ms = capital
+    try:
+        from bot import controlled_live_reentry_v1 as controlled_reentry
+        risk_pct = float(controlled_reentry.candidate_risk_pct(engine, equity))
+        risk_budget_source = "CONTROLLED_LIVE_REENTRY_ENVELOPE"
+    except Exception:
+        pass
     result.update(
+        counterfactual_risk_pct=risk_pct,
+        counterfactual_risk_budget_source=risk_budget_source,
         capital_source=source,
         capital_age_ms=age_ms,
         margin_cap=available * float(cfg.MAX_MARGIN_PCT),
