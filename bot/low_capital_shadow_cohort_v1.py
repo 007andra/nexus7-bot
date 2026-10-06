@@ -59,6 +59,7 @@ _OUTCOMES = """CREATE TABLE IF NOT EXISTS low_capital_shadow_outcomes_v1 (
 )"""
 
 _CURSOR = 0
+_OUTCOME_TELEMETRY_EMITTED: set[tuple[str, int]] = set()
 
 
 def enabled() -> bool:
@@ -485,6 +486,126 @@ async def _outcome_bars(getter, symbol: str, start: float, end: float):
     return _parse_klines(raw)
 
 
+def _outcome_touch_flags(
+    row: dict[str, object], bars: list[dict[str, float]]
+) -> tuple[bool | None, bool | None]:
+    """Return hypothetical TP/SL touches for observability only.
+
+    This deliberately reports independent touches rather than inferring fill
+    order when both levels occur inside the same 15m candle.
+    """
+    try:
+        side = str(row["side"])
+        target = float(row["target"])
+        stop = float(row["stop"])
+        if side == "LONG":
+            tp_touched = any(float(bar["h"]) >= target for bar in bars)
+            sl_touched = any(float(bar["l"]) <= stop for bar in bars)
+        elif side == "SHORT":
+            tp_touched = any(float(bar["l"]) <= target for bar in bars)
+            sl_touched = any(float(bar["h"]) >= stop for bar in bars)
+        else:
+            return None, None
+        return tp_touched, sl_touched
+    except (KeyError, TypeError, ValueError):
+        return None, None
+
+
+def _enrich_outcome(
+    row: dict[str, object],
+    outcome: dict[str, object],
+    bars: list[dict[str, float]],
+    horizon: int,
+) -> dict[str, object]:
+    future_gross = float(outcome["future_return"])
+    tp_touched, sl_touched = _outcome_touch_flags(row, bars)
+    outcome.update({
+        **AUTHORITY,
+        "candidate_id": row["candidate_id"],
+        "population": POPULATION,
+        "symbol": row.get("symbol"),
+        "side": row.get("side"),
+        "setup": row.get("setup"),
+        "regime": row.get("regime"),
+        "strategy_score": row.get("strategy_score"),
+        "shadow_approved": row.get("shadow_approved"),
+        "frontier_rank": row.get("frontier_rank"),
+        "market_quality_score": row.get("market_quality_score"),
+        "entry": row.get("entry"),
+        "stop": row.get("stop"),
+        "target": row.get("target"),
+        "stop_width_pct": row.get("stop_width_pct"),
+        "horizon": horizon,
+        "future_return_net": (
+            future_gross - float(row.get("round_trip_cost_pct", 0) or 0)
+        ),
+        "tp_touched": tp_touched,
+        "sl_touched": sl_touched,
+        "touch_order": (
+            "AMBIGUOUS_SAME_OR_DIFFERENT_BARS"
+            if tp_touched is True and sl_touched is True
+            else "TP_ONLY" if tp_touched is True
+            else "SL_ONLY" if sl_touched is True
+            else "NEITHER" if tp_touched is False and sl_touched is False
+            else "UNKNOWN"
+        ),
+        "return_basis": "hypothetical_entry_net_of_captured_cost_snapshot",
+    })
+    return outcome
+
+
+def _fmt_outcome_value(value: object) -> str:
+    if value is None:
+        return "NA"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, float):
+        return f"{value:.8f}"
+    return str(value)
+
+
+def _emit_outcome_telemetry(
+    row: dict[str, object], outcome: dict[str, object]
+) -> bool:
+    candidate_id = str(outcome.get("candidate_id") or row.get("candidate_id") or "")
+    try:
+        horizon = int(outcome["horizon"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not candidate_id:
+        return False
+    key = (candidate_id, horizon)
+    if key in _OUTCOME_TELEMETRY_EMITTED:
+        return False
+    _OUTCOME_TELEMETRY_EMITTED.add(key)
+    log.info(
+        "[LOW_CAPITAL_SHADOW_OUTCOME_V1] candidate_id=%s symbol=%s side=%s "
+        "setup=%s shadow_approved=%s horizon=%s gross_return=%s net_return=%s "
+        "MFE=%s MAE=%s tp_touched=%s sl_touched=%s touch_order=%s regime=%s "
+        "market_quality_score=%s frontier_rank=%s research_only=true "
+        "prospective_only=true shadow_only=true live_eligible=false "
+        "promotion_allowed=false live_allowed=false decision_effect=NONE "
+        "execution_effect=NONE",
+        candidate_id,
+        _fmt_outcome_value(row.get("symbol")),
+        _fmt_outcome_value(row.get("side")),
+        _fmt_outcome_value(row.get("setup")),
+        _fmt_outcome_value(row.get("shadow_approved")),
+        horizon,
+        _fmt_outcome_value(outcome.get("future_return")),
+        _fmt_outcome_value(outcome.get("future_return_net")),
+        _fmt_outcome_value(outcome.get("MFE")),
+        _fmt_outcome_value(outcome.get("MAE")),
+        _fmt_outcome_value(outcome.get("tp_touched")),
+        _fmt_outcome_value(outcome.get("sl_touched")),
+        _fmt_outcome_value(outcome.get("touch_order")),
+        _fmt_outcome_value(row.get("regime")),
+        _fmt_outcome_value(row.get("market_quality_score")),
+        _fmt_outcome_value(row.get("frontier_rank")),
+    )
+    return True
+
+
 async def mature_outcomes(engine, db, *, batch_limit: int = 12) -> dict[str, int]:
     from bot import hard_gate_shadow_scan as legacy
 
@@ -518,15 +639,7 @@ async def mature_outcomes(engine, db, *, batch_limit: int = 12) -> dict[str, int
                 continue
             if outcome is None or outcome.get("outcome") != "OBSERVED":
                 continue
-            future_gross = float(outcome["future_return"])
-            outcome.update({
-                **AUTHORITY,
-                "candidate_id": row["candidate_id"],
-                "population": POPULATION,
-                "horizon": horizon,
-                "future_return_net": future_gross - float(row.get("round_trip_cost_pct", 0) or 0),
-                "return_basis": "hypothetical_entry_net_of_captured_cost_snapshot",
-            })
+            outcome = _enrich_outcome(row, outcome, bars, horizon)
             await db._exec(
                 "INSERT INTO low_capital_shadow_outcomes_v1 "
                 "(candidate_id,horizon,population,payload) VALUES (?,?,?,?) "
@@ -539,6 +652,7 @@ async def mature_outcomes(engine, db, *, batch_limit: int = 12) -> dict[str, int
                 ),
             )
             stats["written"] += 1
+            _emit_outcome_telemetry(row, outcome)
     return stats
 
 
@@ -555,6 +669,11 @@ async def snapshot(db) -> dict[str, object]:
             candidates.append(json.loads(raw))
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
+    candidates_by_id = {
+        str(row["candidate_id"]): row
+        for row in candidates
+        if row.get("candidate_id")
+    }
     outcomes = await db._fetchall(
         "SELECT horizon,payload FROM low_capital_shadow_outcomes_v1 WHERE population=?",
         (POPULATION,),
@@ -569,6 +688,9 @@ async def snapshot(db) -> dict[str, object]:
             continue
         if horizon in observed and obj.get("outcome") == "OBSERVED":
             observed[horizon].append(obj)
+            candidate = candidates_by_id.get(str(obj.get("candidate_id") or ""))
+            if candidate is not None:
+                _emit_outcome_telemetry(candidate, obj)
 
     approved = [row for row in candidates if row.get("shadow_approved") is True]
     rejected = [row for row in candidates if row.get("shadow_approved") is False]
