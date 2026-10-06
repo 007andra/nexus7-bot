@@ -149,6 +149,17 @@ def _drawdown_hard_gate_blocks(engine) -> tuple[bool, str]:
     if not bool(getattr(engine, "_drawdown_hard_gate_active", False)):
         return False, "hard_gate_inactive"
 
+    # One-shot controlled re-entry may bridge ONLY this legacy drawdown
+    # threshold. It preserves the historical HWM/MAX_DRAWDOWN and leaves every
+    # independent execution/risk gate authoritative.
+    try:
+        from bot import controlled_live_reentry_v1 as controlled_reentry
+        controlled_ok, controlled_reason = controlled_reentry.drawdown_bridge_allowed(engine)
+    except Exception as exc:
+        controlled_ok, controlled_reason = False, f"controlled_reentry_{type(exc).__name__}"
+    if controlled_ok:
+        return False, f"controlled_reentry:{controlled_reason}"
+
     episode = getattr(engine, "_drawdown_recovery_predispatch_episode", None)
     if not episode:
         return True, "missing_durable_recovery_token"

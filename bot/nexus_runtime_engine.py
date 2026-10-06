@@ -180,18 +180,18 @@ class TradingEngine(CoreTradingEngine):
         if getattr(decision, "execution_allowed", None) is not True:
             return
 
-        risk_pct = float(self._effective_risk_pct())
         from bot.execution_cost import reusable_snapshot
 
-        self.risk.set_plan(
-            symbol=sig.symbol,
-            entry=float(sig.entry),
-            stop=float(sig.sl),
-            risk_pct=risk_pct,
-            cost_snapshot=reusable_snapshot(sig),
-        )
+        base_risk_pct = float(self._effective_risk_pct())
 
         if getattr(self, "paper_trade", False):
+            self.risk.set_plan(
+                symbol=sig.symbol,
+                entry=float(sig.entry),
+                stop=float(sig.sl),
+                risk_pct=base_risk_pct,
+                cost_snapshot=reusable_snapshot(sig),
+            )
             balance = float(getattr(self.risk, "balance", 0.0) or 0.0)
             if balance <= 0:
                 self.risk.invalidate_capital()
@@ -203,6 +203,9 @@ class TradingEngine(CoreTradingEngine):
             return
 
         try:
+            # LIVE risk percentage is bound to this fresh authenticated equity
+            # read. The controlled one-shot path therefore cannot size from a
+            # stale pre-NEXUS account snapshot.
             snapshot = await read_account_capital(self.client)
             equity = float(snapshot.capital.equity)
             if equity <= 0.0:
@@ -210,6 +213,35 @@ class TradingEngine(CoreTradingEngine):
                 self.risk.invalidate_capital()
                 raise RuntimeError("LIVE capital unavailable for RiskManagerV3")
 
+            risk_pct = base_risk_pct
+            try:
+                from bot import controlled_live_reentry_v1 as controlled_reentry
+                risk_pct = float(
+                    controlled_reentry.candidate_risk_pct(self, equity)
+                )
+                policy = controlled_reentry.policy_from_env()
+                log.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=NEXUS_RISK_PLAN symbol=%s "
+                    "result=PASS equity=%.8f effective_risk_pct=%.8f "
+                    "absolute_loss_budget_usdt=%.8f episode=%s",
+                    sig.symbol,
+                    equity,
+                    risk_pct,
+                    float(policy.loss_budget_usdt),
+                    policy.episode_id,
+                )
+            except Exception:
+                # Not configured/armed means the canonical risk percentage is
+                # unchanged. This is not an execution bypass.
+                risk_pct = base_risk_pct
+
+            self.risk.set_plan(
+                symbol=sig.symbol,
+                entry=float(sig.entry),
+                stop=float(sig.sl),
+                risk_pct=risk_pct,
+                cost_snapshot=reusable_snapshot(sig),
+            )
             self.risk.update_capital(snapshot.capital)
 
             # Candidate-level capital refresh must obey the same ordering as the
@@ -225,8 +257,24 @@ class TradingEngine(CoreTradingEngine):
                 self.risk, equity, strict=True
             )
             if not self.risk._v3.can_open(len(self.positions)):
-                self.risk.invalidate_capital()
-                raise RuntimeError("durable drawdown/capital gate blocked V3 sizing")
+                # RiskManagerV3's generic can_open() includes MAX_DRAWDOWN.
+                # The controlled one-shot pilot may bridge only that condition;
+                # capital confirmation, positive collateral and position cap
+                # are re-proven by controlled_reentry.readiness().
+                try:
+                    from bot import controlled_live_reentry_v1 as controlled_reentry
+                    bridge_ok, bridge_reason = controlled_reentry.drawdown_bridge_allowed(self)
+                except Exception as exc:
+                    bridge_ok, bridge_reason = False, f"controlled_reentry_{type(exc).__name__}"
+                if not bridge_ok:
+                    self.risk.invalidate_capital()
+                    raise RuntimeError("durable drawdown/capital gate blocked V3 sizing")
+                log.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=RISKMANAGER_V3_CAN_OPEN "
+                    "symbol=%s result=PASS bridge=%s scope=DRAWDOWN_ONLY",
+                    sig.symbol,
+                    bridge_reason,
+                )
         except Exception:
             self.risk.invalidate_capital()
             raise

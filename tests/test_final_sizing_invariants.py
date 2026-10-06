@@ -118,6 +118,72 @@ class FinalSizingInvariantTests(unittest.TestCase):
             qty, _ = self._call(module, engine)
         self.assertAlmostEqual(qty, 0.03)
 
+
+    def test_controlled_one_shot_uses_absolute_budget_not_legacy_margin_ceiling(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 0.05, available=5.39561426)
+        evidence = {
+            "effective_risk_pct": 0.10 / 5.39561426,
+            "loss_budget_usdt": 0.10,
+        }
+        absolute = {
+            "projected_loss_usdt": 0.08,
+            "loss_budget_usdt": 0.10,
+            "headroom_usdt": 0.02,
+        }
+        with patch(
+            "bot.controlled_live_reentry_v1.readiness",
+            return_value=(True, "ready", evidence),
+        ), patch(
+            "bot.controlled_live_reentry_v1.projected_loss_allowed",
+            return_value=(True, "within_absolute_loss_budget", absolute),
+        ), patch(
+            "bot.final_loss_budget.diagnose",
+            return_value=("WARN", "projected_loss_exceeds_50pct_entry_margin", {"projected_loss": 0.08}),
+        ), patch(
+            "bot.final_loss_budget.emit_telemetry",
+            return_value=None,
+        ), patch(
+            "bot.execution_cost.stress_cost_fraction",
+            return_value=(0.002, "test"),
+        ):
+            qty, stored = self._call(module, engine)
+
+        self.assertAlmostEqual(qty, 0.05)
+        self.assertAlmostEqual(stored, 0.05)
+
+    def test_controlled_one_shot_absolute_budget_still_blocks_excess_loss(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 0.05, available=5.39561426)
+        evidence = {
+            "effective_risk_pct": 0.10 / 5.39561426,
+            "loss_budget_usdt": 0.10,
+        }
+        absolute = {
+            "projected_loss_usdt": 0.11,
+            "loss_budget_usdt": 0.10,
+            "headroom_usdt": -0.01,
+        }
+        with patch(
+            "bot.controlled_live_reentry_v1.readiness",
+            return_value=(True, "ready", evidence),
+        ), patch(
+            "bot.controlled_live_reentry_v1.projected_loss_allowed",
+            return_value=(False, "absolute_loss_budget_exceeded", absolute),
+        ), patch(
+            "bot.final_loss_budget.diagnose",
+            return_value=("WARN", "projected_loss_exceeds_50pct_entry_margin", {"projected_loss": 0.11}),
+        ), patch(
+            "bot.final_loss_budget.emit_telemetry",
+            return_value=None,
+        ), patch(
+            "bot.execution_cost.stress_cost_fraction",
+            return_value=(0.002, "test"),
+        ):
+            qty, stored = self._call(module, engine)
+
+        self.assertEqual(qty, 0.0)
+        self.assertEqual(stored, 0.0)
+
+
     def test_invalid_allocation_fails_closed(self):
         module, engine = self._install(risk_size=lambda *a, **k: 10.0, available=6.0)
         for value in ("0", "1.01", "nan", "bad"):

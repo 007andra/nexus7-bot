@@ -352,6 +352,52 @@ def install(KuCoinClient, log_obj=log) -> None:
             await _fail_order_predispatch(self, order, "PRE_DISPATCH_PILOT_BUDGET_DENIED")
             log_obj.critical("[PILOT_DURABLE_COUNTER] symbol=%s result=BLOCK reserved=%s/%s exchange_dispatch=NONE", symbol, count, MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION)
             raise RuntimeError("durable PILOT submission budget exhausted")
+
+        # Final manual one-shot boundary. When configured, the exact episode is
+        # durably consumed before HTTP POST and is intentionally never rolled
+        # back: an ambiguous transport attempt cannot silently become attempt 2.
+        from bot import controlled_live_reentry_v1 as controlled_reentry
+        controlled_policy = controlled_reentry.policy_from_env()
+        if controlled_policy.enabled:
+            try:
+                controlled_allowed, controlled_reason = (
+                    await controlled_reentry.consume_dispatch_once(
+                        engine, symbol=symbol, client_oid=oid
+                    )
+                )
+            except Exception as exc:
+                if session_committed and pilot is not None:
+                    pilot.rollback_submission(oid)
+                await _fail_order_predispatch(
+                    self, order, "PRE_DISPATCH_CONTROLLED_REENTRY_ERROR"
+                )
+                log_obj.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=HTTP_POST_BOUNDARY "
+                    "symbol=%s result=BLOCK reason=%s exchange_dispatch=NONE",
+                    symbol, type(exc).__name__,
+                )
+                raise
+            if not controlled_allowed:
+                if session_committed and pilot is not None:
+                    pilot.rollback_submission(oid)
+                await _fail_order_predispatch(
+                    self, order, "PRE_DISPATCH_CONTROLLED_REENTRY_DENIED"
+                )
+                log_obj.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=HTTP_POST_BOUNDARY "
+                    "symbol=%s result=BLOCK reason=%s exchange_dispatch=NONE",
+                    symbol, controlled_reason,
+                )
+                raise RuntimeError(
+                    f"controlled LIVE re-entry denied: {controlled_reason}"
+                )
+            log_obj.critical(
+                "[CONTROLLED_LIVE_REENTRY_V1] stage=HTTP_POST_BOUNDARY "
+                "symbol=%s result=PASS reason=%s episode=%s one_shot_consumed=true "
+                "next_action=EXCHANGE_HTTP_POST",
+                symbol, controlled_reason, controlled_policy.episode_id,
+            )
+
         # No intentional authorization gate is permitted below this line.
         await _mark_dispatch_attempted(self, body)
         async with post_context as response:
