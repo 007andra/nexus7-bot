@@ -18,6 +18,7 @@ def install() -> None:
         return
 
     from bot import pilot_release_control as _pilot_release_control
+    from bot import controlled_live_reentry_v1 as _controlled_live_reentry
     from bot import exchange as _exchange
     from bot import shadow_startup_logging as _shadow_startup_logging
     _shadow_startup_logging.install_preimport()
@@ -150,6 +151,7 @@ def install() -> None:
     # line, so they can never contradict each other (audit P0-5).
     from bot import runtime_release_contract as _release_contract
     _contract = _release_contract.current()
+    _log.critical(_controlled_live_reentry.startup_log())
     if _contract.release_authorized:
         _pilot_live_runtime.install(TradingEngine, _log)
         _pilot_risk_cap_hardening.install(TradingEngine, _log)
