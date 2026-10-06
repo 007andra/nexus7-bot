@@ -15,7 +15,8 @@ from pathlib import Path
 
 from bot.backtest import _closed_window_by_ts, _timestamp_index
 from bot.config import cfg
-from bot.nexus_oos_real_replay import PublicKuCoinFuturesClient
+from bot.nexus_oos_real_replay import PublicKuCoinFuturesClient, _funding_at
+from bot.kucoin_execution_model import fetch_public_funding_history
 from bot.nexus_oos_real_replay_corrected import (
     _freeze_full_clock,
     fetch_history_contiguous,
@@ -150,6 +151,15 @@ async def replay_symbol(client, symbol, *, limit_15m):
     if len(k15)<200 or len(k1h)<60 or len(k4h)<30:
         return {"symbol":symbol,"error":"insufficient_history","rows":[]}
 
+    start_ms=int(_timestamp_index(k15)[0])
+    end_ms=min(
+        HISTORICAL_CUTOFF_MS,
+        int(_timestamp_index(k15)[-1]) + 15 * 60 * 1000,
+    )
+    funding_events=await fetch_public_funding_history(
+        client, symbol, start_ms, end_ms
+    )
+
     ts15=_timestamp_index(k15)
     ts1h=_timestamp_index(k1h)
     ts4h=_timestamp_index(k4h)
@@ -158,7 +168,10 @@ async def replay_symbol(client, symbol, *, limit_15m):
 
     for i in range(80,len(k15)-16):
         decision_ts=ts15[i]
-        if decision_ts >= HISTORICAL_CUTOFF_MS:
+        # Require the entire 240m observation path to be pre-cutoff. This
+        # prevents any outcome candle from the R3 day leaking into the
+        # historical-context report.
+        if decision_ts + 240 * 60 * 1000 > HISTORICAL_CUTOFF_MS:
             continue
 
         w15=_closed_window_by_ts(k15,ts15,decision_ts,15,80)
@@ -192,6 +205,7 @@ async def replay_symbol(client, symbol, *, limit_15m):
             continue
 
         ticker={"lastPrice":str(float(k15[i]["o"]))}
+        funding=_funding_at(funding_events, decision_ts)
         with _freeze_full_clock(nexus_ai,decision_ts):
             nx=nexus_ai.decide(
                 symbol,w15,w1h,w4h,
@@ -199,7 +213,7 @@ async def replay_symbol(client, symbol, *, limit_15m):
                 sl=float(sig.sl),
                 tp=float(sig.tp),
                 ticker=ticker,
-                funding=None,
+                funding=funding,
                 oi=None,
                 orderbook=None,
                 min_score=float(getattr(cfg,"NEXUS_MIN_SCORE",55)),
@@ -254,6 +268,8 @@ async def run(symbols, *, limit_15m):
             "same_strategy_analyzer":True,
             "same_nexus_decision":True,
             "historical_clock_frozen":True,
+            "funding_history_included_when_available":True,
+            "entire_240m_path_pre_cutoff":True,
             "outcomes_match_hard_gate_shadow_semantics":True,
             "cutoff":"2026-10-06T00:00:00Z",
             "exchange_mutations":False,
