@@ -949,6 +949,40 @@ class TradingEngine:
                     type(_low_capital_exc).__name__,
                 )
 
+            # Second-stage research-only quality frontier. This enriches only
+            # a bounded shortlist from LOW_CAPITAL_UNIVERSE_V1 with public
+            # BBO/depth/OI/funding/history evidence and never changes LIVE scope.
+            try:
+                from bot import (
+                    low_capital_quality_frontier_v1 as _low_capital_quality
+                )
+                _quality_enabled = _low_capital_quality.enabled()
+                log.warning(
+                    "[LOW_CAPITAL_QUALITY_FRONTIER_V1] status=WIRING_CALL "
+                    "enabled=%s lifecycle=ENGINE_READY "
+                    "research_only=true observability_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    str(_quality_enabled).lower(),
+                )
+                _quality_scheduled = _low_capital_quality.schedule_if_enabled(
+                    self, log
+                )
+                log.warning(
+                    "[LOW_CAPITAL_QUALITY_FRONTIER_V1] status=WIRING_RETURN "
+                    "scheduled=%s lifecycle=ENGINE_READY "
+                    "research_only=true observability_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    str(_quality_scheduled).lower(),
+                )
+            except Exception as _quality_exc:
+                log.warning(
+                    "[LOW_CAPITAL_QUALITY_FRONTIER_V1] status=DEFER reason=%s "
+                    "lifecycle=ENGINE_READY research_only=true "
+                    "observability_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    type(_quality_exc).__name__,
+                )
+
             try:
                 await asyncio.wait_for(self._load_existing_positions(), timeout=20)
             except asyncio.TimeoutError:
