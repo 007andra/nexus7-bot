@@ -181,6 +181,22 @@ class TradingEngine(CoreTradingEngine):
             return
 
         risk_pct = float(self._effective_risk_pct())
+        try:
+            from bot import controlled_live_reentry_v1 as controlled_reentry
+            controlled_ok, controlled_reason, controlled_evidence = controlled_reentry.readiness(self)
+        except Exception:
+            controlled_ok, controlled_reason, controlled_evidence = False, "unavailable", {}
+        if controlled_ok:
+            risk_pct = float(controlled_evidence["effective_risk_pct"])
+            log.critical(
+                "[CONTROLLED_LIVE_REENTRY_V1] stage=NEXUS_RISK_PLAN symbol=%s "
+                "result=PASS effective_risk_pct=%.8f absolute_loss_budget_usdt=%.8f "
+                "reason=%s",
+                sig.symbol,
+                risk_pct,
+                float(controlled_evidence["loss_budget_usdt"]),
+                controlled_reason,
+            )
         from bot.execution_cost import reusable_snapshot
 
         self.risk.set_plan(
@@ -225,8 +241,24 @@ class TradingEngine(CoreTradingEngine):
                 self.risk, equity, strict=True
             )
             if not self.risk._v3.can_open(len(self.positions)):
-                self.risk.invalidate_capital()
-                raise RuntimeError("durable drawdown/capital gate blocked V3 sizing")
+                # RiskManagerV3's generic can_open() includes MAX_DRAWDOWN.
+                # The controlled one-shot pilot may bridge only that condition;
+                # capital confirmation, positive collateral and position cap
+                # are re-proven by controlled_reentry.readiness().
+                try:
+                    from bot import controlled_live_reentry_v1 as controlled_reentry
+                    bridge_ok, bridge_reason = controlled_reentry.drawdown_bridge_allowed(self)
+                except Exception as exc:
+                    bridge_ok, bridge_reason = False, f"controlled_reentry_{type(exc).__name__}"
+                if not bridge_ok:
+                    self.risk.invalidate_capital()
+                    raise RuntimeError("durable drawdown/capital gate blocked V3 sizing")
+                log.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=RISKMANAGER_V3_CAN_OPEN "
+                    "symbol=%s result=PASS bridge=%s scope=DRAWDOWN_ONLY",
+                    sig.symbol,
+                    bridge_reason,
+                )
         except Exception:
             self.risk.invalidate_capital()
             raise
