@@ -230,5 +230,17 @@ def schedule_if_enabled(engine, log) -> bool:
     task = getattr(engine, "_low_capital_universe_v1_task", None)
     if task is not None and not task.done():
         return False
-    engine._low_capital_universe_v1_task = asyncio.create_task(_run(engine, log))
+
+    starter = getattr(engine, "_start_background", None)
+    if not callable(starter):
+        raise RuntimeError("engine background manager unavailable")
+
+    task = starter(_run(engine, log))
+    engine._low_capital_universe_v1_task = task
+    log.warning(
+        "[LOW_CAPITAL_UNIVERSE_V1] status=SCHEDULED "
+        "scheduler=ENGINE_BACKGROUND_MANAGER "
+        "research_only=true observability_only=true shadow_only=true "
+        "live_allowed=false decision_effect=NONE execution_effect=NONE"
+    )
     return True
