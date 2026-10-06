@@ -983,6 +983,39 @@ class TradingEngine:
                     type(_quality_exc).__name__,
                 )
 
+            # Prospective low-capital cohort is research-only. It waits for the
+            # quality-frontier snapshot, freezes its selection and evaluates
+            # public REST data only; it has no LIVE promotion or dispatch path.
+            try:
+                from bot import (
+                    low_capital_shadow_cohort_v1 as _low_capital_shadow_cohort
+                )
+                _cohort_enabled = _low_capital_shadow_cohort.enabled()
+                log.warning(
+                    "[LOW_CAPITAL_SHADOW_COHORT_V1] status=WIRING_CALL "
+                    "enabled=%s lifecycle=ENGINE_READY "
+                    "research_only=true prospective_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    str(_cohort_enabled).lower(),
+                )
+                _cohort_scheduled = _low_capital_shadow_cohort.schedule_if_enabled(
+                    self, log
+                )
+                log.warning(
+                    "[LOW_CAPITAL_SHADOW_COHORT_V1] status=WIRING_RETURN "
+                    "scheduled=%s lifecycle=ENGINE_READY "
+                    "research_only=true prospective_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    str(_cohort_scheduled).lower(),
+                )
+            except Exception as _cohort_exc:
+                log.warning(
+                    "[LOW_CAPITAL_SHADOW_COHORT_V1] status=DEFER reason=%s "
+                    "lifecycle=ENGINE_READY research_only=true prospective_only=true "
+                    "live_allowed=false decision_effect=NONE execution_effect=NONE",
+                    type(_cohort_exc).__name__,
+                )
+
             try:
                 await asyncio.wait_for(self._load_existing_positions(), timeout=20)
             except asyncio.TimeoutError:

@@ -179,6 +179,39 @@ class LowCapitalQualityFrontierV1Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(paths.count("/fapi/v1/klines"), 1)
         self.assertTrue(all(path.startswith("/fapi/v1/") for path in paths))
 
+    async def test_run_publishes_research_snapshot_for_shadow_cohort(self):
+        engine = Engine()
+        row = {
+            "symbol": "AAAUSDT",
+            "status": "CONDITIONAL",
+            "configured_live_universe": False,
+            "research_rank": 1,
+            "max_stop_pct": 0.20,
+            "min_order_notional": 5.0,
+            "quote_volume_usdt": 10_000_000.0,
+            "research_only": True,
+            "observability_only": True,
+            "shadow_only": True,
+            "live_eligible": False,
+            "live_candidate": False,
+            "automatic_promotion": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+            "live_authority_unchanged": True,
+        }
+        log = SimpleNamespace(warning=lambda *args, **kwargs: None)
+
+        with patch.object(subject, "collect", return_value=(row,)):
+            await subject._run(engine, log)
+
+        snapshot = engine._low_capital_quality_frontier_v1_snapshot
+        self.assertEqual(len(snapshot), 1)
+        self.assertEqual(snapshot[0]["symbol"], "AAAUSDT")
+        self.assertIsNot(snapshot[0], row)
+        self.assertFalse(snapshot[0]["live_allowed"])
+
     async def test_scheduler_is_single_flight_and_engine_owned(self):
         engine = Engine()
         gate = asyncio.Event()
