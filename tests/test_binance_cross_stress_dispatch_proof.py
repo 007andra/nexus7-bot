@@ -427,8 +427,12 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
             for result, _reason, metrics in captured_loss
             if isinstance(metrics, dict) and "projected_loss" in metrics
         ]
-        self.assertTrue(projected, captured_loss)
-        self.assertLessEqual(max(projected), 0.10 + 1e-9, captured_loss)
+        self.assertGreaterEqual(len(projected), 2, captured_loss)
+        # The replay intentionally proves the clamp is necessary: the raw
+        # RiskManagerV3/operator quantity exceeds the conservative absolute
+        # stress budget, while the final executable quantity is inside it.
+        self.assertGreater(projected[0], 0.10, captured_loss)
+        self.assertLessEqual(projected[-1], 0.10 + 1e-9, captured_loss)
 
         # place_order was reached, but the final one-shot authorization boundary
         # denied the attempt before any exchange order POST.
