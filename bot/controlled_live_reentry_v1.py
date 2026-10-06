@@ -46,13 +46,25 @@ class ReentryPolicy:
     reason: str
 
     @property
-    def configured(self) -> bool:
+    def envelope_configured(self) -> bool:
+        """Risk envelope exists even while the final LIVE arm is absent.
+
+        This may be used for read-only feasibility/NEXUS traversal. It grants
+        no drawdown bridge and no dispatch authority.
+        """
         return (
             self.enabled
             and bool(self.episode_id)
-            and self.armed
             and self.loss_budget_usdt is not None
             and self.max_risk_pct is not None
+            and 0 < float(self.max_risk_pct) <= HARD_MAX_RISK_PCT
+        )
+
+    @property
+    def configured(self) -> bool:
+        return (
+            self.envelope_configured
+            and self.armed
             and self.reason == "configured"
         )
 
@@ -152,8 +164,8 @@ def candidate_risk_pct(engine, equity: float) -> float:
     again after fresh authenticated account reads.
     """
     policy = policy_from_env()
-    if not policy.configured:
-        raise RuntimeError(f"controlled re-entry unavailable: {policy.reason}")
+    if not policy.envelope_configured:
+        raise RuntimeError(f"controlled re-entry envelope unavailable: {policy.reason}")
     try:
         equity_f = float(equity)
     except (TypeError, ValueError) as exc:
@@ -371,6 +383,7 @@ def startup_log() -> str:
     return (
         "[CONTROLLED_LIVE_REENTRY_V1] "
         f"enabled={str(policy.enabled).lower()} "
+        f"envelope_configured={str(policy.envelope_configured).lower()} "
         f"configured={str(policy.configured).lower()} "
         f"armed={str(policy.armed).lower()} "
         f"episode_id={policy.episode_id or 'NA'} "
