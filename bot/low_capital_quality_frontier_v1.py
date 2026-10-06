@@ -423,6 +423,12 @@ def _fmt(row: dict[str, object]) -> str:
 async def _run(engine, log) -> None:
     try:
         rows = await collect(engine)
+        # Share an immutable research snapshot with the prospective shadow cohort.
+        # This attribute is observability-only and is never read by LIVE routing,
+        # sizing, risk, dispatch, position or order code.
+        engine._low_capital_quality_frontier_v1_snapshot = tuple(
+            dict(row) for row in rows
+        )
         eligible = [row for row in rows if row["eligible_for_research"]]
         authority = " ".join(
             f"{key}={str(value).lower() if isinstance(value, bool) else value}"
