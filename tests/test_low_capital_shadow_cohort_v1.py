@@ -144,6 +144,80 @@ class LowCapitalShadowCohortV1Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine_source.count(marker), 1)
         self.assertGreater(engine_source.index(cohort_call), engine_source.index(quality_call))
 
+    def test_enrich_outcome_adds_research_metadata_and_touch_flags(self):
+        row = {
+            "candidate_id": "cid-1",
+            "symbol": "HYPEUSDT",
+            "side": "LONG",
+            "setup": "MOMENTUM",
+            "regime": "TRENDING_UP",
+            "strategy_score": 64.0,
+            "shadow_approved": False,
+            "frontier_rank": 3,
+            "market_quality_score": 0.888571,
+            "entry": 100.0,
+            "stop": 95.0,
+            "target": 110.0,
+            "stop_width_pct": 0.05,
+            "round_trip_cost_pct": 0.002,
+        }
+        outcome = {
+            "future_return": 0.05,
+            "MFE": 0.11,
+            "MAE": -0.01,
+            "outcome": "OBSERVED",
+        }
+        bars = [
+            {"h": 111.0, "l": 99.0, "c": 105.0},
+            {"h": 108.0, "l": 98.0, "c": 104.0},
+        ]
+
+        enriched = subject._enrich_outcome(row, outcome, bars, 60)
+
+        self.assertEqual(enriched["candidate_id"], "cid-1")
+        self.assertEqual(enriched["symbol"], "HYPEUSDT")
+        self.assertEqual(enriched["horizon"], 60)
+        self.assertAlmostEqual(enriched["future_return_net"], 0.048)
+        self.assertTrue(enriched["tp_touched"])
+        self.assertFalse(enriched["sl_touched"])
+        self.assertEqual(enriched["touch_order"], "TP_ONLY")
+        self.assertTrue(enriched["research_only"])
+        self.assertFalse(enriched["live_allowed"])
+        self.assertEqual(enriched["decision_effect"], "NONE")
+        self.assertEqual(enriched["execution_effect"], "NONE")
+
+    def test_outcome_telemetry_is_deduped_and_read_only(self):
+        row = {
+            "candidate_id": "cid-2",
+            "symbol": "HYPEUSDT",
+            "side": "LONG",
+            "setup": "MOMENTUM",
+            "regime": "TRENDING_UP",
+            "shadow_approved": False,
+            "market_quality_score": 0.88,
+            "frontier_rank": 3,
+        }
+        outcome = {
+            "candidate_id": "cid-2",
+            "horizon": 240,
+            "future_return": -0.01,
+            "future_return_net": -0.012,
+            "MFE": 0.02,
+            "MAE": -0.03,
+            "tp_touched": False,
+            "sl_touched": False,
+            "touch_order": "NEITHER",
+        }
+        subject._OUTCOME_TELEMETRY_EMITTED.clear()
+        with patch.object(subject.log, "info") as info:
+            self.assertTrue(subject._emit_outcome_telemetry(row, outcome))
+            self.assertFalse(subject._emit_outcome_telemetry(row, outcome))
+        self.assertEqual(info.call_count, 1)
+        message = info.call_args.args[0]
+        self.assertIn("[LOW_CAPITAL_SHADOW_OUTCOME_V1]", message)
+        self.assertIn("decision_effect=NONE", message)
+        self.assertIn("execution_effect=NONE", message)
+
     def test_module_has_no_live_execution_or_universe_mutation(self):
         source = Path(subject.__file__).read_text(encoding="utf-8")
         forbidden = (
