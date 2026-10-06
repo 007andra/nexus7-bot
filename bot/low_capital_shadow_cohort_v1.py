@@ -344,7 +344,10 @@ async def evaluate_symbol(engine, db, cohort: dict[str, object], symbol: str) ->
         return {"symbol": symbol, "status": "NO_STRATEGY_SIGNAL", "persisted": False}
 
     captured = time.time()
-    formation = int(captured // 900)
+    # Analyzer excludes the still-forming last candle. Anchor dedupe to the
+    # same last closed 15m candle rather than wall-clock poll timing.
+    formation_ts = int(k15[-2]["ts"] if len(k15) >= 2 else k15[-1]["ts"])
+    formation = int((formation_ts / 1000) // 900)
     candidate_id = (
         f"{POPULATION}:{symbol}:{signal.direction}:{signal.entry_type}:{formation}"
     )
@@ -367,6 +370,15 @@ async def evaluate_symbol(engine, db, cohort: dict[str, object], symbol: str) ->
         ticker,
         cost,
         features,
+    )
+    from bot.nexus_types import decision_validation_error
+    nexus_validation_error = decision_validation_error(
+        decision,
+        symbol,
+        signal.direction,
+        float(signal.entry),
+        float(signal.sl),
+        float(signal.tp),
     )
     selection = _selection_by_symbol(cohort)[symbol]
     stop_width_pct = abs(float(signal.entry) - float(signal.sl)) / float(signal.entry)
@@ -398,7 +410,12 @@ async def evaluate_symbol(engine, db, cohort: dict[str, object], symbol: str) ->
         "max_stop_pct": selection["max_stop_pct"],
         "round_trip_cost_pct": round_trip_cost_pct,
         "nexus": decision.to_dict(),
-        "shadow_approved": bool(capital_fit and decision.execution_allowed is True),
+        "nexus_validation_error": nexus_validation_error,
+        "shadow_approved": bool(
+            capital_fit
+            and nexus_validation_error is None
+            and decision.execution_allowed is True
+        ),
         "pipeline_fidelity": "STRATEGY_ANALYZER_PLUS_NEXUS_PUBLIC_REST",
         "production_thresholds_unchanged": True,
         "production_universe_unchanged": True,
@@ -577,7 +594,21 @@ async def snapshot(db) -> dict[str, object]:
 async def _run_loop(engine, runtime_log) -> None:
     from bot import database as db
 
-    cohort = await ensure_frozen_cohort(engine, db)
+    cohort = None
+    while cohort is None:
+        try:
+            cohort = await ensure_frozen_cohort(engine, db)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            runtime_log.warning(
+                "[LOW_CAPITAL_SHADOW_COHORT_V1] status=WAIT_FRONTIER reason=%s "
+                "research_only=true prospective_only=true live_allowed=false "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
+            await asyncio.sleep(15.0)
+
     runtime_log.warning(
         "[LOW_CAPITAL_SHADOW_COHORT_V1] status=COHORT_FROZEN symbols=%s "
         "cohort_id=%s research_only=true prospective_only=true "
