@@ -917,6 +917,38 @@ class TradingEngine:
             self.active    = True
             log.info("✅ Engine PRONTO — loop de scan liberado")
 
+            # Research-only lifecycle hook. Schedule only after the engine has
+            # reached canonical connected/active readiness so the task is owned
+            # by the long-lived engine loop rather than the viability sub-step.
+            try:
+                from bot import low_capital_universe_v1 as _low_capital_universe
+                _low_capital_enabled = _low_capital_universe.enabled()
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1] status=WIRING_CALL "
+                    "enabled=%s lifecycle=ENGINE_READY "
+                    "research_only=true observability_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    str(_low_capital_enabled).lower(),
+                )
+                _low_capital_scheduled = _low_capital_universe.schedule_if_enabled(
+                    self, log
+                )
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1] status=WIRING_RETURN "
+                    "scheduled=%s lifecycle=ENGINE_READY "
+                    "research_only=true observability_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    str(_low_capital_scheduled).lower(),
+                )
+            except Exception as _low_capital_exc:
+                log.warning(
+                    "[LOW_CAPITAL_UNIVERSE_V1] status=DEFER reason=%s "
+                    "lifecycle=ENGINE_READY research_only=true "
+                    "observability_only=true live_allowed=false "
+                    "decision_effect=NONE execution_effect=NONE",
+                    type(_low_capital_exc).__name__,
+                )
+
             try:
                 await asyncio.wait_for(self._load_existing_positions(), timeout=20)
             except asyncio.TimeoutError:
@@ -1125,20 +1157,6 @@ class TradingEngine:
                     "[MIN_ORDER_FEASIBILITY_MATRIX] result=DEFER reason=%s "
                     "observability_only=true decision_effect=NONE execution_effect=NONE",
                     type(_matrix_exc).__name__,
-                )
-
-            # Full Binance USDT-perpetual low-capital screen is research-only.
-            # It runs in the background and never mutates cfg.SYMBOLS,
-            # engine.instruments, viable_symbols, risk, sizing, or dispatch.
-            try:
-                from bot import low_capital_universe_v1 as _low_capital_universe
-                _low_capital_universe.schedule_if_enabled(self, log)
-            except Exception as _low_capital_exc:
-                log.warning(
-                    "[LOW_CAPITAL_UNIVERSE_V1] status=DEFER reason=%s "
-                    "research_only=true observability_only=true live_allowed=false "
-                    "decision_effect=NONE execution_effect=NONE",
-                    type(_low_capital_exc).__name__,
                 )
 
             if buying_power <= 0:
