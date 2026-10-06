@@ -65,7 +65,9 @@ _META = """CREATE TABLE IF NOT EXISTS short_down_bos_prospective_v1 (
 
 
 def enabled() -> bool:
-    return os.environ.get(FLAG, "true").strip().lower() in {
+    # Explicit opt-in: importing this research observer must never add database
+    # writes to the hard-gate scan or weaken its mid-scan clear guarantees.
+    return os.environ.get(FLAG, "false").strip().lower() in {
         "1", "true", "yes", "on"
     }
 
