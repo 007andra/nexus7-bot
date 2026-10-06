@@ -31,6 +31,7 @@ from bot import runtime_bootstrap
 runtime_bootstrap.install()
 
 from bot import engine as core
+from bot import execution_cost
 from bot import binance_cross_portfolio_stress as stress
 from bot import pilot_risk_cap_hardening as context
 from bot.binance import BinanceClient
@@ -404,11 +405,28 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
             # receives the approved signal geometry and confirmed capital.
             risk_pct = controlled.candidate_risk_pct(self.engine, equity)
             self.assertAlmostEqual(risk_pct, 0.10 / equity, places=12)
+            cost_snapshot = execution_cost.ExecutionCostSnapshot(
+                snapshot_id="offline-r3-arbusdt-cost",
+                candidate_id="offline-r3-arbusdt",
+                exchange="binance",
+                symbol=symbol,
+                entry_reference=float(self.signal.entry),
+                taker_fee=execution_cost.fallback_taker_fee(),
+                maker_fee=None,
+                entry_slippage=execution_cost.static_slippage_rate(symbol),
+                exit_slippage=execution_cost.static_slippage_rate(symbol),
+                spread_bps=None,
+                fee_source="conservative_fallback",
+                slippage_source="static_symbol_fallback",
+                observed_at=__import__("time").time(),
+            )
+            execution_cost.attach_snapshot(self.signal, cost_snapshot)
             self.engine.risk.set_plan(
                 symbol=symbol,
                 entry=float(self.signal.entry),
                 stop=float(self.signal.sl),
                 risk_pct=risk_pct,
+                cost_snapshot=cost_snapshot,
             )
             self.engine.risk.update_capital(CapitalState(equity, equity))
 
