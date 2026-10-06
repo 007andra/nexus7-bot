@@ -133,6 +133,13 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.replace("bot.execution_ownership.validate_execution_ownership", AsyncMock(side_effect=self.ownership))
         self.replace("bot.runtime_readiness.assert_ready_for_new_entries", lambda e: self.events.append("READINESS"))
         self.replace("bot.critical_state.critical_state.assert_available_for_new_risk", lambda: None)
+        # Offline LIVE harness: the durable submission counter itself is covered
+        # elsewhere. Here it must authorize exactly one synthetic reservation so
+        # cross-stress/postfill/recovery tests can reach their intended boundary.
+        self.replace(
+            "bot.pilot_submission_counter.reserve_submission",
+            AsyncMock(return_value=(True, 1)),
+        )
         self.real_evaluate = stress.evaluate
         self.replace("bot.binance_cross_portfolio_stress.evaluate", self.evaluate)
         sizing = core.minimum_base_quantity
