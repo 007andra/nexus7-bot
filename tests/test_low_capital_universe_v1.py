@@ -160,6 +160,24 @@ class LowCapitalUniverseV1Tests(unittest.IsolatedAsyncioTestCase):
 
             Engine._start_background = _restore
 
+    def test_engine_hook_has_ordered_synchronous_trace_markers(self):
+        engine_source = (
+            Path(subject.__file__).with_name("engine.py").read_text(encoding="utf-8")
+        )
+        markers = (
+            "stage=HOOK_ENTER",
+            "stage=IMPORT_OK",
+            "stage=ENABLED enabled=%s",
+            "stage=SCHEDULE_CALL",
+            "stage=SCHEDULE_RETURN scheduled=%s",
+        )
+        positions = [engine_source.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn(
+            "_low_capital_universe.schedule_if_enabled(",
+            engine_source,
+        )
+
     def test_module_has_no_execution_authority(self):
         source = Path(subject.__file__).read_text(encoding="utf-8")
         forbidden = (
