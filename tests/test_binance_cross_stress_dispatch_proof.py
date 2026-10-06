@@ -333,14 +333,13 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
             risk_reward=2,
             reasoning=["synthetic approval for offline post-NEXUS proof"],
         )
-        # Preserve RuntimeTradingEngine._nexus_validate so the real
-        # post-decision wrapper executes _prepare_professional_risk(). Mock only
-        # the CoreTradingEngine decision source; replacing the instance method
-        # would bypass the RiskManagerV3 plan and make final sizing fail for a
-        # reason that cannot occur on the canonical approved path.
-        self.engine._nexus_validate = RuntimeTradingEngine._nexus_validate.__get__(
-            self.engine, RuntimeTradingEngine
-        )
+        # This is deliberately a post-NEXUS replay. The NEXUS decision is
+        # fixed to APPROVE, while the RiskManagerV3 plan is prepared explicitly
+        # below before entering the executable chain. This keeps the proof
+        # focused on sizing -> CROSS -> pre-dispatch -> transport boundary and
+        # avoids pulling account/HWM reconciliation background work into a
+        # test whose exchange transport is intentionally blocked.
+        self.engine._nexus_validate = AsyncMock(return_value=decision)
 
         async def production_account():
             self.events.append("ACCOUNT_REFRESH")
@@ -376,29 +375,27 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch.dict(os.environ, controlled_env, clear=False), \
-             patch.object(
-                 core.TradingEngine, "_nexus_validate",
-                 AsyncMock(return_value=decision),
-             ), \
              patch.object(pilot_module, "PILOT_MAX_CONCURRENT_POSITIONS", 1), \
              patch.object(pilot_module, "MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1), \
-             patch(
-                 "bot.nexus_runtime_engine.capital_flows.reconcile_external_capital_flows",
-                 AsyncMock(),
-             ), \
-             patch(
-                 "bot.nexus_runtime_engine.hwm_incident_repair.repair_if_needed",
-                 AsyncMock(return_value={"status": "NOT_MATCHED"}),
-             ), \
-             patch(
-                 "bot.nexus_runtime_engine.restore_update_real_account_peak",
-                 AsyncMock(),
-             ), \
              patch.object(final_loss_budget, "diagnose", side_effect=capture_loss), \
              patch(
                  "bot.controlled_live_reentry_v1.consume_dispatch_once",
                  stop_before_http,
              ):
+            # Reconstruct the exact post-NEXUS sizing precondition without
+            # granting execution authority: the absolute 0.10 USDT envelope
+            # determines the effective risk percentage, then RiskManagerV3
+            # receives the approved signal geometry and confirmed capital.
+            risk_pct = controlled.candidate_risk_pct(self.engine, equity)
+            self.assertAlmostEqual(risk_pct, 0.10 / equity, places=12)
+            self.engine.risk.set_plan(
+                symbol=symbol,
+                entry=float(self.signal.entry),
+                stop=float(self.signal.sl),
+                risk_pct=risk_pct,
+            )
+            self.engine.risk.update_capital(CapitalState(equity, equity))
+
             try:
                 await asyncio.wait_for(self.engine._open(self.signal), timeout=10.0)
             except asyncio.TimeoutError:
