@@ -15,7 +15,7 @@ from pathlib import Path
 
 from bot.backtest import _closed_window_by_ts, _timestamp_index
 from bot.config import cfg
-from bot.nexus_oos_real_replay import PublicKuCoinFuturesClient, _funding_at, _ts_ms
+from bot.nexus_oos_real_replay import PublicKuCoinFuturesClient
 from bot.nexus_oos_real_replay_corrected import (
     _freeze_full_clock,
     fetch_history_contiguous,
