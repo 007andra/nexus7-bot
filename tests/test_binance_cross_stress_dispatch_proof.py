@@ -286,6 +286,129 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ACCOUNT_REFRESH", between)
         self.assertNotIn("FINAL_SIZING_ENTER", self.events[self.events.index("STRESS_PRE_ORDER"):])
 
+    async def test_controlled_reentry_post_nexus_replay_stops_before_http(self):
+        """Replay the first R3 ARB geometry with a synthetic NEXUS approval.
+
+        This proves the post-NEXUS chain against the real runtime wrappers:
+        fresh capital -> final sizing -> absolute 0.10 USDT loss ceiling ->
+        PRE_ORDER CROSS -> fresh refresh -> FINAL_PREDISPATCH CROSS -> transport
+        boundary. The exchange POST is deliberately denied at the final
+        one-shot boundary, so this test can never create a real order.
+        """
+        from bot import controlled_live_reentry_v1 as controlled
+        from bot import final_loss_budget
+        from bot import pilot as pilot_module
+
+        equity = 5.39561426
+        symbol = "ARBUSDT"
+        self.engine.viable_symbols = [symbol]
+        self.engine.instruments = {
+            symbol: {
+                "quantityUnit": "BASE_ASSET",
+                "qtyStep": "0.1",
+                "minQty": "0.1",
+                "minNotional": "5",
+                "tickSize": "0.00001",
+                "multiplier": 1.0,
+            }
+        }
+        self.client._instruments = self.engine.instruments
+        self.engine.risk.init(equity)
+        self.engine.risk.update_capital(CapitalState(equity, equity))
+        self.engine._pilot_live_prelive_ready = True
+        self.signal = Signal(
+            symbol, "SHORT", 0.20053, 0.203079, 0.195433, 60,
+            "R3 ARBUSDT replay", 90,
+        )
+        decision = NexusDecision(
+            symbol=symbol,
+            decision="SHORT",
+            execution_allowed=True,
+            confidence=90,
+            setup_quality=90,
+            entry=0.20053,
+            stop_loss=0.203079,
+            take_profit=0.195433,
+            expected_value=1,
+            risk_reward=2,
+            reasoning=["synthetic approval for offline post-NEXUS proof"],
+        )
+        self.engine._nexus_validate = AsyncMock(return_value=decision)
+
+        async def production_account():
+            self.events.append("ACCOUNT_REFRESH")
+            return {
+                "equity": equity,
+                "available": equity,
+                "crossWalletBalance": equity,
+                "orderMargin": 0,
+                "positionMargin": 0,
+                "canTrade": True,
+                "multiAssetsMargin": False,
+            }
+
+        self.client.get_account_state = AsyncMock(side_effect=production_account)
+
+        captured_loss = []
+        current_diagnose = final_loss_budget.diagnose
+
+        def capture_loss(*args, **kwargs):
+            result = current_diagnose(*args, **kwargs)
+            captured_loss.append(result)
+            return result
+
+        stop_before_http = AsyncMock(
+            return_value=(False, "OFFLINE_PROOF_STOP_BEFORE_HTTP")
+        )
+        controlled_env = {
+            controlled.ENABLED_ENV: "true",
+            controlled.EPISODE_ENV: "OFFLINE_R3_ARBUSDT_POST_NEXUS_PROOF",
+            controlled.ARM_ENV: controlled.ARM_TOKEN,
+            controlled.LOSS_BUDGET_ENV: "0.10",
+            controlled.MAX_RISK_PCT_ENV: "0.02",
+        }
+
+        with patch.dict(os.environ, controlled_env, clear=False), \
+             patch.object(pilot_module, "PILOT_MAX_CONCURRENT_POSITIONS", 1), \
+             patch.object(pilot_module, "MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1), \
+             patch.object(final_loss_budget, "diagnose", side_effect=capture_loss), \
+             patch(
+                 "bot.controlled_live_reentry_v1.consume_dispatch_once",
+                 stop_before_http,
+             ):
+            await self.engine._open(self.signal)
+
+        self.assertGreater(self.sized_qty, 0.0, self.events)
+        self.assertEqual(
+            self.evaluations,
+            [("PRE_ORDER", self.sized_qty), ("FINAL_PREDISPATCH", self.sized_qty)],
+            self.events,
+        )
+        self.assertTrue(getattr(self.last_result, "allowed", False), self.events)
+        self.assertGreaterEqual(len(captured_loss), 2, self.events)
+        projected = [
+            float(metrics["projected_loss"])
+            for result, _reason, metrics in captured_loss
+            if isinstance(metrics, dict) and "projected_loss" in metrics
+        ]
+        self.assertTrue(projected, captured_loss)
+        self.assertLessEqual(max(projected), 0.10 + 1e-9, captured_loss)
+
+        # place_order was reached, but the final one-shot authorization boundary
+        # denied the attempt before any exchange order POST.
+        self.assertEqual(self.client.place_order.call_count, 1, self.events)
+        self.assertEqual(stop_before_http.await_count, 1, self.events)
+        self.assertFalse(
+            any(method == "POST" and endpoint == "/fapi/v1/order"
+                for method, endpoint, _params in self.requests),
+            self.requests,
+        )
+        self.assertIn("FINAL_SIZING_ENTER", self.events)
+        self.assertIn("FINAL_SIZING_RETURN", self.events)
+        self.assertIn("STRESS_PRE_ORDER", self.events)
+        self.assertIn("STRESS_FINAL_PREDISPATCH", self.events)
+        self.assertIn("PLACE_ORDER", self.events)
+
     async def test_pre_order_block(self):
         self.stage, self.scenario = "PRE_ORDER", "block"
         await self.engine._open(self.signal)
