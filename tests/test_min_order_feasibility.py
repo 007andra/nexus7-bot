@@ -279,6 +279,34 @@ def test_paper_and_nonpilot_paths_are_unchanged():
     assert evaluate.await_count == 0
 
 
+
+
+def test_controlled_one_shot_budget_can_make_exchange_minimum_feasible_without_authorizing():
+    symbol = "ADAUSDT"
+    info = _binance("1", "1", "5")
+    eng = _engine(symbol, info, equity=5.39561426, risk_pct=0.0025)
+    sig = SimpleNamespace(
+        symbol=symbol,
+        entry=0.2786,
+        sl=0.2760,
+        direction="LONG",
+    )
+    with patch.object(gate.execution_cost, "reusable_snapshot", return_value=_snapshot(symbol)), \
+         patch.object(gate, "read_account_capital", AsyncMock(return_value=_CapitalSnapshot(5.39561426))), \
+         patch(
+             "bot.controlled_live_reentry_v1.candidate_risk_pct",
+             return_value=0.10 / 5.39561426,
+         ), \
+         patch.object(gate, "recovery_size_multiplier", side_effect=AssertionError("controlled path must not use recovery")):
+        decision = asyncio.run(gate.evaluate_candidate(eng, sig))
+
+    assert decision.allowed is True
+    assert decision.reason == "SIZED"
+    assert abs(float(decision.detail["risk_budget"]) - 0.10) < 1e-9
+    assert float(decision.detail["rounded_qty"]) >= float(decision.detail["min_valid_qty"])
+    assert not hasattr(decision, "execution_allowed")
+
+
 def test_gate_does_not_change_trading_thresholds_or_leverage():
     before = (cfg.LEVERAGE, cfg.MAX_RISK_PCT, cfg.MAX_DRAWDOWN, cfg.MAX_POSITIONS)
     # Merely importing/evaluating the module must not mutate policy.
