@@ -587,14 +587,20 @@ class BinanceClient:
             "/fapi/v1/algoOrder",
         }
         try:
-            return await self._request(
-                "POST",
-                endpoint,
-                body,
-                auth=True,
-                mutation=True,
-                single_attempt=bool(single_attempt or order_submission),
-            )
+            # Match the KuCoin transport contract: every Binance POST crosses
+            # the fenced transport context before the HTTP mutation. For
+            # new-risk orders this is where ownership, durable submission
+            # provenance, pilot budget and the controlled one-shot authorization
+            # are enforced. The context itself performs no Binance request.
+            async with self._fenced_entry_post(endpoint, body, None):
+                return await self._request(
+                    "POST",
+                    endpoint,
+                    body,
+                    auth=True,
+                    mutation=True,
+                    single_attempt=bool(single_attempt or order_submission),
+                )
         except Exception as exc:
             client_oid = str(
                 (body or {}).get("newClientOrderId", "") or ""
