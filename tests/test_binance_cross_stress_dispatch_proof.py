@@ -288,7 +288,8 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
             "STRESS_PRE_ORDER", "STRESS_FINAL_PREDISPATCH", "PLACE_ORDER", "FENCE", "OWNERSHIP", "FAKE_HTTP"}]
         self.assertEqual(critical, ["FINAL_SIZING_ENTER", "FINAL_LOSS_BUDGET", "FINAL_SIZING_RETURN",
                                    "STRESS_PRE_ORDER", "FINAL_LOSS_BUDGET", "STRESS_FINAL_PREDISPATCH",
-                                   "PLACE_ORDER", "FENCE", "OWNERSHIP", "FAKE_HTTP", "FAKE_HTTP"])
+                                   "PLACE_ORDER", "FENCE", "OWNERSHIP", "FAKE_HTTP",
+                                   "OWNERSHIP", "FAKE_HTTP"])
         between = self.events[self.events.index("STRESS_PRE_ORDER") + 1:self.events.index("STRESS_FINAL_PREDISPATCH")]
         self.assertIn("ACCOUNT_REFRESH", between)
         self.assertNotIn("FINAL_SIZING_ENTER", self.events[self.events.index("STRESS_PRE_ORDER"):])
