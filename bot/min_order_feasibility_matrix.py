@@ -28,6 +28,31 @@ def _d(value) -> Decimal:
     return out
 
 
+def controlled_envelope_risk_pct(equity: Decimal) -> Decimal | None:
+    """Return the controlled envelope for read-only feasibility telemetry.
+
+    This helper never grants drawdown bridge or dispatch authority. It mirrors
+    only the bounded risk math so shadow evidence can match a controlled pilot.
+    """
+    from bot import controlled_live_reentry_v1 as controlled_reentry
+
+    policy = controlled_reentry.policy_from_env()
+    if not policy.envelope_configured:
+        return None
+    equity_f = float(equity)
+    value = min(
+        float(policy.max_risk_pct),
+        float(policy.loss_budget_usdt) / equity_f,
+    )
+    if (
+        not math.isfinite(value)
+        or value <= 0
+        or value > controlled_reentry.HARD_MAX_RISK_PCT
+    ):
+        raise ValueError("invalid controlled shadow risk pct")
+    return _d(value)
+
+
 def effective_risk_pct(engine) -> Decimal:
     base = float(engine._effective_risk_pct())
     drawdown = float(getattr(getattr(engine, "risk", None), "drawdown", 0.0) or 0.0)
@@ -130,7 +155,13 @@ def build_matrix(engine, price_map: dict[str, float]) -> list[dict]:
     if equity <= 0:
         raise ValueError("equity unavailable")
     available = available_collateral(engine, equity)
-    risk_pct = effective_risk_pct(engine)
+    controlled_risk_pct = controlled_envelope_risk_pct(equity)
+    if controlled_risk_pct is not None:
+        risk_pct = controlled_risk_pct
+        risk_source = "CONTROLLED_REENTRY_ENVELOPE"
+    else:
+        risk_pct = effective_risk_pct(engine)
+        risk_source = "NORMAL_RECOVERY_ADJUSTED"
     fee = _d(execution_cost.fallback_taker_fee())
     slippage = _d(os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001"))
 
@@ -154,6 +185,7 @@ def build_matrix(engine, price_map: dict[str, float]) -> list[dict]:
         )
         row["symbol"] = symbol
         row["price"] = _d(price)
+        row["risk_source"] = risk_source
         rows.append(row)
     return rows
 
@@ -215,8 +247,8 @@ def log_once(engine, price_map: dict[str, float], log) -> None:
         log.info(
             "[MIN_ORDER_FEASIBILITY_MATRIX] symbol=%s status=%s binding=%s "
             "price=%s min_qty=%s min_notional=%s min_valid_qty=%s "
-            "min_order_notional=%s risk_budget=%s margin_at_min=%s margin_cap=%s "
-            "max_stop_pct=%s fee_per_side=%s slippage=%s "
+            "min_order_notional=%s risk_budget=%s risk_source=%s "
+            "margin_at_min=%s margin_cap=%s max_stop_pct=%s fee_per_side=%s slippage=%s "
             "observability_only=true decision_effect=NONE execution_effect=NONE",
             row["symbol"],
             status,
@@ -227,6 +259,7 @@ def log_once(engine, price_map: dict[str, float], log) -> None:
             row["min_valid_qty"],
             row["min_order_notional"],
             row["risk_budget"],
+            row["risk_source"],
             row["margin_at_min"],
             row["margin_cap"],
             row["max_stop_pct"],
@@ -236,11 +269,12 @@ def log_once(engine, price_map: dict[str, float], log) -> None:
 
     log.warning(
         "[MIN_ORDER_FEASIBILITY_MATRIX_SUMMARY] symbols=%d conditional=%d "
-        "margin_block=%d cost_block=%d unavailable=%d "
+        "margin_block=%d cost_block=%d unavailable=%d risk_source=%s "
         "meaning=CONDITIONAL_REQUIRES_ACTUAL_STOP_AT_OR_BELOW_MAX_STOP_PCT "
         "observability_only=true thresholds_unchanged=true leverage_unchanged=true "
         "decision_effect=NONE execution_effect=NONE",
         len(rows), conditional, margin_block, cost_block, unavailable,
+        rows[0].get("risk_source", "UNKNOWN") if rows else "UNKNOWN",
     )
     engine._min_order_feasibility_matrix_logged = True
 
