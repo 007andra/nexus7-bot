@@ -243,6 +243,33 @@ def evaluate(candidates, outcomes60, outcomes240, *, baseline):
 
     avg60 = _mean(r["future_return"] for r in matched60)
     avg240 = _mean(r["future_return"] for r in matched240)
+
+    # Robustness-only view: remove the dominant symbol from the frozen sample.
+    # This must never change the cohort status or grant promotion/LIVE authority.
+    leave_top_symbol_sample_n = sum(
+        1 for r in sample if r["symbol"] != top_symbol
+    )
+    leave_top_symbol_60 = [
+        r for r in matched60 if r["symbol"] != top_symbol
+    ]
+    leave_top_symbol_240 = [
+        r for r in matched240 if r["symbol"] != top_symbol
+    ]
+    leave_top_symbol_avg60 = _mean(
+        r["future_return"] for r in leave_top_symbol_60
+    )
+    leave_top_symbol_avg240 = _mean(
+        r["future_return"] for r in leave_top_symbol_240
+    )
+    leave_top_symbol_pos60 = _rate(
+        sum(1 for r in leave_top_symbol_60 if r["future_return"] > 0.0),
+        len(leave_top_symbol_60),
+    )
+    leave_top_symbol_pos240 = _rate(
+        sum(1 for r in leave_top_symbol_240 if r["future_return"] > 0.0),
+        len(leave_top_symbol_240),
+    )
+
     pos60 = _rate(
         sum(1 for r in matched60 if r["future_return"] > 0.0), len(matched60)
     )
@@ -262,6 +289,17 @@ def evaluate(candidates, outcomes60, outcomes240, *, baseline):
         b in blockers
         for b in ("TARGET_APPROVALS", "TARGET_OUTCOMES_60M", "TARGET_OUTCOMES_240M")
     )
+    leave_top_symbol_positive_both_horizons = bool(
+        sample_complete
+        and leave_top_symbol_sample_n > 0
+        and len(leave_top_symbol_60) == leave_top_symbol_sample_n
+        and len(leave_top_symbol_240) == leave_top_symbol_sample_n
+        and leave_top_symbol_avg60 is not None
+        and leave_top_symbol_avg60 > 0.0
+        and leave_top_symbol_avg240 is not None
+        and leave_top_symbol_avg240 > 0.0
+    )
+
     if sample_complete:
         if avg60 is None or avg60 <= 0.0:
             blockers.append("AVG_RETURN_60M_NOT_POSITIVE")
@@ -310,6 +348,18 @@ def evaluate(candidates, outcomes60, outcomes240, *, baseline):
         "top_symbol_n": top_symbol_n,
         "top_symbol_share": top_share,
         "max_symbol_concentration": MAX_SYMBOL_CONCENTRATION,
+        "leave_top_symbol": top_symbol,
+        "leave_top_symbol_sample_n": leave_top_symbol_sample_n,
+        "leave_top_symbol_observed_60m": len(leave_top_symbol_60),
+        "leave_top_symbol_observed_240m": len(leave_top_symbol_240),
+        "leave_top_symbol_avg_return_60m": leave_top_symbol_avg60,
+        "leave_top_symbol_avg_return_240m": leave_top_symbol_avg240,
+        "leave_top_symbol_positive_rate_60m": leave_top_symbol_pos60,
+        "leave_top_symbol_positive_rate_240m": leave_top_symbol_pos240,
+        "leave_top_symbol_positive_both_horizons": (
+            leave_top_symbol_positive_both_horizons
+        ),
+        "robustness_observability_only": True,
         "sample_complete": sample_complete,
         "first_n_chronological_sample": True,
         "sample_replacement_allowed": False,
@@ -387,7 +437,13 @@ def format_log(row):
         "positive_rate_60m", "positive_rate_240m",
         "avg_mfe_60m", "avg_mae_60m", "avg_mfe_240m", "avg_mae_240m",
         "symbol_counts", "top_symbol", "top_symbol_share",
-        "max_symbol_concentration", "sample_complete",
+        "max_symbol_concentration",
+        "leave_top_symbol", "leave_top_symbol_sample_n",
+        "leave_top_symbol_observed_60m", "leave_top_symbol_observed_240m",
+        "leave_top_symbol_avg_return_60m", "leave_top_symbol_avg_return_240m",
+        "leave_top_symbol_positive_rate_60m", "leave_top_symbol_positive_rate_240m",
+        "leave_top_symbol_positive_both_horizons",
+        "robustness_observability_only", "sample_complete",
         "prior_seed_candidate_ids_counted", "hypothesis_frozen",
         "sample_replacement_allowed", "thresholds_unchanged",
         "risk_unchanged", "sizing_unchanged", "promotion_allowed",

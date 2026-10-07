@@ -102,7 +102,10 @@ class ShortDownBosProspectiveTests(unittest.IsolatedAsyncioTestCase):
         rows = []
         out60, out240 = {}, {}
         for i in range(12):
-            symbol = "UNIUSDT" if i < 5 else ("AVAXUSDT" if i < 10 else "FILUSDT")
+            symbol = (
+                "UNIUSDT" if i < 5
+                else ("AVAXUSDT" if i < 8 else "FILUSDT")
+            )
             cid = f"C{i:02d}"
             rows.append(candidate(cid, 101.0 + i, symbol=symbol))
             out60[cid] = outcome(60, 0.01 + i * 0.0001)
@@ -117,12 +120,48 @@ class ShortDownBosProspectiveTests(unittest.IsolatedAsyncioTestCase):
             tuple(f"C{i:02d}" for i in range(10)),
         )
         self.assertEqual(row["top_symbol_share"], 0.5)
+        self.assertEqual(row["leave_top_symbol"], "UNIUSDT")
+        self.assertEqual(row["leave_top_symbol_sample_n"], 5)
+        self.assertEqual(row["leave_top_symbol_observed_60m"], 5)
+        self.assertEqual(row["leave_top_symbol_observed_240m"], 5)
+        self.assertGreater(row["leave_top_symbol_avg_return_60m"], 0.0)
+        self.assertGreater(row["leave_top_symbol_avg_return_240m"], 0.0)
+        self.assertTrue(row["leave_top_symbol_positive_both_horizons"])
+        self.assertTrue(row["robustness_observability_only"])
         self.assertEqual(row["status"], "READY_FOR_MANUAL_REVIEW")
         self.assertTrue(row["sample_complete"])
         self.assertFalse(row["promotion_allowed"])
         self.assertFalse(row["live_allowed"])
         self.assertEqual(row["decision_effect"], "NONE")
         self.assertEqual(row["execution_effect"], "NONE")
+
+    def test_leave_top_symbol_can_reveal_concentrated_edge_without_changing_status(self):
+        rows = []
+        out60, out240 = {}, {}
+        for i in range(10):
+            symbol = (
+                "UNIUSDT" if i < 5
+                else ("AVAXUSDT" if i < 8 else "FILUSDT")
+            )
+            cid = f"L{i}"
+            rows.append(candidate(cid, 105.0 + i, symbol=symbol))
+            if symbol == "UNIUSDT":
+                out60[cid] = outcome(60, 0.03)
+                out240[cid] = outcome(240, 0.04)
+            else:
+                out60[cid] = outcome(60, -0.005)
+                out240[cid] = outcome(240, -0.01)
+
+        row = study.evaluate(rows, out60, out240, baseline=self.baseline())
+        self.assertEqual(row["status"], "READY_FOR_MANUAL_REVIEW")
+        self.assertEqual(row["top_symbol"], "UNIUSDT")
+        self.assertEqual(row["top_symbol_share"], 0.5)
+        self.assertLess(row["leave_top_symbol_avg_return_60m"], 0.0)
+        self.assertLess(row["leave_top_symbol_avg_return_240m"], 0.0)
+        self.assertFalse(row["leave_top_symbol_positive_both_horizons"])
+        self.assertTrue(row["robustness_observability_only"])
+        self.assertFalse(row["promotion_allowed"])
+        self.assertFalse(row["live_allowed"])
 
     def test_symbol_concentration_above_half_fails_even_with_positive_returns(self):
         rows = []
