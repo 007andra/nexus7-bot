@@ -11,13 +11,17 @@ class _Orders:
         return []
 
 
-def _engine(equity=5.39561426, available=5.39561426):
+def _engine(equity=5.39561426, available=5.39561426, drawdown=0.76333669401):
     capital = SimpleNamespace(equity=equity, available_collateral=available)
     snapshot = SimpleNamespace(confirmed=True, capital=capital)
     risk = SimpleNamespace(
         professional_snapshot=snapshot,
         balance=equity,
         balance_confirmed=True,
+        confirmed=True,
+        equity=equity,
+        available_collateral=available,
+        drawdown=drawdown,
     )
     return SimpleNamespace(
         paper_trade=False,
@@ -143,6 +147,46 @@ class ControlledLiveReentryPolicyTests(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertEqual(reason2, "absolute_loss_budget_exceeded")
         self.assertLess(evidence2["headroom_usdt"], 0)
+
+    def test_prescan_bridge_allows_only_drawdown_failure_when_armed(self):
+        engine = _engine()
+        patches = self._authority_patches()
+        with patch.dict(os.environ, _env(), clear=True), \
+             patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("bot.config.cfg.MAX_DRAWDOWN", 0.17), \
+             patch("bot.config.cfg.MAX_POSITIONS", 1):
+            ok, reason = controlled.pre_scan_drawdown_bridge_allowed(
+                engine, normal_can_open=False
+            )
+        self.assertTrue(ok, reason)
+        self.assertIn("episode=FINAL_LIVE_PILOT_TEST_V1", reason)
+
+    def test_prescan_bridge_rejects_unarmed_episode(self):
+        engine = _engine()
+        patches = self._authority_patches()
+        env = _env(**{controlled.ARM_ENV: ""})
+        with patch.dict(os.environ, env, clear=True), \
+             patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("bot.config.cfg.MAX_DRAWDOWN", 0.17), \
+             patch("bot.config.cfg.MAX_POSITIONS", 1):
+            ok, reason = controlled.pre_scan_drawdown_bridge_allowed(
+                engine, normal_can_open=False
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "manual_arm_missing")
+
+    def test_prescan_bridge_rejects_non_drawdown_can_open_failure(self):
+        engine = _engine(drawdown=0.05)
+        patches = self._authority_patches()
+        with patch.dict(os.environ, _env(), clear=True), \
+             patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("bot.config.cfg.MAX_DRAWDOWN", 0.17), \
+             patch("bot.config.cfg.MAX_POSITIONS", 1):
+            ok, reason = controlled.pre_scan_drawdown_bridge_allowed(
+                engine, normal_can_open=False
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "normal_risk_gate_failed_non_drawdown")
 
     def test_existing_position_or_generic_override_cannot_use_bridge(self):
         engine = _engine()
