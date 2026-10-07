@@ -456,6 +456,138 @@ class ReconciliationAndSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached["actualOrderStatus"], "FILLED")
         self.assertEqual(cached["actualExecutedQty"], "100")
 
+    async def test_algo_triggering_then_actual_order_then_link_never_mutates_registry(self):
+        client = binance.BinanceClient()
+        registry = OrderRegistry()
+        client._order_registry = registry
+
+        await client._handle_private_order_event({
+            "e": "ALGO_UPDATE",
+            "E": 100,
+            "o": {
+                "caid": "bgx7-sl-race-a",
+                "aid": 77,
+                "ai": "",
+                "s": "UNIUSDT",
+                "S": "BUY",
+                "X": "TRIGGERING",
+                "o": "STOP_MARKET",
+            },
+        })
+
+        await client._handle_private_order_event({
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 101,
+            "o": {
+                "s": "UNIUSDT",
+                "c": "bgx7-child-race-a",
+                "S": "BUY",
+                "q": "1",
+                "X": "FILLED",
+                "i": 991201,
+                "z": "1",
+                "ap": "7.964",
+            },
+        })
+        self.assertIsNone(registry.get("bgx7-child-race-a"))
+        self.assertIn("991201", client._algo_unlinked_actual_events)
+
+        await client._handle_private_order_event({
+            "e": "ALGO_UPDATE",
+            "E": 102,
+            "o": {
+                "caid": "bgx7-sl-race-a",
+                "aid": 77,
+                "ai": 991201,
+                "s": "UNIUSDT",
+                "S": "BUY",
+                "X": "TRIGGERED",
+                "o": "STOP_MARKET",
+            },
+        })
+        self.assertNotIn("991201", client._algo_unlinked_actual_events)
+        self.assertEqual(
+            client._algo_actual_order_client["991201"],
+            "bgx7-sl-race-a",
+        )
+        cached = client._algo_order_cache["bgx7-sl-race-a"]
+        self.assertEqual(cached["actualOrderStatus"], "FILLED")
+        self.assertEqual(cached["actualExecutedQty"], "1")
+        self.assertEqual(cached["actualAvgPrice"], "7.964")
+        self.assertEqual(registry.all_orders(), [])
+
+    async def test_actual_order_before_algo_update_is_quarantined_then_correlated(self):
+        client = binance.BinanceClient()
+        registry = OrderRegistry()
+        client._order_registry = registry
+        entry, _ = registry.get_or_create(
+            "bgx7-entry-race-b", "UNIUSDT", "Sell", 1.0
+        )
+
+        await client._handle_private_order_event({
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 200,
+            "o": {
+                "s": "UNIUSDT",
+                "c": "bgx7-entry-race-b",
+                "S": "BUY",
+                "q": "1",
+                "X": "NEW",
+                "i": 991202,
+                "z": "0",
+                "ap": "0",
+            },
+        })
+        await client._handle_private_order_event({
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 201,
+            "o": {
+                "s": "UNIUSDT",
+                "c": "bgx7-entry-race-b",
+                "S": "BUY",
+                "q": "1",
+                "X": "FILLED",
+                "i": 991202,
+                "z": "1",
+                "ap": "7.964",
+            },
+        })
+
+        self.assertEqual(entry.side, "Sell")
+        self.assertEqual(entry.state, OrderState.CREATED)
+        self.assertIsNone(entry.order_id)
+        self.assertIsNone(registry.get_by_order_id("991202"))
+        self.assertEqual(
+            client._algo_unlinked_actual_events["991202"]["o"]["X"],
+            "FILLED",
+        )
+
+        await client._handle_private_order_event({
+            "e": "ALGO_UPDATE",
+            "E": 202,
+            "o": {
+                "caid": "bgx7-sl-race-b",
+                "aid": 78,
+                "ai": 991202,
+                "s": "UNIUSDT",
+                "S": "BUY",
+                "X": "TRIGGERED",
+                "o": "STOP_MARKET",
+            },
+        })
+        self.assertNotIn("991202", client._algo_unlinked_actual_events)
+        self.assertEqual(
+            client._algo_actual_order_client["991202"],
+            "bgx7-sl-race-b",
+        )
+        cached = client._algo_order_cache["bgx7-sl-race-b"]
+        self.assertEqual(cached["actualOrderStatus"], "FILLED")
+        self.assertEqual(cached["actualExecutedQty"], "1")
+        self.assertEqual(entry.side, "Sell")
+        self.assertEqual(entry.state, OrderState.CREATED)
+        self.assertIsNone(entry.order_id)
+        self.assertIsNone(registry.get_by_order_id("991202"))
+
     async def test_preflight_clears_reconcile_only_after_rest_reconciliation(self):
         from bot import pilot_live_runtime as plr
 
