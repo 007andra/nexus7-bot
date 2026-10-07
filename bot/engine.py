@@ -576,76 +576,109 @@ class TradingEngine:
                         if not self.active or getattr(self, 'entries_paused', False) or self.daily_stopped or daily_state_blocked or not daily_pnl_ok:
                             # FIX: logar apenas 1x — não a cada 5s em loop infinito
                             pass   # já logado em _update_daily_pnl, não repetir aqui
-                        elif self.risk.can_open(len(self.positions)):
-                            # ══════════════════════════════════════════
-                            # P0 — KILL SWITCH DE INTEGRIDADE
-                            #
-                            # Avalia o estado ANTES de qualquer entrada.
-                            # Bloqueia se a exchange não puder ser
-                            # confirmada, se houver divergência local ↔
-                            # exchange, ou se alguma posição estiver sem
-                            # stop confirmado.
-                            #
-                            # NÃO interrompe a gestão de posições abertas —
-                            # essa roda antes, sob o _pos_lock.
-                            # ══════════════════════════════════════════
-                            await self.integrity.assess(self.client, self)
-
-                            # ══════════════════════════════════════════
-                            # P0 — GATE viable_symbols=[] BLOQUEIA ORDENS
-                            #
-                            # Critério de aceite: viable_symbols=[] NUNCA
-                            # pode resultar em tentativa de abertura de
-                            # posição, independente do estado de
-                            # connected/active/integrity.
-                            #
-                            # _ensure_viable_symbols() faz o retry com
-                            # backoff (recarregando instrumentos e preços)
-                            # e retorna True assim que houver >=1 par
-                            # viável — sem exigir restart manual nem
-                            # depender de connected virar False.
-                            # ══════════════════════════════════════════
-                            _tem_pares = await self._ensure_viable_symbols()
-
-                            if not _tem_pares:
-                                # Throttle SOMENTE do log (LOW). O gate acima
-                                # já bloqueou o scan — nada aqui altera
-                                # segurança, retry ou backoff.
-                                #
-                                # Emite imediatamente na primeira vez e sempre
-                                # que o estado relevante mudar (nº da tentativa);
-                                # mensagens idênticas ficam limitadas a 1x/60s.
-                                _susp_key = f"viable_empty|{self._viable_retry_attempt}"
-                                _now_log = time.time()
-                                if (_susp_key != self._scan_susp_last_key or
-                                        _now_log - self._scan_susp_last_log_ts >= 60.0):
-                                    self._scan_susp_last_key = _susp_key
-                                    self._scan_susp_last_log_ts = _now_log
-                                    log.warning(
-                                        f"🚫 SCAN_SUSPENSO: viable_symbols=[] — "
-                                        f"nenhuma ordem será aberta até a "
-                                        f"recuperação automática "
-                                        f"(tentativa #{self._viable_retry_attempt})"
-                                    )
-                            elif not self.integrity.can_open_new():
-                                log.warning(
-                                    f"🚫 ENTRADAS BLOQUEADAS: "
-                                    f"{self.integrity.block_reason()}"
-                                )
-                            else:
-                                await self._scan_all_and_enter()
                         else:
-                            # Sem este else, um can_open()=False fazia o ciclo
-                            # passar direto sem nenhum registro — parecia que o
-                            # bot tinha parado de analisar.
-                            _n = len(self.positions)
-                            log.info(
-                                f"⏸️ Scan pulado: posições={_n}/{cfg.MAX_POSITIONS} "
-                                f"drawdown={self.risk.drawdown:.1%}/"
-                                f"{cfg.MAX_DRAWDOWN:.0%} "
-                                f"ready={self.risk._ready} "
-                                f"stop_diário={self.daily_stopped}"
-                            )
+                            _normal_can_open = self.risk.can_open(len(self.positions))
+                            _controlled_prescan_bridge = False
+                            _controlled_prescan_reason = "not_requested"
+                            if not _normal_can_open and is_binance():
+                                try:
+                                    from bot import controlled_live_reentry_v1 as controlled_reentry
+                                    (
+                                        _controlled_prescan_bridge,
+                                        _controlled_prescan_reason,
+                                    ) = controlled_reentry.pre_scan_drawdown_bridge_allowed(
+                                        self,
+                                        normal_can_open=False,
+                                    )
+                                except Exception as _bridge_exc:
+                                    _controlled_prescan_bridge = False
+                                    _controlled_prescan_reason = (
+                                        f"controlled_reentry_{type(_bridge_exc).__name__}"
+                                    )
+
+                            if _controlled_prescan_bridge:
+                                if not getattr(self, "_controlled_prescan_bridge_logged", False):
+                                    self._controlled_prescan_bridge_logged = True
+                                    log.critical(
+                                        "[CONTROLLED_LIVE_REENTRY_V1] stage=PRE_SCAN_RISK_GATE "
+                                        "result=PASS normal_can_open=false scope=DRAWDOWN_ONLY "
+                                        "bridge=%s",
+                                        _controlled_prescan_reason,
+                                    )
+                            else:
+                                self._controlled_prescan_bridge_logged = False
+
+                            if _normal_can_open or _controlled_prescan_bridge:
+                                # ══════════════════════════════════════════
+                                # P0 — KILL SWITCH DE INTEGRIDADE
+                                #
+                                # Avalia o estado ANTES de qualquer entrada.
+                                # Bloqueia se a exchange não puder ser
+                                # confirmada, se houver divergência local ↔
+                                # exchange, ou se alguma posição estiver sem
+                                # stop confirmado.
+                                #
+                                # NÃO interrompe a gestão de posições abertas —
+                                # essa roda antes, sob o _pos_lock.
+                                # ══════════════════════════════════════════
+                                await self.integrity.assess(self.client, self)
+
+                                # ══════════════════════════════════════════
+                                # P0 — GATE viable_symbols=[] BLOQUEIA ORDENS
+                                #
+                                # Critério de aceite: viable_symbols=[] NUNCA
+                                # pode resultar em tentativa de abertura de
+                                # posição, independente do estado de
+                                # connected/active/integrity.
+                                #
+                                # _ensure_viable_symbols() faz o retry com
+                                # backoff (recarregando instrumentos e preços)
+                                # e retorna True assim que houver >=1 par
+                                # viável — sem exigir restart manual nem
+                                # depender de connected virar False.
+                                # ══════════════════════════════════════════
+                                _tem_pares = await self._ensure_viable_symbols()
+
+                                if not _tem_pares:
+                                    # Throttle SOMENTE do log (LOW). O gate acima
+                                    # já bloqueou o scan — nada aqui altera
+                                    # segurança, retry ou backoff.
+                                    #
+                                    # Emite imediatamente na primeira vez e sempre
+                                    # que o estado relevante mudar (nº da tentativa);
+                                    # mensagens idênticas ficam limitadas a 1x/60s.
+                                    _susp_key = f"viable_empty|{self._viable_retry_attempt}"
+                                    _now_log = time.time()
+                                    if (_susp_key != self._scan_susp_last_key or
+                                            _now_log - self._scan_susp_last_log_ts >= 60.0):
+                                        self._scan_susp_last_key = _susp_key
+                                        self._scan_susp_last_log_ts = _now_log
+                                        log.warning(
+                                            f"🚫 SCAN_SUSPENSO: viable_symbols=[] — "
+                                            f"nenhuma ordem será aberta até a "
+                                            f"recuperação automática "
+                                            f"(tentativa #{self._viable_retry_attempt})"
+                                        )
+                                elif not self.integrity.can_open_new():
+                                    log.warning(
+                                        f"🚫 ENTRADAS BLOQUEADAS: "
+                                        f"{self.integrity.block_reason()}"
+                                    )
+                                else:
+                                    await self._scan_all_and_enter()
+                            else:
+                                # Sem este else, um can_open()=False fazia o ciclo
+                                # passar direto sem nenhum registro — parecia que o
+                                # bot tinha parado de analisar.
+                                _n = len(self.positions)
+                                log.info(
+                                    f"⏸️ Scan pulado: posições={_n}/{cfg.MAX_POSITIONS} "
+                                    f"drawdown={self.risk.drawdown:.1%}/"
+                                    f"{cfg.MAX_DRAWDOWN:.0%} "
+                                    f"ready={self.risk._ready} "
+                                    f"stop_diário={self.daily_stopped} "
+                                    f"controlled_bridge={_controlled_prescan_reason}"
+                                )
 
                     await asyncio.sleep(5)
 
