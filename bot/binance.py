@@ -323,6 +323,11 @@ class BinanceClient:
         # an ALGO_UPDATE is not itself a normal exchange order transition.
         self._algo_order_cache: dict[str, dict] = {}
         self._algo_actual_order_client: dict[str, str] = {}
+        # ORDER_TRADE_UPDATE for a triggered Algo child can arrive before the
+        # ALGO_UPDATE that exposes actualOrderId. Keep such identity-conflicting
+        # evidence quarantined and correlation-only; it must never manufacture
+        # or mutate a normal ManagedOrder.
+        self._algo_unlinked_actual_events: dict[str, dict] = {}
         self._leverage_bracket_cache: dict[str, tuple[float, dict]] = {}
         self.entries_paused = False
 
@@ -2308,6 +2313,93 @@ class BinanceClient:
                 type(exc).__name__, self._private_ws_errors, str(reconcile).lower(),
             )
 
+    def _quarantine_unlinked_algo_actual_order(
+        self, message: dict, *, reason: str
+    ) -> bool:
+        payload = message.get("o", {}) if isinstance(message, dict) else {}
+        if not isinstance(payload, dict):
+            return False
+        order_id = str(payload.get("i", "") or "")
+        if not order_id:
+            return False
+
+        current = self._algo_unlinked_actual_events.get(order_id)
+        current_status = str(
+            ((current or {}).get("o", {}) or {}).get("X", "")
+        ).upper()
+        incoming_status = str(payload.get("X", "") or "").upper()
+        rank = {
+            "NEW": 1,
+            "PARTIALLY_FILLED": 2,
+            "CANCELED": 3,
+            "EXPIRED": 3,
+            "REJECTED": 3,
+            "FILLED": 4,
+        }
+        if rank.get(incoming_status, 0) >= rank.get(current_status, 0):
+            self._algo_unlinked_actual_events[order_id] = dict(message)
+
+        while len(self._algo_unlinked_actual_events) > 128:
+            oldest = next(iter(self._algo_unlinked_actual_events))
+            self._algo_unlinked_actual_events.pop(oldest, None)
+
+        log.warning(
+            "[BINANCE_ALGO_ACTUAL_ORDER_WS_RACE] symbol=%s status=%s "
+            "actual_order_id=%s result=QUARANTINED reason=%s "
+            "managed_order_mutation=false authority=REST_ALGO_HISTORY "
+            "execution_effect=NONE",
+            to_standard(payload.get("s")) or "UNKNOWN",
+            incoming_status or "UNKNOWN",
+            order_id,
+            reason,
+        )
+        return True
+
+    def _consume_quarantined_algo_actual_order(
+        self, actual_order_id: str, client_algo_id: str
+    ) -> bool:
+        actual_order_id = str(actual_order_id or "")
+        client_algo_id = str(client_algo_id or "")
+        if not actual_order_id or not client_algo_id:
+            return False
+        pending = self._algo_unlinked_actual_events.pop(
+            actual_order_id, None
+        )
+        if not isinstance(pending, dict):
+            return False
+        payload = pending.get("o", {})
+        if not isinstance(payload, dict):
+            return False
+        cached = self._algo_order_cache.get(client_algo_id)
+        if not isinstance(cached, dict):
+            return False
+
+        updated = dict(cached)
+        updated["actualOrderStatus"] = str(
+            payload.get("X", "") or ""
+        ).upper()
+        updated["actualExecutedQty"] = str(
+            payload.get("z", "") or ""
+        )
+        updated["actualAvgPrice"] = str(
+            payload.get("ap", "") or ""
+        )
+        updated["actualEventTime"] = int(
+            pending.get("E", 0) or 0
+        )
+        self._algo_order_cache[client_algo_id] = updated
+        log.info(
+            "[BINANCE_ALGO_ACTUAL_ORDER_WS_RACE] symbol=%s status=%s "
+            "actual_order_id=%s client_algo_id=%s result=CORRELATED "
+            "managed_order_mutation=false authority=REST_ALGO_HISTORY "
+            "execution_effect=NONE",
+            to_standard(payload.get("s")) or "UNKNOWN",
+            updated.get("actualOrderStatus") or "UNKNOWN",
+            actual_order_id,
+            client_algo_id,
+        )
+        return True
+
     async def _handle_private_order_event(
         self, message: dict
     ):
@@ -2390,6 +2482,73 @@ class BinanceClient:
             or not client_oid.startswith("bgx7-")
         ):
             return
+
+        # A triggered protective Algo child can reuse/echo a BGX clientOid
+        # before ALGO_UPDATE publishes actualOrderId. Never let conflicting
+        # child evidence touch the normal ManagedOrder registry. Quarantine it
+        # by actual orderId and let the later ALGO_UPDATE correlate it.
+        existing = registry.get(client_oid)
+        incoming_side = str(order.get("S", "") or "").strip().lower()
+        normalized_side = {
+            "buy": "Buy",
+            "long": "Buy",
+            "sell": "Sell",
+            "short": "Sell",
+        }.get(incoming_side, "")
+        existing_side = str(
+            getattr(existing, "side", "") or ""
+        )
+        existing_order_id = str(
+            getattr(existing, "order_id", "") or ""
+        )
+        identity_conflict = bool(
+            existing
+            and (
+                (normalized_side and normalized_side != existing_side)
+                or (
+                    order_id
+                    and existing_order_id
+                    and order_id != existing_order_id
+                )
+            )
+        )
+        known_algo_client = bool(
+            client_oid in self._algo_lineage
+            or client_oid in self._algo_order_cache
+        )
+        triggering_candidates = [
+            row
+            for row in self._algo_order_cache.values()
+            if isinstance(row, dict)
+            and row.get("symbol") == symbol
+            and str(row.get("side", "") or "").upper()
+            == str(order.get("S", "") or "").upper()
+            and not str(row.get("actualOrderId", "") or "")
+            and str(row.get("algoStatus", "") or "").upper()
+            in {"TRIGGERING", "TRIGGERED"}
+        ]
+        if (
+            order_id
+            and (
+                identity_conflict
+                or known_algo_client
+                or len(triggering_candidates) == 1
+            )
+        ):
+            reason = (
+                "managed_identity_conflict"
+                if identity_conflict
+                else (
+                    "known_algo_client"
+                    if known_algo_client
+                    else "single_triggering_algo_candidate"
+                )
+            )
+            if self._quarantine_unlinked_algo_actual_order(
+                message, reason=reason
+            ):
+                return
+
         try:
             managed, _ = registry.get_or_create(
                 client_oid,
@@ -2604,6 +2763,9 @@ class BinanceClient:
             self._algo_actual_order_client[
                 actual_order_id
             ] = client_algo_id
+            self._consume_quarantined_algo_actual_order(
+                actual_order_id, client_algo_id
+            )
 
         # Keep the correlation cache bounded for a 24/7 process.
         while len(self._algo_order_cache) > 512:
