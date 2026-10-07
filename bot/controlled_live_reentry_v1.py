@@ -102,13 +102,19 @@ def policy_from_env() -> ReentryPolicy:
     return ReentryPolicy(True, episode, True, budget, max_risk, "configured")
 
 
-def _pending_orders(engine) -> int:
+def _pending_orders(engine, *, exclude_client_oid: str = "") -> int:
     orders = getattr(engine, "orders", None)
     reader = getattr(orders, "pending_orders", None)
     if not callable(reader):
         return 0
     try:
-        return len(list(reader() or []))
+        pending = list(reader() or [])
+        if exclude_client_oid:
+            pending = [
+                order for order in pending
+                if str(getattr(order, "client_oid", "") or "") != str(exclude_client_oid)
+            ]
+        return len(pending)
     except Exception:
         return 1
 
@@ -202,7 +208,7 @@ def candidate_risk_pct(engine, equity: float) -> float:
     return effective
 
 
-def readiness(engine) -> tuple[bool, str, dict]:
+def readiness(engine, *, exclude_client_oid: str = "") -> tuple[bool, str, dict]:
     """Validate only the segregated one-shot re-entry contract.
 
     Existing ownership, market data, private stream, protection, durable state,
@@ -242,7 +248,7 @@ def readiness(engine) -> tuple[bool, str, dict]:
         return False, "overlapping_recovery_authority_forbidden", evidence
     if len(getattr(engine, "positions", {}) or {}) != 0:
         return False, "account_not_flat", evidence
-    if _pending_orders(engine) != 0:
+    if _pending_orders(engine, exclude_client_oid=exclude_client_oid) != 0:
         return False, "pending_orders", evidence
     if not bool(getattr(engine, "_pilot_live_prelive_ready", False)):
         return False, "preflight_not_ready", evidence
@@ -383,7 +389,7 @@ async def consume_dispatch_once(engine, *, symbol: str, client_oid: str) -> tupl
     second real-money attempt. A new attempt requires a new episode id and
     explicit arm token.
     """
-    ok, reason, _ = readiness(engine)
+    ok, reason, _ = readiness(engine, exclude_client_oid=client_oid)
     if not ok:
         return False, reason
     policy = policy_from_env()
