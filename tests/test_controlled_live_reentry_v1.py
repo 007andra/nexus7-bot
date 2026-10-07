@@ -7,8 +7,11 @@ from bot import controlled_live_reentry_v1 as controlled
 
 
 class _Orders:
+    def __init__(self, pending=None):
+        self._pending = list(pending or [])
+
     def pending_orders(self):
-        return []
+        return list(self._pending)
 
 
 def _engine(equity=5.39561426, available=5.39561426, drawdown=0.76333669401):
@@ -136,6 +139,35 @@ class ControlledLiveReentryPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(pct, 0.10 / 5.39561426)
         self.assertFalse(ok)
         self.assertEqual(reason, "preflight_not_ready")
+
+    def test_transport_readiness_excludes_only_current_intent(self):
+        engine = _engine()
+        current = SimpleNamespace(client_oid="bgx7-current")
+        engine.orders = _Orders([current])
+        patches = self._authority_patches()
+        with patch.dict(os.environ, _env(), clear=True), \
+             patches[0], patches[1], patches[2], patches[3], patches[4]:
+            default_ok, default_reason, _ = controlled.readiness(engine)
+            boundary_ok, boundary_reason, _ = controlled.readiness(
+                engine, exclude_client_oid="bgx7-current"
+            )
+        self.assertFalse(default_ok)
+        self.assertEqual(default_reason, "pending_orders")
+        self.assertTrue(boundary_ok, boundary_reason)
+
+    def test_transport_readiness_still_blocks_foreign_pending_intent(self):
+        engine = _engine()
+        current = SimpleNamespace(client_oid="bgx7-current")
+        foreign = SimpleNamespace(client_oid="bgx7-other")
+        engine.orders = _Orders([current, foreign])
+        patches = self._authority_patches()
+        with patch.dict(os.environ, _env(), clear=True), \
+             patches[0], patches[1], patches[2], patches[3], patches[4]:
+            ok, reason, _ = controlled.readiness(
+                engine, exclude_client_oid="bgx7-current"
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pending_orders")
 
     def test_absolute_projected_loss_ceiling_is_fail_closed(self):
         engine = _engine()
@@ -267,6 +299,7 @@ class ControlledLiveReentryPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 return "OK"
 
         engine = _engine()
+        engine.orders = _Orders([SimpleNamespace(client_oid="bgx7-test")])
         conn = Conn()
         from bot import database as db
 
@@ -281,7 +314,7 @@ class ControlledLiveReentryPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 engine, symbol="ADAUSDT", client_oid="bgx7-test"
             )
             second = await controlled.consume_dispatch_once(
-                engine, symbol="ADAUSDT", client_oid="bgx7-test-2"
+                engine, symbol="ADAUSDT", client_oid="bgx7-test"
             )
 
         self.assertEqual(first, (True, "dispatch_authorization_consumed"))
