@@ -119,14 +119,14 @@ def test_build_matrix_uses_unarmed_controlled_envelope_observability_only():
          patch.object(matrix.cfg, "MAX_MARGIN_PCT", 1.0), \
          patch.object(matrix.execution_cost, "fallback_taker_fee", return_value=0.0005):
         rows = matrix.build_matrix(engine, {"XUSDT": 1.0})
+        policy = controlled.policy_from_env()
+        ok, reason, _ = controlled.readiness(engine)
 
-    assert len(rows) == 1
-    assert rows[0]["risk_source"] == "CONTROLLED_REENTRY_ENVELOPE"
-    assert abs(float(rows[0]["risk_budget"]) - 0.10) < 1e-12
-    policy = controlled.policy_from_env()
-    ok, reason, _ = controlled.readiness(engine)
-    assert policy.envelope_configured is True
-    assert policy.configured is False
-    assert policy.armed is False
-    assert ok is False
-    assert reason == "manual_arm_missing"
+        assert len(rows) == 1
+        assert rows[0]["risk_source"] == "CONTROLLED_REENTRY_ENVELOPE"
+        assert abs(float(rows[0]["risk_budget"]) - 0.10) < 1e-12
+        assert policy.envelope_configured is True
+        assert policy.configured is False
+        assert policy.armed is False
+        assert ok is False
+        assert reason == "manual_arm_missing"
