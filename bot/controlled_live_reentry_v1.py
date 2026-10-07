@@ -281,6 +281,48 @@ def drawdown_bridge_allowed(engine) -> tuple[bool, str]:
     )
 
 
+def pre_scan_drawdown_bridge_allowed(engine, *, normal_can_open: bool) -> tuple[bool, str]:
+    """Allow the canonical scanner past RiskManagerV3 only for drawdown.
+
+    This is intentionally narrower than readiness(): it first proves that the
+    normal risk gate failed *only* because the historical drawdown is above
+    MAX_DRAWDOWN. Every other can_open() prerequisite must still be true.
+    The full one-shot readiness contract is then rechecked before traversal.
+    """
+    if normal_can_open:
+        return True, "normal_risk_gate_pass"
+
+    try:
+        from bot.config import cfg
+        risk = getattr(engine, "risk", None)
+        if risk is None:
+            return False, "risk_unavailable"
+
+        confirmed = bool(getattr(risk, "confirmed", False))
+        equity = float(getattr(risk, "equity", 0.0))
+        available = float(getattr(risk, "available_collateral", 0.0))
+        drawdown = float(getattr(risk, "drawdown", 0.0))
+        open_positions = len(getattr(engine, "positions", {}) or {})
+    except (AttributeError, TypeError, ValueError):
+        return False, "risk_state_unreadable"
+
+    if not confirmed:
+        return False, "capital_unconfirmed"
+    if (
+        not math.isfinite(equity)
+        or not math.isfinite(available)
+        or equity <= 0
+        or available <= 0
+    ):
+        return False, "capital_invalid"
+    if open_positions >= int(cfg.MAX_POSITIONS):
+        return False, "position_cap"
+    if not math.isfinite(drawdown) or drawdown < float(cfg.MAX_DRAWDOWN):
+        return False, "normal_risk_gate_failed_non_drawdown"
+
+    return drawdown_bridge_allowed(engine)
+
+
 def projected_loss_allowed(engine, projected_loss: float) -> tuple[bool, str, dict]:
     ok, reason, evidence = readiness(engine)
     if not ok:
@@ -408,6 +450,7 @@ __all__ = [
     "candidate_risk_pct",
     "effective_risk_pct",
     "drawdown_bridge_allowed",
+    "pre_scan_drawdown_bridge_allowed",
     "projected_loss_allowed",
     "consume_dispatch_once",
     "startup_log",
