@@ -298,23 +298,37 @@ def pre_scan_drawdown_bridge_allowed(engine, *, normal_can_open: bool) -> tuple[
         if risk is None:
             return False, "risk_unavailable"
 
-        confirmed = bool(getattr(risk, "confirmed", False))
-        equity = float(getattr(risk, "equity", 0.0))
-        available = float(getattr(risk, "available_collateral", 0.0))
         drawdown = float(getattr(risk, "drawdown", 0.0))
         open_positions = len(getattr(engine, "positions", {}) or {})
+
+        if hasattr(risk, "confirmed") and hasattr(risk, "equity"):
+            gate_ready = bool(getattr(risk, "confirmed"))
+            gate_equity = float(getattr(risk, "equity"))
+            gate_available = float(getattr(risk, "available_collateral", 0.0))
+            gate_capital_valid = (
+                gate_ready
+                and math.isfinite(gate_equity)
+                and math.isfinite(gate_available)
+                and gate_equity > 0
+                and gate_available > 0
+            )
+        else:
+            gate_ready = bool(getattr(risk, "_ready", False))
+            gate_confirmed = bool(getattr(risk, "balance_confirmed", False))
+            gate_equity = float(getattr(risk, "balance", 0.0))
+            gate_capital_valid = (
+                gate_ready
+                and gate_confirmed
+                and math.isfinite(gate_equity)
+                and gate_equity > 0
+            )
     except (AttributeError, TypeError, ValueError):
         return False, "risk_state_unreadable"
 
-    if not confirmed:
+    if not gate_ready:
+        return False, "risk_not_ready"
+    if not gate_capital_valid:
         return False, "capital_unconfirmed"
-    if (
-        not math.isfinite(equity)
-        or not math.isfinite(available)
-        or equity <= 0
-        or available <= 0
-    ):
-        return False, "capital_invalid"
     if open_positions >= int(cfg.MAX_POSITIONS):
         return False, "position_cap"
     if not math.isfinite(drawdown) or drawdown < float(cfg.MAX_DRAWDOWN):

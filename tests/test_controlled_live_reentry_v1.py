@@ -161,6 +161,48 @@ class ControlledLiveReentryPolicyTests(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertIn("episode=FINAL_LIVE_PILOT_TEST_V1", reason)
 
+    def test_prescan_bridge_accepts_legacy_engine_risk_when_drawdown_is_only_failure(self):
+        engine = _engine()
+        snapshot = engine.risk.professional_snapshot
+        engine.risk = SimpleNamespace(
+            professional_snapshot=snapshot,
+            balance=5.39561426,
+            balance_confirmed=True,
+            _ready=True,
+            drawdown=0.76333669401,
+        )
+        patches = self._authority_patches()
+        with patch.dict(os.environ, _env(), clear=True), \
+             patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("bot.config.cfg.MAX_DRAWDOWN", 0.17), \
+             patch("bot.config.cfg.MAX_POSITIONS", 1):
+            ok, reason = controlled.pre_scan_drawdown_bridge_allowed(
+                engine, normal_can_open=False
+            )
+        self.assertTrue(ok, reason)
+        self.assertIn("episode=FINAL_LIVE_PILOT_TEST_V1", reason)
+
+    def test_prescan_bridge_rejects_unready_legacy_risk(self):
+        engine = _engine()
+        snapshot = engine.risk.professional_snapshot
+        engine.risk = SimpleNamespace(
+            professional_snapshot=snapshot,
+            balance=5.39561426,
+            balance_confirmed=True,
+            _ready=False,
+            drawdown=0.76333669401,
+        )
+        patches = self._authority_patches()
+        with patch.dict(os.environ, _env(), clear=True), \
+             patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("bot.config.cfg.MAX_DRAWDOWN", 0.17), \
+             patch("bot.config.cfg.MAX_POSITIONS", 1):
+            ok, reason = controlled.pre_scan_drawdown_bridge_allowed(
+                engine, normal_can_open=False
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "risk_not_ready")
+
     def test_prescan_bridge_rejects_unarmed_episode(self):
         engine = _engine()
         patches = self._authority_patches()
