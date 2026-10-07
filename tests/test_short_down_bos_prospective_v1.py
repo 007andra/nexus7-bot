@@ -102,7 +102,10 @@ class ShortDownBosProspectiveTests(unittest.IsolatedAsyncioTestCase):
         rows = []
         out60, out240 = {}, {}
         for i in range(12):
-            symbol = "UNIUSDT" if i < 5 else ("AVAXUSDT" if i < 10 else "FILUSDT")
+            symbol = (
+                "UNIUSDT" if i < 5
+                else ("AVAXUSDT" if i < 8 else "FILUSDT")
+            )
             cid = f"C{i:02d}"
             rows.append(candidate(cid, 101.0 + i, symbol=symbol))
             out60[cid] = outcome(60, 0.01 + i * 0.0001)
@@ -136,7 +139,10 @@ class ShortDownBosProspectiveTests(unittest.IsolatedAsyncioTestCase):
         rows = []
         out60, out240 = {}, {}
         for i in range(10):
-            symbol = "UNIUSDT" if i < 5 else "AVAXUSDT"
+            symbol = (
+                "UNIUSDT" if i < 5
+                else ("AVAXUSDT" if i < 8 else "FILUSDT")
+            )
             cid = f"L{i}"
             rows.append(candidate(cid, 105.0 + i, symbol=symbol))
             if symbol == "UNIUSDT":
