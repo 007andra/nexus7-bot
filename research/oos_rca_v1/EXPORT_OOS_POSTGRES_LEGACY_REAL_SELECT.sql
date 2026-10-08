@@ -54,6 +54,10 @@ SELECT validated.cohort_id,
   'REAL_COARSE' AS export_scope,
   validated.cf ->> 'status' AS counterfactual_status,
   validated.cf ->> 'execution_allowed' AS execution_allowed_source,
+  (SELECT COUNT(*) FROM hard_gate_shadow_candidates_v1 AS bad
+   WHERE bad.population='HARD_GATE_SHADOW'
+     AND NOT pg_input_is_valid(bad.payload,'jsonb'))
+    AS malformed_candidate_payloads_in_population,
   validated.symbol, validated.signal ->> 'side' AS side,
   validated.signal ->> 'regime' AS regime,
   validated.signal ->> 'setup' AS setup,
