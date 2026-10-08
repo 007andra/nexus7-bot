@@ -62,9 +62,17 @@ class V4PreregTests(unittest.TestCase):
         result = v4.evaluate([cf, missing, fake, live, forged, side_corrupted],
                              now_epoch=v4.CUTOFF_EPOCH + 30000)
         self.assertEqual(result["eligible_approved"], 0)
-        self.assertEqual(result["invalid_future_records"], 6)
+        self.assertEqual(result["invalid_future_records"], 5)
+        self.assertEqual(result["noncanonical_future_excluded"], 1)
         self.assertEqual(result["status"], "AUDIT_FAIL_CLOSED")
         self.assertIn("PROVENANCE_INTEGRITY", result["blockers"])
+
+    def test_normal_shadows_before_nexus_are_not_corrupt(self):
+        rows = [{**candidate(1), "nexus_called": False}] * 20
+        result = v4.evaluate(rows, now_epoch=v4.CUTOFF_EPOCH + 20000)
+        self.assertEqual(result["noncanonical_future_excluded"], 20)
+        self.assertEqual(result["invalid_future_records"], 0)
+        self.assertEqual(result["status"], "COLLECTING_FUTURE_APPROVALS")
 
     def test_challenger_rejects_only_one_exact_intersection(self):
         excluded = candidate(1)
