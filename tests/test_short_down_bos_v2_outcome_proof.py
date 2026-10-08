@@ -34,14 +34,23 @@ class ReadOnlyDb:
         self.outcomes = outcomes or {}
         self.queries = []
 
-    async def _fetchall(self, sql, params):
-        self.queries.append((sql, params))
+    async def _fetchall(self, sql, params, *, strict=False):
+        self.queries.append((sql, params, strict))
         assert sql.startswith("SELECT "), sql
+        assert strict is True, "research provenance must never hide DB read failures"
         if "hard_gate_shadow_candidates_v1" in sql:
             return [{"payload": json.dumps(row)} for row in self.candidates]
         if "hard_gate_shadow_outcomes_v1" in sql:
-            return [{"horizon": horizon, "payload": json.dumps(value)}
-                    for horizon, value in self.outcomes.get(params[0], {}).items()]
+            assert "candidate_id IN (" in sql
+            assert len(params) == 3 + len(set(params[3:]))
+            ids = set(params[3:])
+            return [
+                {"candidate_id": candidate_id, "horizon": horizon,
+                 "payload": json.dumps(value)}
+                for candidate_id, by_horizon in self.outcomes.items()
+                if candidate_id in ids
+                for horizon, value in by_horizon.items()
+            ]
         raise AssertionError(sql)
 
 
@@ -63,7 +72,7 @@ class ProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["members"][0]["240"]["outcome"], "OUTCOME_NOT_PROVEN")
         self.assertFalse(row["live_allowed"])
         self.assertEqual(row["execution_effect"], "NONE")
-        self.assertTrue(all(sql.startswith("SELECT ") for sql, _ in db.queries))
+        self.assertTrue(all(sql.startswith("SELECT ") for sql, _, _ in db.queries))
 
     async def test_missing_and_cache_gap_are_not_observed(self):
         sol = candidate("SOLUSDT", 100)
@@ -90,7 +99,9 @@ class ProvenanceTests(unittest.IsolatedAsyncioTestCase):
         rows = [candidate(symbol, idx + 100)
                 for idx, symbol in enumerate(s for s in symbols for _ in range(3))]
         obs = {row["candidate_id"]: {60: outcome(60), 240: outcome(240)} for row in rows}
-        report = await proof.snapshot(ReadOnlyDb(rows, obs))
+        db = ReadOnlyDb(rows, obs)
+        report = await proof.snapshot(db)
+        self.assertEqual(len(db.queries), 2)  # one candidates + one outcomes
         self.assertEqual(report["status"], "READY_FOR_MANUAL_REVIEW")
         self.assertEqual(report["observed_60m"], 12)
         self.assertEqual(report["observed_240m"], 12)
