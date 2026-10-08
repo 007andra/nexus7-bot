@@ -1303,12 +1303,24 @@ async def _maybe_emit_prospective_oos_cohort(db):
     ):
         return None
     _PROSPECTIVE_OOS_LAST_EMIT = now
+    from bot.prospective_oos_snapshot_timing_v1 import (
+        SnapshotTimingProbe, active_probe,
+    )
+    _timing = SnapshotTimingProbe()
+    _token = active_probe.set(_timing)
+    _timing_status = "CANCELLED"
     try:
-        report = await asyncio.wait_for(oos.snapshot(db), timeout=3.0)
+        report = await asyncio.wait_for(
+            oos.snapshot(db, timing_probe=_timing), timeout=3.0
+        )
+        _timing_status = "OK"
         log.warning("%s", oos.format_summary(report))
         log.info("%s", oos.format_concentration(report))
         return report
     except Exception as exc:
+        _timing_status = (
+            "TIMEOUT" if isinstance(exc, asyncio.TimeoutError) else "ERROR"
+        )
         _emit("PROSPECTIVE_OOS_COHORT_V1", {
             "status": "ERROR",
             "error": type(exc).__name__,
@@ -1323,6 +1335,9 @@ async def _maybe_emit_prospective_oos_cohort(db):
             "execution_effect": "NONE",
         })
         return None
+    finally:
+        active_probe.reset(_token)
+        log.info("%s", _timing.log_line(status=_timing_status, timeout_s=3.0))
 
 
 async def _maybe_emit_short_down_bos_prospective(db):
