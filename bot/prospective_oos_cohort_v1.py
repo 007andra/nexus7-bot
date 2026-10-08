@@ -274,15 +274,26 @@ def build_report(payloads, outcomes60=(), outcomes240=(), *, baseline):
     }
 
 
-async def snapshot(db):
-    baseline = await ensure_cohort(db)
+async def snapshot(db, *, timing_probe=None):
+    # Optional per-stage metrics only; no change to SQL, cohort membership or
+    # trading authority. Normal callers retain the exact previous behavior.
+    _meta_work = ensure_cohort(db)
+    baseline = (
+        await timing_probe.await_stage("metadata", _meta_work)
+        if timing_probe is not None else await _meta_work
+    )
     started = float(baseline["started_epoch"])
 
-    rows = await db._fetchall(
+    _candidate_work = db._fetchall(
         "SELECT payload FROM hard_gate_shadow_candidates_v1 "
         "WHERE population=? AND captured_epoch>=? ORDER BY captured_epoch",
         (POPULATION, started),
     )
+    rows = (
+        await timing_probe.await_stage("candidates", _candidate_work)
+        if timing_probe is not None else await _candidate_work
+    )
+    _parse_started = timing_probe.clock() if timing_probe is not None else None
     payloads = []
     for item in rows or []:
         raw = item["payload"] if hasattr(item, "keys") else item[0]
@@ -290,14 +301,23 @@ async def snapshot(db):
             payloads.append(json.loads(raw))
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
+    if timing_probe is not None:
+        timing_probe.stage_ms["compute"] += (
+            timing_probe.clock() - _parse_started
+        ) * 1000
 
-    out_rows = await db._fetchall(
+    _outcome_work = db._fetchall(
         "SELECT o.candidate_id,o.horizon,o.payload "
         "FROM hard_gate_shadow_outcomes_v1 o "
         "JOIN hard_gate_shadow_candidates_v1 c ON c.candidate_id=o.candidate_id "
         "WHERE c.population=? AND c.captured_epoch>=? AND o.horizon IN (?,?)",
         (POPULATION, started, 60, 240),
     )
+    out_rows = (
+        await timing_probe.await_stage("outcomes", _outcome_work)
+        if timing_probe is not None else await _outcome_work
+    )
+    _parse_started = timing_probe.clock() if timing_probe is not None else None
     out60, out240 = [], []
     for item in out_rows or []:
         raw = item["payload"] if hasattr(item, "keys") else item[2]
@@ -309,7 +329,13 @@ async def snapshot(db):
             (out60 if horizon == 60 else out240).append(obj)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-
+    if timing_probe is not None:
+        timing_probe.stage_ms["compute"] += (
+            timing_probe.clock() - _parse_started
+        ) * 1000
+        return timing_probe.compute(
+            lambda: build_report(payloads, out60, out240, baseline=baseline)
+        )
     return build_report(payloads, out60, out240, baseline=baseline)
 
 

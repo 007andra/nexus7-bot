@@ -1,0 +1,71 @@
+# #596 — Prospective OOS snapshot latency attribution (research only)
+
+## Problem
+
+Production's `_maybe_emit_prospective_oos_cohort` wraps
+`oos.snapshot(db)` in a fixed **3.0-second** `asyncio.wait_for`.
+A timeout may occur before the read-only research snapshot finishes. The
+existing `_fetchall` shares a DB I/O lock with unrelated consumers. Until
+latency is measured, the cause cannot be attributed to DB network round trip,
+lock contention, JSON parsing, or metadata setup. Timed-out research remains
+non-authoritative.
+
+## What the instrumentation does
+
+- Scope: **only** `PROSPECTIVE_OOS_COHORT_V1` during its report snapshot.
+  Other database readers/writers see a default `ContextVar=None`.
+- Emits one `[PROSPECTIVE_OOS_SNAPSHOT_LATENCY_V1]` record per attempted
+  research snapshot, including successful, timed-out and errored attempts.
+- Records `elapsed_ms` (wall-clock), `metadata_ms`, `candidates_ms`,
+  `outcomes_ms`, `compute_ms`, exact wait duration at the shared DB I/O
+  lock (including metadata DDL), time within DB fetch or metadata execute
+  after acquiring the lock, total fetch/execute calls, rows returned,
+  cancellations and whether the shared lock was never acquired.
+- The metadata stage also invokes `_exec` for DDL/insert. `db_exec_ms`,
+  `exec_calls` and `exec_cancelled` cover those calls separately from SELECTs.
+  Client-call times include network and server response, not server-only query time.
+- `stage` means the last/cancelled logical stage, not causal proof.
+  The `metadata` stage can contain schema/metadata initialization. Only
+  measured `db_fetch_ms` covers actual `_fetchall` query scope (client
+  fetch including network/deserialization); it does **not** isolate server
+  execution time from transport and should never be labeled query planner time.
+- Never emits SQL text, row contents, symbol, candidate ID, balance,
+  credentials, connection string or private account data.
+
+## Fixed authority boundaries
+
+- `asyncio.wait_for(..., timeout=3.0)` remains unchanged.
+- The 3-second deadline uses cooperative cancellation. Synchronous JSON parsing
+  and `build_report` cannot be interrupted by `wait_for` while occupying the
+  event loop. `compute_ms` exposes this cost after control returns; a nominal
+  3-second deadline is not a hard CPU preemption guarantee.
+- No changes to SQL, payload filters, transaction modes, connection settings,
+  account state, scanner policy, signal selection, strategy, leverage, HWM,
+  drawdown, stop, trade dispatch, Binance endpoints or LIVE gating.
+- The existing error telemetry `[PROSPECTIVE_OOS_COHORT_V1] status=ERROR`
+  still fires on timeout, with `promotion_allowed=false` and
+  `live_allowed=false`. A timed-out research snapshot still returns `None`.
+- This implementation does **not** cure timeouts. It makes each stage
+  measurable so root cause can be established from repeat observations.
+
+## Evidence process after a separately reviewed release
+
+Observe a meaningful series of attempts, including successful cycles and
+any timeout, and analyze empirical distributions. Stratify by stage and
+compare `lock_wait_ms` to `db_fetch_ms` and `compute_ms` before proposing
+an index, narrower SELECT, connection placement or any timeout adjustment.
+Investigate the active I/O lock and DB fetch separately. Avoid making
+claims of cause from a single candle-time coincidence.
+
+## Test coverage
+
+`python -m unittest -v tests.test_oos_snapshot_timing_596` verifies
+redacted fields, no-op default `ContextVar`, lock-held vs DB-fetch
+timeouts, metadata DDL lock/client timeouts, cancellation, exact
+3.0-second `wait_for` budget, error isolation, and unchanged report/SQL
+requests in a direct synthetic empty-cohort snapshot comparison.
+These regression tests use fake DB calls: they do not prove PostgreSQL
+production latency or economic profitability. Source remains on an
+independent PR/branch for #596, not mixed with OOS dataset/export PR #595.
+
+No production Railway credential is required for these tests.
