@@ -35,6 +35,10 @@ non-authoritative.
 ## Fixed authority boundaries
 
 - `asyncio.wait_for(..., timeout=3.0)` remains unchanged.
+- The 3-second deadline uses cooperative cancellation. Synchronous JSON parsing
+  and `build_report` cannot be interrupted by `wait_for` while occupying the
+  event loop. `compute_ms` exposes this cost after control returns; a nominal
+  3-second deadline is not a hard CPU preemption guarantee.
 - No changes to SQL, payload filters, transaction modes, connection settings,
   account state, scanner policy, signal selection, strategy, leverage, HWM,
   drawdown, stop, trade dispatch, Binance endpoints or LIVE gating.
@@ -57,8 +61,11 @@ claims of cause from a single candle-time coincidence.
 
 `python -m unittest -v tests.test_oos_snapshot_timing_596` verifies
 redacted fields, no-op default `ContextVar`, lock-held vs DB-fetch
-timeouts, metadata DDL lock/client timeouts, cancellation, unchanged
-3.0-second budget, error isolation and same report return on success. Source is kept on independent PR/branch for
-#596, not mixed with OOS dataset/export PR #595.
+timeouts, metadata DDL lock/client timeouts, cancellation, exact
+3.0-second `wait_for` budget, error isolation, and unchanged report/SQL
+requests in a direct synthetic empty-cohort snapshot comparison.
+These regression tests use fake DB calls: they do not prove PostgreSQL
+production latency or economic profitability. Source remains on an
+independent PR/branch for #596, not mixed with OOS dataset/export PR #595.
 
 No production Railway credential is required for these tests.
