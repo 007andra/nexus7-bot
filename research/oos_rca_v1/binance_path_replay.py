@@ -150,13 +150,30 @@ def evaluate(candidate, *, as_of_epoch):
             baseline["status"] = "NOT_MATURED"
             result.append(baseline)
             continue
-        if any(ts not in mapping for ts in expected):
+        # A proven static exit makes later candles irrelevant. Missing data
+        # *before* that exit remains UNKNOWN_CANDLE_GAP, with no backfill.
+        observed_path = []
+        gap_before_exit = False
+        early_exit = False
+        for ts in expected:
+            bar = mapping.get(ts)
+            if bar is None:
+                gap_before_exit = True
+                break
+            observed_path.append(bar)
+            _, _, step_reason, _ = _simulate_path(
+                side, entry, stop, target, [bar])
+            if step_reason != "HORIZON_CLOSE":
+                early_exit = True
+                break
+        if gap_before_exit:
             baseline["status"] = "UNKNOWN_CANDLE_GAP"
             result.append(baseline)
             continue
-        path = [mapping[ts] for ts in expected]
+        if not early_exit and len(observed_path) != len(expected):
+            raise ValueError("CANDLE_COVERAGE_INVARIANT")
         exit_ts, exit_price, reason, ambiguous = _simulate_path(
-            side, entry, stop, target, path)
+            side, entry, stop, target, observed_path)
         baseline.update({
             "status": "MODELED_GROSS_ONLY" if costs is None else "MODELED_NET_EX_FUNDING",
             "exit_reason": reason, "exit_candle_epoch": exit_ts,
