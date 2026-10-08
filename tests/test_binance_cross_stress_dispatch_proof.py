@@ -382,7 +382,11 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
             controlled.MAX_RISK_PCT_ENV: "0.02",
         }
 
+        from tests.risk_epoch_fixtures import EPOCH_ENV, install_active_epoch, observe_keeps_active
+        controlled_env.update(EPOCH_ENV)
+        install_active_epoch(self.engine, start_equity=equity)
         with patch.dict(os.environ, controlled_env, clear=False), \
+             patch("bot.risk_epoch.observe", observe_keeps_active(self.engine, start_equity=equity)), \
              patch.object(pilot_module, "PILOT_MAX_CONCURRENT_POSITIONS", 1), \
              patch.object(pilot_module, "MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1), \
              patch.object(final_loss_budget, "diagnose", side_effect=capture_loss), \
@@ -542,7 +546,11 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
             controlled.MAX_RISK_PCT_ENV: "0.02",
         }
 
+        from tests.risk_epoch_fixtures import EPOCH_ENV, install_active_epoch, observe_keeps_active
+        controlled_env.update(EPOCH_ENV)
+        install_active_epoch(self.engine, start_equity=equity)
         with patch.dict(os.environ, controlled_env, clear=False), \
+             patch("bot.risk_epoch.observe", observe_keeps_active(self.engine, start_equity=equity)), \
              patch.object(pilot_module, "PILOT_MAX_CONCURRENT_POSITIONS", 1), \
              patch.object(pilot_module, "MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1), \
              patch.object(final_loss_budget, "diagnose", side_effect=capture_loss), \

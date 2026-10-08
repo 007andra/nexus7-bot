@@ -95,6 +95,14 @@ def execution_observability(engine) -> dict:
     elif drawdown_blocked:
         blockers.append("DRAWDOWN_HARD_GATE")
 
+    try:
+        from bot import risk_epoch
+        epoch_blocked, _ = risk_epoch.blocks_new_entries(risk_epoch.cached_state(engine))
+    except Exception:
+        epoch_blocked = True
+    if epoch_blocked:
+        blockers.append("RISK_EPOCH_GATE")
+
     if blockers:
         return {
             "effective_execution_mode": "LIVE_BLOCKED",
@@ -113,6 +121,28 @@ def execution_observability(engine) -> dict:
         "execution_blockers": (),
         "execution_effect": "REAL",
     }
+
+
+def risk_drawdown_observability(engine) -> dict:
+    """Historical vs. operational-epoch drawdown, each with its own name and limit.
+
+    ``historical_drawdown`` is the lifetime cash-flow-adjusted account drawdown
+    governed by MAX_DRAWDOWN. ``epoch_drawdown`` is measured from the risk
+    epoch baseline only and is never presented as the historical figure.
+    """
+    from bot import risk_epoch
+
+    _, drawdown, limit = _drawdown_blocked(engine)
+    out = {"historical_drawdown": drawdown, "historical_drawdown_limit": limit}
+    state = risk_epoch.cached_state(engine)
+    epoch = risk_epoch.telemetry(state)
+    epoch.pop("historical_drawdown", None)
+    epoch.pop("historical_drawdown_limit", None)
+    out.update(epoch)
+    blocked, reason = risk_epoch.blocks_new_entries(state)
+    out["epoch_blocks_new_entries"] = blocked
+    out["epoch_block_reason"] = reason
+    return out
 
 
 def enrich_status(engine, base_status):
@@ -136,6 +166,7 @@ def enrich_status(engine, base_status):
         out["mtf_shadow_metrics"] = ms.snapshot()
         out["nexus_dedupe_metrics"] = nexus_decision_dedupe.snapshot()
         out.update(execution_observability(engine))
+        out["risk_drawdown"] = risk_drawdown_observability(engine)
 
         if getattr(engine, "paper_trade", False):
             out["paper_wallet"] = {
