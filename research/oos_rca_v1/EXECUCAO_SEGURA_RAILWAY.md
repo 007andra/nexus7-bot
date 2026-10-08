@@ -23,12 +23,21 @@ railway link                     # choose BGX CAPITAL, production
 railway connect Postgres --environment production
 ~~~
 
-From the psql prompt run:
+From the psql prompt, run **both scopes separately**:
 
 ~~~text
 \i research/oos_rca_v1/EXPORT_OOS_POSTGRES_PSQL_COPY.sql
+\i research/oos_rca_v1/EXPORT_OOS_POSTGRES_LEGACY_REAL_COPY.sql
 \q
 ~~~
+
+**They are NOT interchangeable.** The first (`JSON_PRECISE`) uses precise
+payload timestamps and corresponds to `PROSPECTIVE_OOS_MATURATION_REVIEW_V1`.
+The second (`REAL_COARSE`) uses the legacy float32 indexed column predicate,
+corresponding to `PROSPECTIVE_OOS_COHORT_V1`. The second can include candidates
+slightly before the exact JSON cutoff because of `REAL` rounding, which is
+intentional fidelity to the existing production implementation, **not**
+retroactive enrollment approval. Do not merge these CSVs.
 
 The script opens a REPEATABLE READ READ ONLY transaction, reads the frozen cohort
 with SELECT, exports to the client computer with psql \copy ... TO, then ROLLBACK.
@@ -39,14 +48,18 @@ Then run from the repository root:
 ~~~sh
 python -m research.oos_rca_v1.verify_export \
   private_oos_evidence/nexus7_oos_coorte.csv \
-  --output private_oos_evidence/nexus7_oos_manifesto.json
+  --output private_oos_evidence/nexus7_oos_manifesto_json_precise.json
+
+python -m research.oos_rca_v1.verify_export \
+  private_oos_evidence/nexus7_oos_coorte_legacy_real.csv \
+  --output private_oos_evidence/nexus7_oos_manifesto_real_coarse.json
 
 python -m unittest -v tests.test_oos_postgres_csv_integrity
 ~~~
 
 Output CSV remains private in the operator workspace. Do NOT upload source rows,
 database credentials, account information or CSV to public GitHub issues/Actions.
-Use EXPORT_OOS_POSTGRES_READ_ONLY_SELECT.sql instead for a SQL editor/GUI that
+Use EXPORT_OOS_POSTGRES_READ_ONLY_SELECT.sql (precise) or\nEXPORT_OOS_POSTGRES_LEGACY_REAL_SELECT.sql (legacy) for a SQL editor/GUI that
 does not implement the psql \copy meta-command.
 
 ## Checks and limits
@@ -66,8 +79,27 @@ does not implement the psql \copy meta-command.
 ## GitHub paths on research/oos-rca-report-v1-20261008
 
 - research/oos_rca_v1/EXPORT_OOS_POSTGRES_PSQL_COPY.sql
+- research/oos_rca_v1/EXPORT_OOS_POSTGRES_LEGACY_REAL_SELECT.sql
+- research/oos_rca_v1/EXPORT_OOS_POSTGRES_LEGACY_REAL_COPY.sql
 - research/oos_rca_v1/EXPORT_OOS_POSTGRES_READ_ONLY_SELECT.sql
 - research/oos_rca_v1/verify_export.py
 - tests/test_oos_postgres_csv_integrity.py
 
 Railway CLI docs: https://docs.railway.com/cli/connect
+
+## Known mismatch and robustness controls (08 Oct 2026)
+
+- `execution_allowed` absent/null/false is a **rejection** for both official
+  snapshots; never label it indeterminate. Preserve the raw field for audit.
+- `REAL_COARSE` reproduces the old float32 SQL predicate; `JSON_PRECISE`
+  reproduces the more exact per-candidate review. The verifier refuses mixing.
+- `status=ERROR` counts in old enrolled candidate population, but old
+  `_matched` excludes those from observed outcome performance. The precise
+  maturity review does not apply that same legacy exclusion.
+- Candidate malformed JSON is safely skipped from the export, following
+  production candidate parse behavior; malformed outcome JSON is flagged
+  `MALFORMED_JSON`, never silently interpreted as a verified outcome.
+- An exported CSV snapshot captured at a different moment from Railway's
+  periodic log cannot be expected to reproduce exactly its numeric counts.
+- Do not perform changes to the production writers, frozen cutoff, risk gate,
+  live authority, account variables or deployment as part of this read-only audit.
