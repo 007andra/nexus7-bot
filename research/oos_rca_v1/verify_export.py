@@ -139,7 +139,11 @@ def validate(records):
             and observed_at + horizon * 60 <= now + 1e-6
             and observed_at + 1e-6 >= math.ceil(captured / 900) * 900
         )
-        if None in (gain, mfe, mae, observed_at) or not mature:
+        required_metrics = (
+            (gain, mfe, mae) if row_scope == "REAL_COARSE"
+            else (gain, mfe, mae, observed_at)
+        )
+        if None in required_metrics or not mature:
             invalid_observed += 1
             missing[(str(decision), horizon, "OBSERVED_INVALID_OR_NOT_MATURE")] += 1
             continue
