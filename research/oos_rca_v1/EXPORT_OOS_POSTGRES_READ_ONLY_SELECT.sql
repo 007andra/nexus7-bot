@@ -17,7 +17,7 @@ WITH frozen_source AS (
 ), candidates AS (
   SELECT f.cohort_id,
     (f.metadata ->> 'started_epoch')::double precision AS started_epoch,
-    c.candidate_id, c.symbol, c.captured_epoch AS captured_epoch_real,
+    c.candidate_id, c.symbol, c.captured_epoch::double precision AS captured_epoch_real,
     p.signal AS signal,
     CASE WHEN pg_input_is_valid(p.signal->>'captured_epoch','double precision')
       THEN (p.signal->>'captured_epoch')::double precision END AS capture,
