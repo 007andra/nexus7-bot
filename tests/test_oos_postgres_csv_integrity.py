@@ -15,6 +15,7 @@ def sample(cid="HARD_GATE_SHADOW:BTCUSDT:SHORT:BOS_BREAK:1", h=60,
         "counterfactual_status":"REJECTED" if decision == REJECTED else "APPROVED",
         "execution_allowed_source":"true" if decision == APPROVED else "false",
         "outcome_payload_parse_ok":"true",
+        "malformed_candidate_payloads_in_population":"0",
         "symbol":"BTCUSDT",
         "side":"SHORT", "regime":"TRENDING_DOWN", "setup":"BOS_BREAK",
         "decision_state":decision, "outcome_horizon_minutes":str(h),
@@ -188,6 +189,20 @@ class TestPostgresCsvIntegrity(unittest.TestCase):
             r["observation_start_epoch"]=""
         out=validate(records)
         self.assertEqual(out["outcomes_matching_production_validator"]["60"][APPROVED]["n"],0)
+
+
+    def test_malformed_source_count_is_reported_not_silently_lost(self):
+        rows=[sample(),sample(h=240)]
+        for row in rows:
+            row["malformed_candidate_payloads_in_population"]="2"
+        result=validate(rows)
+        self.assertTrue(result["passed_schema_and_identity"])
+        self.assertEqual(result["malformed_candidate_payloads_skipped_in_population"],2)
+
+    def test_changed_source_quality_count_fails_atomicity(self):
+        rows=[sample(),sample(h=240)]
+        rows[1]["malformed_candidate_payloads_in_population"]="3"
+        self.assertFalse(validate(rows)["passed_schema_and_identity"])
 
 
 
