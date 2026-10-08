@@ -104,7 +104,7 @@ class BinanceKlineTests(unittest.TestCase):
 
     def test_bar_after_window_fails(self):
         def fake(symbol, lo, hi):
-            return [[1791480000000, "101", "105", "99", "102"]]
+            return [[1791480600000, "101", "105", "99", "102"]]
         with self.assertRaisesRegex(ValueError, "OUT_OF_REQUEST_WINDOW"):
             download([{"candidate_id": CID, "symbol": "BTCUSDT",
                        "captured_epoch": 1791465300.001}],
