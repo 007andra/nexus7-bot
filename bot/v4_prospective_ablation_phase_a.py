@@ -138,11 +138,17 @@ def evaluate(payloads, outcomes60=(), outcomes240=(), *, now_epoch):
     """
     candidates = []
     invalid_future = 0
+    noncanonical_future = 0
     for raw in payloads:
         if not isinstance(raw, dict):
             continue
         captured = _finite(raw.get("captured_epoch"))
         if captured is None or captured <= CUTOFF_EPOCH:
+            continue
+        # Most shadow candidates never reach the canonical NEXUS evaluator.
+        # This is normal, not malformed evidence or an audit failure.
+        if raw.get("nexus_called") is not True:
+            noncanonical_future += 1
             continue
         row = _candidate(raw)
         if row is None:
@@ -238,6 +244,8 @@ def evaluate(payloads, outcomes60=(), outcomes240=(), *, now_epoch):
         status = "COLLECTING_FUTURE_APPROVALS"
     elif any(b.startswith("OUTCOMES_") for b in blockers):
         status = "OUTCOMES_PENDING"
+    elif any(b in blockers for b in ("SYMBOL_DIVERSITY", "MIN_EXCLUDED", "MIN_RETAINED")):
+        status = "INSUFFICIENT_SAMPLE"
     else:
         status = "NET_EXECUTION_PROOF_REQUIRED"
 
@@ -255,6 +263,7 @@ def evaluate(payloads, outcomes60=(), outcomes240=(), *, now_epoch):
         "retained_challenger": len(retained),
         "per_symbol_cap_skipped": cap_skipped,
         "invalid_future_records": invalid_future,
+        "noncanonical_future_excluded": noncanonical_future,
         "duplicate_candidate_ids": duplicate_ids,
         "distinct_symbols": len(counts),
         "max_symbol_share": max(counts.values()) / len(approved) if approved else 0.0,
@@ -356,6 +365,8 @@ def format_log(report):
         f"excluded={report['excluded_challenger_only']} retained={report['retained_challenger']} "
         f"symbols={report['distinct_symbols']} concentration={_fmt(report['max_symbol_share'])} "
         f"cap_skipped={report['per_symbol_cap_skipped']} "
+        f"noncanonical_excluded={report['noncanonical_future_excluded']} "
+        f"invalid={report['invalid_future_records']} "
         f"observed60={report['observed_60m']} observed240={report['observed_240m']} "
         f"excluded_gross60={_fmt(report['excluded_gross_avg_60m'])} "
         f"retained_gross60={_fmt(report['retained_gross_avg_60m'])} "
