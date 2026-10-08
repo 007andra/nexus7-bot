@@ -1637,6 +1637,36 @@ async def scan(engine, *, db=None, bbo_views=None):
             _emit("HARD_GATE_SHADOW_SCAN", {"outcome_error": type(exc).__name__, **AUTHORITY})
         _check(engine)
 
+        # Independent, bounded, read-only proof for frozen SHORT/DOWN/BOS V2.
+        # Cannot change enrollment, trading decisions, gates, orders or LIVE.
+        try:
+            from bot import short_down_bos_v2_outcome_proof as v2_proof
+            v2_row = await asyncio.wait_for(
+                v2_proof.maybe_snapshot(db), timeout=3.0
+            )
+            if v2_row is not None:
+                _emit("SHORT_DOWN_BOS_V2_OUTCOME_PROOF", {
+                    key: value for key, value in v2_row.items()
+                    if key != "members"
+                })
+                for member in v2_row["members"]:
+                    for horizon in (60, 240):
+                        _emit("SHORT_DOWN_BOS_V2_MEMBER_PROOF", {
+                            "cohort_id": v2_proof.COHORT_ID,
+                            "candidate_id": member["candidate_id"],
+                            "symbol": member["symbol"],
+                            "horizon": horizon,
+                            **member[str(horizon)],
+                            **AUTHORITY,
+                        })
+        except Exception as exc:
+            _emit("SHORT_DOWN_BOS_V2_OUTCOME_PROOF", {
+                "status": "ERROR",
+                "error": type(exc).__name__,
+                **AUTHORITY,
+            })
+        _check(engine)
+
         try:
             from bot import risk_epoch_shadow
             if risk_epoch_shadow.enabled():
