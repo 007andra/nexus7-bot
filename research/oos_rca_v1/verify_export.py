@@ -22,6 +22,7 @@ REQUIRED = {
     "observation_start_epoch", "outcome_identity_ok", "outcome_horizon_ok",
     "captured_epoch_real", "export_scope", "counterfactual_status",
     "execution_allowed_source", "outcome_payload_parse_ok",
+    "malformed_candidate_payloads_in_population",
 }
 COHORT = "CALIBRATION_GENERALIZATION_V1"
 APPROVED = "COUNTERFACTUAL_APPROVED"
@@ -52,7 +53,7 @@ def validate(records):
     if not records:
         raise ValueError("EMPTY_EXPORT_OR_FROZEN_COHORT_NOT_FOUND")
     seen, ids = set(), {}
-    snapshot, frozen, scope = None, None, None
+    snapshot, frozen, scope, malformed_source = None, None, None, None
     problems, missing = [], Counter()
     validated = {(g, h): [] for g in (APPROVED, REJECTED) for h in HORIZONS}
     observed_missing_basis = invalid_observed = 0
@@ -74,6 +75,13 @@ def validate(records):
         captured = number(row.get("captured_epoch"))
         stored_real = number(row.get("captured_epoch_real"))
         row_scope = row.get("export_scope")
+        bad_source = number(row.get("malformed_candidate_payloads_in_population"))
+        if bad_source is None or bad_source < 0 or int(bad_source) != bad_source:
+            problems.append(f"row {line}: INVALID_MALFORMED_SOURCE_COUNT")
+        elif malformed_source is None:
+            malformed_source = int(bad_source)
+        elif malformed_source != int(bad_source):
+            problems.append(f"row {line}: NON_ATOMIC_MALFORMED_SOURCE_COUNT")
         if row_scope not in ("JSON_PRECISE", "REAL_COARSE"):
             problems.append(f"row {line}: UNKNOWN_EXPORT_SCOPE")
         if scope is None:
@@ -177,6 +185,7 @@ def validate(records):
                              else "PROSPECTIVE_OOS_MATURATION_REVIEW_V1"),
         "as_of_epoch": snapshot,
         "frozen_started_epoch": frozen, "unique_candidates": len(ids),
+        "malformed_candidate_payloads_skipped_in_population": malformed_source,
         "total_rows": len(records), "decision_counts": dict(sorted(decisions.items())),
         "outcomes_matching_production_validator": samples,
         "nonobserved_or_invalid_reasons": {
