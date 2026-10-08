@@ -109,6 +109,7 @@ async def snapshot(db):
         "WHERE population=? AND captured_epoch>=? "
         "ORDER BY captured_epoch, candidate_id LIMIT ?",
         ("HARD_GATE_SHADOW", CUTOFF_EPOCH, MAX_SCAN),
+        strict=True,
     )
     truncated = len(candidates or ()) >= MAX_SCAN
     sample, counts, seen = [], {}, set()
@@ -127,19 +128,30 @@ async def snapshot(db):
         sample.append({"candidate_id": row["candidate_id"],
                        "symbol": row["symbol"],
                        "captured_epoch": row["captured_epoch"]})
-    for member in sample:
+    # One bounded, parameterized outcome read for the entire frozen sample.
+    # Avoid 12 sequential round trips/lock acquisitions under scanner timeout.
+    outcomes_by_id = {}
+    if sample:
+        ids = tuple(member["candidate_id"] for member in sample)
+        placeholders = ",".join("?" for _ in ids)
         raw_outcomes = await db._fetchall(
-            "SELECT horizon, payload FROM hard_gate_shadow_outcomes_v1 "
-            "WHERE candidate_id=? AND population=? AND horizon IN (?,?)",
-            (member["candidate_id"], "HARD_GATE_SHADOW", 60, 240),
+            "SELECT candidate_id,horizon,payload FROM hard_gate_shadow_outcomes_v1 "
+            "WHERE population=? AND horizon IN (?,?) "
+            f"AND candidate_id IN ({placeholders})",
+            ("HARD_GATE_SHADOW", 60, 240, *ids),
+            strict=True,
         )
-        by_horizon = {}
+        valid_ids = set(ids)
         for raw in raw_outcomes or ():
-            h = _raw(raw, "horizon", 0)
-            if h in (60, 240):
-                by_horizon[h] = _raw(raw, "payload", 1)
+            candidate_id = _raw(raw, "candidate_id", 0)
+            horizon = _raw(raw, "horizon", 1)
+            if candidate_id in valid_ids and horizon in (60, 240):
+                outcomes_by_id[(candidate_id, horizon)] = _raw(raw, "payload", 2)
+    for member in sample:
         for horizon in (60, 240):
-            member[str(horizon)] = _proof(horizon, by_horizon.get(horizon))
+            member[str(horizon)] = _proof(
+                horizon, outcomes_by_id.get((member["candidate_id"], horizon))
+            )
 
     m60, m240 = _metrics(sample, 60), _metrics(sample, 240)
     complete = len(sample) == TARGET and m60["n"] == TARGET and m240["n"] == TARGET
