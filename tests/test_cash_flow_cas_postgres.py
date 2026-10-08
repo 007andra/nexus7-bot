@@ -18,8 +18,9 @@ class CashFlowCasPostgresProof(unittest.TestCase):
                 "CREATE TABLE IF NOT EXISTS key_value (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)"
             )
             await conn.execute("DELETE FROM key_value WHERE key LIKE 'test:cashflow_cas:%'")
-            saved = (db._conn, db._is_pg, db._io_lock)
+            saved = (db._conn, db._is_pg, db._io_lock, db.DATABASE_URL)
             db._conn, db._is_pg, db._io_lock = conn, True, asyncio.Lock()
+            db.DATABASE_URL = os.environ["TEST_POSTGRES_DSN"]
             try:
                 ok = await save_key_values_atomic_cas(
                     [("test:cashflow_cas:ledger", "v1"), ("test:cashflow_cas:hwm", "6.0")],
@@ -39,7 +40,7 @@ class CashFlowCasPostgresProof(unittest.TestCase):
                 self.assertEqual(rows, {"test:cashflow_cas:ledger": "v1", "test:cashflow_cas:hwm": "6.0"})
             finally:
                 await conn.execute("DELETE FROM key_value WHERE key LIKE 'test:cashflow_cas:%'")
-                db._conn, db._is_pg, db._io_lock = saved
+                db._conn, db._is_pg, db._io_lock, db.DATABASE_URL = saved
                 await conn.close()
 
         asyncio.run(run())
