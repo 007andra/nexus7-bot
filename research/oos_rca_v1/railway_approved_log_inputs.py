@@ -48,6 +48,32 @@ def _number(value):
         return None
 
 
+
+
+def _display_epoch_matches(raw, display):
+    """Match a rounded log timestamp without inventing microsecond precision.
+
+    E.g. 1.7914761e+09 has 8 significant digits = 100-second resolution.
+    A correct full-precision timestamp may differ by up to 50 seconds.
+    """
+    precise = _number(raw)
+    rounded = _number(display)
+    if precise is None or rounded is None:
+        return False
+    m = re.fullmatch(r"[+-]?[0-9]+(?:\.([0-9]+))?[eE]([+-]?[0-9]+)", str(display))
+    if m:
+        decimal_places = len(m.group(1) or "")
+        exponent = int(m.group(2))
+        quantum = 10.0 ** (exponent - decimal_places)
+        if not math.isfinite(quantum) or quantum <= 0:
+            return False
+        return abs(precise - rounded) <= quantum / 2 + 0.01
+    # Standard fixed decimal display keeps its explicit precision.
+    text = str(display)
+    places = len(text.split(".", 1)[1]) if "." in text else 0
+    tolerance = 10.0 ** (-places) / 2 + 0.01
+    return abs(precise - rounded) <= tolerance
+
 def extract(logs):
     approvals, shadow = {}, {}
     for row in logs:
@@ -83,7 +109,7 @@ def extract(logs):
             raise ValueError("APPROVAL_SHADOW_IDENTITY_MISMATCH")
         cap = _number(raw.get("captured_epoch"))
         proof_cap = _number(approval.get("captured_epoch"))
-        if cap is None or proof_cap is None or abs(cap - proof_cap) > .01:
+        if cap is None or proof_cap is None or not _display_epoch_matches(raw.get("captured_epoch"), approval.get("captured_epoch")):
             raise ValueError("APPROVAL_SHADOW_CAPTURE_MISMATCH")
         entry, stop, target = (_number(raw.get(k)) for k in ("entry", "stop", "target"))
         side = raw["side"]
