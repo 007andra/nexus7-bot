@@ -1,5 +1,12 @@
 # OOS issue #596 — PostgreSQL server-side, read-only diagnostic
 
+## Newly verified infrastructure topology — 2026-10-08
+
+Direct Railway production `describe_environment` confirms `nexus7-bot` runs in region **`ams` (Amsterdam)**, while the `Postgres` service and its persistent volume `postgres-volume-jsag` run in **`sfo` (San Francisco)**. Every OOS PostgreSQL SELECT necessarily traverses the cross-region connection under the current architecture. This is a **concrete structural source of network latency**, but exact time contributed to a given 1.8s outlier is still unknown. Do not confuse whole-request wall-clock with server execution time.
+
+Railway region documentation: https://docs.railway.com/deployments/regions . It describes region changes for a service without an attached volume as avoiding expected downtime, whereas a volume-attached service requires data migration with expected downtime. Region changes still restart/switch the app and can affect trading-network market-data latency and networking. **No region changes were made**; a separate operator-approved architecture/rollback review is mandatory before any relocation. Recommended first remediation experiment: assess relocating only the *stateless bot* closer to the existing volume-backed Postgres, then review Binance websocket/private stream performance and ownership fencing. Never casually migrate the persistent DB volume to the bot.
+
+
 ## What is currently proven
 
 The production Railway deployment `728df62c-77bd-4dbd-af24-12d1d880e1bb` on SHA `60ea411b8fb2201f94f93a6d3178a9b6766b0554` is online 1/1; its first read-first OOS snapshot at 2026-10-08 23:41:12 UTC had `status=OK`, elapsed 707.875ms, metadata fetch 292.822ms, lock wait 0.110ms, and no DDL. This is one snapshot on the NEW deployment, not the 6–12 natural observations required for #606.
