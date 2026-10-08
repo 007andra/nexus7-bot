@@ -41,6 +41,7 @@ class SnapshotTimingProbe:
         self.unattributed_rows = 0
         self.fetch_cancelled = 0
         self.missing_row_counts = 0
+        self.metadata_read_mode = "LEGACY_DDL_GUARDED"
         # Best-effort sampled label at WAIT START, not a proven holder across
         # the entire queue delay. Never names an SQL statement or a caller ID.
         self.max_wait_owner_at_start = "NOT_OBSERVED"
@@ -170,6 +171,7 @@ class SnapshotTimingProbe:
             "lock_not_acquired": self.lock_not_acquired,
             "fetch_cancelled": self.fetch_cancelled,
             "missing_row_counts": self.missing_row_counts,
+            "metadata_read_mode": self.metadata_read_mode,
             "max_wait_owner_at_start": self.max_wait_owner_at_start,
             "max_wait_owner_ms": round(self.max_wait_owner_ms, 3),
             "owner_attributed_wait_events": self.owner_attributed_wait_events,
