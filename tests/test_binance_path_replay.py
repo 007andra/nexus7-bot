@@ -149,5 +149,17 @@ class TestOfflineBinancePathReplay(unittest.TestCase):
         self.assertAlmostEqual(r1[0]["modeled_net_ex_funding"], r2[0]["modeled_net_ex_funding"])
 
 
+    def test_cohort_decision_and_regime_preserved(self):
+        c = candidate()
+        c["cohort_decision"] = "COUNTERFACTUAL_REJECTED"
+        c["regime"] = "TRENDING_UP"
+        c["setup"] = "MOMENTUM"
+        rows = evaluate(c, as_of_epoch=18000)
+        self.assertEqual(rows[0]["cohort_decision"], "COUNTERFACTUAL_REJECTED")
+        self.assertEqual(rows[0]["regime"], "TRENDING_UP")
+        self.assertEqual(rows[0]["setup"], "MOMENTUM")
+        self.assertEqual(rows[0]["captured_epoch"], c["captured_epoch"])
+
+
 if __name__ == "__main__":
     unittest.main()
