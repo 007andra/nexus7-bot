@@ -99,6 +99,15 @@ def _protect_drawdown_update(self, bound_update, log, *, source: str):
                     "authority=OBSERVABILITY_ONLY decision_effect=NONE execution_effect=NONE",
                     type(exc).__name__,
                 )
+            try:
+                from bot import risk_epoch
+                await risk_epoch.observe_and_emit(self, log)
+            except Exception as exc:
+                log.warning(
+                    "[RISK_EPOCH_V1] status=UNKNOWN reason=%s authority=TIGHTEN_ONLY "
+                    "execution_effect=NONE",
+                    type(exc).__name__,
+                )
             became_inactive = was_active and not bool(getattr(self, "active", False))
             if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
                 if _risk_override_enabled():

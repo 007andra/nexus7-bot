@@ -90,6 +90,12 @@ def snapshot(engine) -> dict:
     if not preflight_ready:
         blockers.append("PREFLIGHT_NOT_READY")
 
+    from bot import risk_epoch
+    epoch = risk_epoch.telemetry(risk_epoch.cached_state(engine))
+    epoch_blocked, epoch_reason = risk_epoch.blocks_new_entries(risk_epoch.cached_state(engine))
+    if risk_epoch.config_from_env().enabled and epoch_blocked:
+        blockers.append("RISK_EPOCH_NOT_ACTIVE")
+
     required_equity = peak * (1.0 - limit) if peak > 0 and 0 < limit < 1 else None
     equity_gap = (
         max(0.0, required_equity - equity)
@@ -102,6 +108,14 @@ def snapshot(engine) -> dict:
         "blockers": tuple(blockers),
         "drawdown": drawdown,
         "configured_limit": limit,
+        "historical_drawdown": drawdown,
+        "historical_drawdown_limit": limit,
+        "epoch_id": epoch["epoch_id"],
+        "epoch_status": epoch["status"],
+        "epoch_block_reason": epoch_reason,
+        "epoch_drawdown": epoch["epoch_drawdown"],
+        "epoch_drawdown_limit": epoch["epoch_drawdown_limit"],
+        "epoch_floor_equity": epoch["epoch_floor_equity"],
         "equity": equity,
         "peak_equity": peak,
         "required_equity_for_limit": required_equity,

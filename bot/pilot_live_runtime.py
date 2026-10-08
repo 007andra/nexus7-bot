@@ -295,6 +295,27 @@ def _entry_drawdown_allows(engine, log) -> bool:
 
 
 async def _entry_drawdown_allows_durable(engine, log) -> bool:
+    """Historical drawdown authority, then the TIGHTEN_ONLY risk epoch.
+
+    The risk epoch can only veto a candidate that the historical gate (or one
+    of its explicit, unchanged exceptions) already allowed. A disabled epoch
+    performs no I/O and has no effect.
+    """
+    if not await _entry_drawdown_allows_durable_historical(engine, log):
+        return False
+    from bot import risk_epoch
+    try:
+        return await risk_epoch.predispatch_allows(engine, log)
+    except Exception as exc:
+        log.critical(
+            "[RISK_EPOCH_PREDISPATCH] result=BLOCK reason=%s authority=TIGHTEN_ONLY "
+            "execution_effect=BLOCK_NEW_ENTRY",
+            type(exc).__name__,
+        )
+        return False
+
+
+async def _entry_drawdown_allows_durable_historical(engine, log) -> bool:
     """Preserve the historical sync drawdown helper, then enforce durable Recovery.
 
     Normal drawdown and the existing explicit override remain synchronous and

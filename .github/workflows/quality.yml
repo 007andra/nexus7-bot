@@ -113,7 +113,8 @@ jobs:
           test -n "$TEST_POSTGRES_DSN"
           python -m unittest -v \
             tests.test_p0_cas_transaction_isolation_pg \
-            tests.test_cash_flow_cas_postgres
+            tests.test_cash_flow_cas_postgres \
+            tests.test_risk_epoch_postgres
 
       - name: Final pre-release proof pack
         run: python -m bot.release_proof

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot import controlled_live_reentry_v1 as controlled
+from tests.risk_epoch_fixtures import EPOCH_ENV, active_state
 
 
 class _Orders:
@@ -27,6 +28,7 @@ def _engine(equity=5.39561426, available=5.39561426, drawdown=0.76333669401):
         drawdown=drawdown,
     )
     return SimpleNamespace(
+        _risk_epoch_state=active_state(start_equity=equity),
         paper_trade=False,
         pilot=SimpleNamespace(enabled=True),
         risk=risk,
@@ -45,6 +47,7 @@ def _env(**overrides):
         controlled.ARM_ENV: controlled.ARM_TOKEN,
         controlled.LOSS_BUDGET_ENV: "0.10",
         controlled.MAX_RISK_PCT_ENV: "0.02",
+        **EPOCH_ENV,
     }
     values.update(overrides)
     return values
@@ -319,6 +322,63 @@ class ControlledLiveReentryPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first, (True, "dispatch_authorization_consumed"))
         self.assertEqual(second, (False, "episode_already_consumed"))
+
+
+class ControlledLiveReentryRiskEpochTests(unittest.TestCase):
+    """The one-shot bridge additionally requires an ACTIVE 30% risk epoch."""
+
+    def _ready(self, engine, env):
+        with patch.dict(os.environ, env, clear=True), \
+             patch("bot.pilot_release_control.live_pilot_release_authorized", return_value=True), \
+             patch("bot.operator_runtime_policy._risk_override_enabled", return_value=False), \
+             patch("bot.drawdown_recovery.policy_from_env",
+                   return_value=SimpleNamespace(authorized=False)), \
+             patch("bot.pilot.PILOT_MAX_CONCURRENT_POSITIONS", 1), \
+             patch("bot.pilot.MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION", 1):
+            return controlled.readiness(engine)
+
+    def test_disabled_epoch_blocks_one_shot_even_when_armed(self):
+        env = {k: v for k, v in _env().items() if k not in EPOCH_ENV}
+        ok, reason, _ = self._ready(_engine(), env)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "risk_epoch_disabled")
+
+    def test_missing_epoch_state_blocks(self):
+        engine = _engine()
+        engine._risk_epoch_state = None
+        ok, reason, _ = self._ready(engine, _env())
+        self.assertFalse(ok)
+        self.assertEqual(reason, "risk_epoch_epoch_state_unavailable")
+
+    def test_breached_epoch_blocks(self):
+        engine = _engine()
+        engine._risk_epoch_state = dict(active_state(), status="BREACHED", reason="sticky_breach")
+        ok, reason, _ = self._ready(engine, _env())
+        self.assertFalse(ok)
+        self.assertTrue(reason.startswith("risk_epoch_epoch_breached"), reason)
+
+    def test_state_for_other_epoch_id_blocks(self):
+        engine = _engine()
+        engine._risk_epoch_state = active_state(epoch_id="SOME_OTHER_EPOCH_V9")
+        ok, reason, _ = self._ready(engine, _env())
+        self.assertFalse(ok)
+        self.assertEqual(reason, "risk_epoch_epoch_state_stale_id")
+
+    def test_budget_that_could_breach_epoch_floor_blocks(self):
+        # Epoch peak 5.3956, 30% floor 3.7769. Equity 3.85 minus 0.10 budget
+        # = 3.75 < floor: the single trade could breach the epoch limit.
+        engine = _engine(equity=3.85, available=3.85)
+        engine._risk_epoch_state = active_state(start_equity=5.39561426, equity=3.85)
+        ok, reason, evidence = self._ready(engine, _env())
+        self.assertFalse(ok)
+        self.assertEqual(reason, "risk_epoch_headroom_insufficient")
+        self.assertLess(evidence["epoch_worst_case_equity"], evidence["epoch_floor_equity"])
+
+    def test_active_epoch_with_headroom_is_required_and_sufficient_for_this_contract(self):
+        ok, reason, evidence = self._ready(_engine(), _env())
+        self.assertTrue(ok, reason)
+        self.assertAlmostEqual(evidence["epoch_floor_equity"], 5.39561426 * 0.70)
+        self.assertAlmostEqual(evidence["epoch_worst_case_equity"], 5.39561426 - 0.10)
 
 
 if __name__ == "__main__":

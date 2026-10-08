@@ -266,6 +266,20 @@ def readiness(engine, *, exclude_client_oid: str = "") -> tuple[bool, str, dict]
         return False, "effective_risk_invalid", evidence
     evidence["effective_risk_pct"] = effective
     evidence["effective_risk_budget_usdt"] = equity * effective
+
+    # The one-shot bridge crosses only the historical drawdown threshold. It
+    # additionally requires an ACTIVE operational risk epoch whose floor
+    # survives the full absolute loss budget (TIGHTEN_ONLY; never loosens).
+    try:
+        from bot import risk_epoch
+        epoch_ok, epoch_reason, epoch_evidence = risk_epoch.controlled_reentry_requirement(
+            engine, equity=equity, loss_budget=float(policy.loss_budget_usdt),
+        )
+    except Exception as exc:
+        epoch_ok, epoch_reason, epoch_evidence = False, f"risk_epoch_{type(exc).__name__}", {}
+    evidence.update(epoch_evidence)
+    if not epoch_ok:
+        return False, epoch_reason, evidence
     return True, "ready", evidence
 
 
@@ -457,6 +471,7 @@ def startup_log() -> str:
         f"reason={policy.reason} one_shot=true max_positions=1 max_submissions=1 "
         "historical_hwm_preserved=true max_drawdown_unchanged=true "
         "nexus_thresholds_unchanged=true rr_ev_unchanged=true "
+        "requires_active_risk_epoch=true "
         "averaging_down=false martingale=false"
     )
 

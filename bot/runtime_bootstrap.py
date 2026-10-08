@@ -152,6 +152,8 @@ def install() -> None:
     from bot import runtime_release_contract as _release_contract
     _contract = _release_contract.current()
     _log.critical(_controlled_live_reentry.startup_log())
+    from bot import risk_epoch as _risk_epoch
+    _log.critical(_risk_epoch.startup_log())
     if _contract.release_authorized:
         _pilot_live_runtime.install(TradingEngine, _log)
         _pilot_risk_cap_hardening.install(TradingEngine, _log)
