@@ -71,6 +71,62 @@ class DatabaseIOProbeTests(unittest.IsolatedAsyncioTestCase):
         self.db._conn, self.db._is_pg, self.db._io_lock = self.old
         self.assertIsNone(timing.active_probe.get())
 
+    async def test_metadata_ddl_lock_wait_timeout_is_attributed(self):
+        class FakePG:
+            async def execute(self, *args):
+                return "CREATE TABLE"
+        self.db._conn = FakePG()
+        probe = timing.SnapshotTimingProbe()
+        token = timing.active_probe.set(probe)
+        try:
+            async with self.db._io_lock:
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        probe.await_stage("metadata", self.db._exec("SELECT 1")),
+                        timeout=.005)
+        finally:
+            timing.active_probe.reset(token)
+        fields = probe.fields(status="TIMEOUT")
+        self.assertEqual(fields["stage"], "metadata")
+        self.assertEqual(fields["exec_calls"], 1)
+        self.assertEqual(fields["exec_cancelled"], 1)
+        self.assertEqual(fields["lock_not_acquired"], 1)
+        self.assertGreater(fields["lock_wait_ms"], 0)
+        self.assertEqual(fields["db_exec_ms"], 0)
+
+    async def test_metadata_ddl_client_timeout_is_not_lock_wait(self):
+        class FakePG:
+            async def execute(self, *args):
+                await asyncio.Event().wait()
+        self.db._conn = FakePG()
+        probe = timing.SnapshotTimingProbe()
+        token = timing.active_probe.set(probe)
+        try:
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    probe.await_stage("metadata", self.db._exec("SELECT 1")),
+                    timeout=.005)
+        finally:
+            timing.active_probe.reset(token)
+        fields = probe.fields(status="TIMEOUT")
+        self.assertEqual(fields["exec_calls"], 1)
+        self.assertEqual(fields["exec_cancelled"], 1)
+        self.assertEqual(fields["lock_not_acquired"], 0)
+        self.assertGreater(fields["db_exec_ms"], 0)
+        self.assertFalse(fields["live_allowed"])
+
+    async def test_metadata_exec_without_probe_keeps_original_semantics(self):
+        class FakePG:
+            calls = 0
+            async def execute(self, *args):
+                self.calls += 1
+                return "OK"
+        self.db._conn = FakePG()
+        self.assertIsNone(timing.active_probe.get())
+        self.assertTrue(await self.db._exec("SELECT 1"))
+        self.assertEqual(self.db._conn.calls, 1)
+        self.assertIsNone(timing.active_probe.get())
+
     async def test_lock_wait_and_fetch_have_distinct_measures(self):
         class FakePG:
             async def fetch(self, *args):
