@@ -16,7 +16,8 @@ from pathlib import Path
 HORIZONS = (60, 240)
 STEP = 900
 FIELDS = (
-    "candidate_id", "symbol", "side", "horizon", "status", "exit_reason",
+    "candidate_id", "symbol", "side", "regime", "setup", "cohort_decision",
+    "captured_epoch", "horizon", "status", "exit_reason",
     "exit_candle_epoch", "both_levels_touched", "entry_reference", "exit_reference",
     "return_gross_reference", "modeled_net_ex_funding", "modeled_fee_fraction",
     "modeled_slippage_cost", "cost_state", "entry_fill_assumption",
@@ -131,6 +132,9 @@ def evaluate(candidate, *, as_of_epoch):
     for horizon in HORIZONS:
         baseline = {
             "candidate_id": cid, "symbol": candidate["symbol"], "side": side,
+            "regime": candidate.get("regime"), "setup": candidate.get("setup"),
+            "cohort_decision": candidate.get("cohort_decision", "UNKNOWN"),
+            "captured_epoch": captured,
             "horizon": horizon, "status": None, "exit_reason": None,
             "exit_candle_epoch": None, "both_levels_touched": False,
             "entry_reference": entry, "exit_reference": None,
@@ -204,9 +208,24 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
     stats = {"authority": "OFFLINE_RESEARCH_ONLY", "live_allowed": False,
-             "realized_pnl_proven": False, "rows": len(rows), "statuses": {}}
+             "realized_pnl_proven": False, "comparative_inference_allowed": False,
+             "rows": len(rows), "statuses": {}, "descriptive_groups": {}}
     for state in sorted({r["status"] for r in rows}):
         stats["statuses"][state] = sum(r["status"] == state for r in rows)
+    for h in HORIZONS:
+        stats["descriptive_groups"][str(h)] = {}
+        for decision in ("COUNTERFACTUAL_APPROVED", "COUNTERFACTUAL_REJECTED"):
+            subset = [r for r in rows if r["horizon"] == h and r["cohort_decision"] == decision]
+            modeled = [r["modeled_net_ex_funding"] for r in subset
+                       if r["modeled_net_ex_funding"] is not None]
+            gross = [r["return_gross_reference"] for r in subset
+                     if r["return_gross_reference"] is not None]
+            stats["descriptive_groups"][str(h)][decision] = {
+                "enrolled": len(subset), "path_gross_available": len(gross),
+                "path_cost_available": len(modeled),
+                "gross_mean": sum(gross) / len(gross) if gross else None,
+                "net_ex_funding_mean_covered_only": sum(modeled) / len(modeled) if modeled else None,
+            }
     args.prefix.with_suffix(".json").write_text(
         json.dumps(stats, sort_keys=True, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
