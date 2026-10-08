@@ -8,7 +8,12 @@ def sample(cid="HARD_GATE_SHADOW:BTCUSDT:SHORT:BOS_BREAK:1", h=60,
     return {
         "cohort_id":"CALIBRATION_GENERALIZATION_V1",
         "snapshot_as_of_epoch":"20000", "frozen_started_epoch":"1000",
-        "candidate_id":cid, "captured_epoch":"1001", "symbol":"BTCUSDT",
+        "candidate_id":cid, "captured_epoch":"1001",
+        "captured_epoch_real":"1001", "export_scope":"JSON_PRECISE",
+        "counterfactual_status":"REJECTED" if decision == REJECTED else "APPROVED",
+        "execution_allowed_source":"true" if decision == APPROVED else "false",
+        "outcome_payload_parse_ok":"true",
+        "symbol":"BTCUSDT",
         "side":"SHORT", "regime":"TRENDING_DOWN", "setup":"BOS_BREAK",
         "decision_state":decision, "outcome_horizon_minutes":str(h),
         "outcome_state":state, "return_basis":"hypothetical_entry_gross",
@@ -67,6 +72,66 @@ class TestPostgresCsvIntegrity(unittest.TestCase):
         wrong=sample();wrong["return_basis"]=""
         result=validate([wrong,sample(h=240)])
         self.assertEqual(result["observed_missing_or_different_return_basis"],1)
+
+    def test_absent_execution_allowed_is_rejected_in_production(self):
+        records = [sample(decision=REJECTED),sample(h=240,decision=REJECTED)]
+        for row in records:
+            row["execution_allowed_source"] = ""
+        report = validate(records)
+        self.assertTrue(report["passed_schema_and_identity"])
+        self.assertEqual(report["outcomes_matching_production_validator"]["60"][REJECTED]["n"], 1)
+
+    def test_missing_allowed_mislabelled_indeterminate_is_rejected(self):
+        records = [sample(decision=REJECTED),sample(h=240,decision=REJECTED)]
+        for row in records:
+            row["execution_allowed_source"] = ""
+            row["decision_state"] = "INDETERMINATE"
+        self.assertFalse(validate(records)["passed_schema_and_identity"])
+
+    def test_real_cutoff_includes_legacy_coarse_member(self):
+        records = [sample(), sample(h=240)]
+        for row in records:
+            row["snapshot_as_of_epoch"] = "2000000000"
+            row["frozen_started_epoch"] = "1791211311.675"
+            row["captured_epoch"] = "1791211270"
+            row["captured_epoch_real"] = "1791211264"
+            row["export_scope"] = "REAL_COARSE"
+            row["observation_start_epoch"] = "1791211400"
+        report = validate(records)
+        self.assertTrue(report["passed_schema_and_identity"])
+        self.assertEqual(report["export_scope"], "REAL_COARSE")
+
+    def test_json_cutoff_rejects_legacy_coarse_member(self):
+        records = [sample(), sample(h=240)]
+        for row in records:
+            row["snapshot_as_of_epoch"] = "2000000000"
+            row["frozen_started_epoch"] = "1791211311.675"
+            row["captured_epoch"] = "1791211270"
+            row["captured_epoch_real"] = "1791211264"
+            row["export_scope"] = "JSON_PRECISE"
+        self.assertFalse(validate(records)["passed_schema_and_identity"])
+
+    def test_mixed_cuts_not_comparable(self):
+        records = [sample(), sample(h=240)]
+        records[1]["export_scope"] = "REAL_COARSE"
+        self.assertFalse(validate(records)["passed_schema_and_identity"])
+
+    def test_legacy_error_excludes_observed_even_when_rejected(self):
+        records = [sample(decision=REJECTED), sample(h=240,decision=REJECTED)]
+        for row in records:
+            row["export_scope"] = "REAL_COARSE"
+            row["counterfactual_status"] = "ERROR"
+        report = validate(records)
+        self.assertTrue(report["passed_schema_and_identity"])
+        self.assertEqual(report["outcomes_matching_production_validator"]["60"][REJECTED]["n"],0)
+        self.assertEqual(report["decision_counts"][REJECTED],1)
+
+    def test_bad_outcome_json_is_explicit_integrity_problem(self):
+        records = [sample(),sample(h=240)]
+        records[0]["outcome_payload_parse_ok"] = "false"
+        records[0]["outcome_state"] = "MALFORMED_JSON"
+        self.assertFalse(validate(records)["passed_schema_and_identity"])
+
 
 
 if __name__=="__main__":
