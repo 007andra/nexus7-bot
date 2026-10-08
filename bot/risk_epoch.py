@@ -9,7 +9,9 @@ A risk epoch adds a second, independent measurement:
 * a verifiable starting reference captured once, from freshly authenticated
   account equity, while the account is flat, with no pending external cash
   flow, bound to the HWM namespace, the external cash-flow ledger fingerprint
-  and the deployed code SHA; the immutable baseline is digest-protected;
+  and the deployed code SHA; the immutable baseline carries a SHA-256 digest
+  that detects accidental drift or corruption (it is not authentication
+  against a malicious writer with database access);
 * an epoch peak that only rises with observed authenticated equity;
 * ``epoch_drawdown = (epoch_peak - equity) / epoch_peak`` measured against its
   own immutable limit (``RISK_EPOCH_MAX_DRAWDOWN``, default and hard cap 30%);
@@ -36,7 +38,7 @@ from datetime import datetime, timezone
 ENABLED_ENV = "RISK_EPOCH_ENABLED"
 EPOCH_ID_ENV = "RISK_EPOCH_ID"
 MAX_DRAWDOWN_ENV = "RISK_EPOCH_MAX_DRAWDOWN"
-SUPERSEDE_ACK_ENV = "RISK_EPOCH_SUPERSEDE_BREACHED_ACK"
+SUPERSEDE_ACK_ENV = "RISK_EPOCH_SUPERSEDE_ACK"
 
 HARD_MAX_EPOCH_DRAWDOWN = 0.30
 DEFAULT_EPOCH_DRAWDOWN = 0.30
@@ -150,11 +152,39 @@ def baseline_digest(record: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _num(value) -> str | None:
+    if value is None:
+        return None
+    return format(float(value), ".17g")
+
+
 def cash_flow_fingerprint(doc: dict) -> str:
-    """Identity of the applied external-flow set (order-independent)."""
-    from bot.cash_flow_ledger import applied_identities
-    raw = json.dumps(sorted(applied_identities(doc or {})), separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    """Canonical identity AND amounts of the external-flow ledger.
+
+    Covers every applied reconciliation (id, flow identities, signed net,
+    pre/post equity, adjusted HWM) and every pending flow, order-independent.
+    Changing an amount while keeping its identity changes the fingerprint.
+    This detects drift/corruption; it is not authentication against a
+    malicious writer with database access.
+    """
+    doc = doc or {}
+    applied = sorted(
+        (
+            str(r.get("reconciliation_id")),
+            sorted(str(i) for i in r.get("identities", [])),
+            _num(r.get("net_amount")),
+            _num(r.get("pre_flow_equity")),
+            _num(r.get("post_flow_equity")),
+            _num(r.get("adjusted_hwm")),
+        )
+        for r in doc.get("applied", [])
+    )
+    pending = sorted(
+        (str(p.get("identity")), _num(p.get("amount")))
+        for p in doc.get("pending", [])
+    )
+    raw = json.dumps({"applied": applied, "pending": pending}, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _namespace() -> str:
@@ -273,6 +303,7 @@ def _state(config: EpochConfig, status: str, reason: str, *, record: dict | None
         "epoch_floor_equity": None,
         "epoch_headroom_usdt": None,
         "epoch_breached_at": None,
+        "epoch_max_drawdown": None,
         "baseline_digest": None,
         "observed_monotonic": time.monotonic(),
         **AUTHORITY,
@@ -284,6 +315,7 @@ def _state(config: EpochConfig, status: str, reason: str, *, record: dict | None
             "epoch_started_at": record.get("started_at"),
             "epoch_peak_equity": peak or None,
             "epoch_breached_at": record.get("breached_at"),
+            "epoch_max_drawdown": record.get("max_epoch_drawdown"),
             "baseline_digest": record.get("baseline_digest"),
         })
         if equity is not None and peak > 0 and config.limit is not None:
@@ -341,38 +373,56 @@ async def _build_baseline(engine, config: EpochConfig, namespace: str, equity: f
         "last_equity": float(equity),
         "last_observed_at": now.isoformat(),
         "observations": 1,
+        "max_epoch_drawdown": 0.0,
+        "min_equity": float(equity),
         "breached": False,
         "breached_at": None,
         "breach_equity": None,
         "breach_drawdown": None,
+        "closed": False,
+        "closed_at": None,
+        "closed_by_epoch_id": None,
     })
     return record
 
 
 async def _previous_epoch(index_raw: str | None, namespace: str, config: EpochConfig):
-    """Summarize the latest prior epoch; refuses to hide a breached one."""
+    """Prepare the formal closure of the latest prior epoch.
+
+    Any succession, ACTIVE or BREACHED, requires an explicit operator ack
+    naming the exact previous epoch id. Without it no successor is created,
+    so changing RISK_EPOCH_ID alone can never reset the period meter. The
+    closure (final/max drawdown, closing successor) is written atomically
+    with the successor; the previous baseline is never modified.
+    Returns (ids, summary, block_reason, prev_key, prev_raw, closed_prev).
+    """
     from bot import database as db
     ids = [] if index_raw is None else list(_loads(index_raw).get("epochs", []))
     if not ids:
-        return ids, None, None
+        return ids, None, None, None, None, None
     prev_id = ids[-1]
-    raw = await db._load_key_value_raw(epoch_key(prev_id, namespace), strict=True)
+    prev_key = epoch_key(prev_id, namespace)
+    raw = await db._load_key_value_raw(prev_key, strict=True)
     if raw is None:
-        return ids, None, "previous_epoch_record_missing"
+        return ids, None, "previous_epoch_record_missing", None, None, None
     prev = _loads(raw)
+    if prev.get("baseline_digest") != baseline_digest(prev):
+        return ids, None, "previous_epoch_digest_mismatch", None, None, None
+    if prev.get("closed"):
+        return ids, None, "previous_epoch_already_closed", None, None, None
     status = BREACHED if prev.get("breached") else "CLOSED_BY_SUCCESSOR"
-    summary = {
-        "epoch_id": prev_id,
-        "status": status,
-        "drawdown": prev.get("breach_drawdown")
-        if prev.get("breached") else (
-            epoch_drawdown(prev["epoch_peak_equity"], prev["last_equity"])
-            if prev.get("epoch_peak_equity") and prev.get("last_equity") is not None else None
-        ),
-    }
-    if prev.get("breached") and os.environ.get(SUPERSEDE_ACK_ENV, "").strip() != prev_id:
-        return ids, summary, "previous_epoch_breached_ack_missing"
-    return ids, summary, None
+    max_dd = prev.get("breach_drawdown") if prev.get("breached") else prev.get("max_epoch_drawdown")
+    summary = {"epoch_id": prev_id, "status": status, "drawdown": max_dd}
+    if os.environ.get(SUPERSEDE_ACK_ENV, "").strip() != prev_id:
+        return ids, summary, "previous_epoch_supersede_ack_missing", None, None, None
+    closed = dict(prev)
+    closed.update({
+        "closed": True,
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+        "closed_by_epoch_id": config.epoch_id,
+        "closing_status": status,
+    })
+    return ids, summary, None, prev_key, raw, closed
 
 
 async def observe(engine, *, strict: bool = True) -> dict:
@@ -425,9 +475,17 @@ async def observe(engine, *, strict: bool = True) -> dict:
         state = _state(config, INVALID, invalid, record=record, engine=engine)
         _store(engine, state)
         return state
-    if cash_flow_fingerprint(ledger["ledger"]) != record["cash_flow_fingerprint"] or int(
-        ledger["totals"]["pending_flows"]
-    ) != 0:
+    if record.get("closed"):
+        state = _state(config, INVALID, "epoch_closed_by_successor", record=record, engine=engine)
+        _store(engine, state)
+        return state
+    totals = ledger["totals"]
+    if (
+        cash_flow_fingerprint(ledger["ledger"]) != record["cash_flow_fingerprint"]
+        or int(totals["pending_flows"]) != 0
+        or int(totals["applied_records"]) != int(record["cash_flow_applied_records"])
+        or abs(float(totals["applied_net"]) - float(record["cash_flow_applied_net"])) > 1e-9
+    ):
         # A deposit could mask an epoch loss and a withdrawal could fake one.
         # Either way the epoch reference no longer measures trading alone.
         state = _state(config, FLOW_CHANGED, "external_cash_flow_since_baseline",
@@ -448,11 +506,15 @@ async def observe(engine, *, strict: bool = True) -> dict:
     peak = max(float(record["epoch_peak_equity"]), float(equity))
     dd = epoch_drawdown(peak, equity)
     now = datetime.now(timezone.utc).isoformat()
+    max_dd = max(float(record.get("max_epoch_drawdown") or 0.0), dd)
+    min_equity = min(float(record.get("min_equity", equity)), float(equity))
     updated.update({
         "epoch_peak_equity": peak,
         "last_equity": float(equity),
         "last_observed_at": now,
         "observations": int(record.get("observations", 0)) + 1,
+        "max_epoch_drawdown": max_dd,
+        "min_equity": min_equity,
     })
     if dd >= float(config.limit):
         updated.update({
@@ -461,9 +523,13 @@ async def observe(engine, *, strict: bool = True) -> dict:
             "breach_equity": float(equity),
             "breach_drawdown": dd,
         })
+    # Durable checkpoint of every equity change, so a sub-limit loss is
+    # never only in memory (restart and successor summaries read it).
     changed = (
         updated["epoch_peak_equity"] != record["epoch_peak_equity"]
         or updated["breached"] != record.get("breached")
+        or updated["max_epoch_drawdown"] != record.get("max_epoch_drawdown")
+        or abs(float(updated["last_equity"]) - float(record.get("last_equity", equity))) > 1e-12
     )
     if changed:
         try:
@@ -512,22 +578,25 @@ async def _try_create(engine, config, namespace, key, equity, available, confirm
     ikey = index_key(namespace)
     try:
         index_raw = await db._load_key_value_raw(ikey, strict=True)
-        ids, previous, prev_block = await _previous_epoch(index_raw, namespace, config)
+        ids, previous, prev_block, prev_key, prev_raw, closed_prev = await _previous_epoch(
+            index_raw, namespace, config
+        )
     except Exception as exc:
         return _state(config, UNKNOWN, f"index_{type(exc).__name__}", engine=engine)
-    if prev_block:
-        return _state(config, PENDING_BASELINE, prev_block, engine=engine, equity=equity)
     if config.epoch_id in ids:
         return _state(config, INVALID, "epoch_id_reused", engine=engine)
+    if prev_block:
+        return _state(config, PENDING_BASELINE, prev_block, engine=engine, equity=equity)
 
     record = await _build_baseline(engine, config, namespace, equity, available, ledger, previous)
     index_doc = {"version": VERSION, "epochs": ids + [config.epoch_id]}
+    items = [(key, _dump(record)), (ikey, _dump(index_doc))]
+    expected = {key: None, ikey: index_raw}
+    if closed_prev is not None:
+        items.append((prev_key, _dump(closed_prev)))
+        expected[prev_key] = prev_raw
     try:
-        await save_key_values_atomic_cas(
-            [(key, _dump(record)), (ikey, _dump(index_doc))],
-            expected={key: None, ikey: index_raw},
-            strict=True,
-        )
+        await save_key_values_atomic_cas(items, expected=expected, strict=True)
     except CompareAndSwapConflict:
         return _state(config, UNKNOWN, "concurrent_epoch_create", engine=engine)
     except Exception as exc:
@@ -640,7 +709,7 @@ _LOG_FIELDS = (
     "historical_drawdown", "historical_drawdown_limit", "historical_peak_equity",
     "epoch_drawdown", "epoch_drawdown_limit", "epoch_start_equity", "epoch_started_at",
     "epoch_peak_equity", "epoch_equity", "epoch_floor_equity", "epoch_headroom_usdt",
-    "epoch_breached_at", "baseline_digest",
+    "epoch_breached_at", "epoch_max_drawdown", "baseline_digest",
     "authority", "historical_gate_unchanged", "historical_hwm_written", "live_authorization",
 )
 

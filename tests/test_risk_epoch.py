@@ -65,11 +65,17 @@ class RiskEpochMathTests(unittest.TestCase):
         self.assertNotEqual(digest, risk_epoch.baseline_digest(dict(record, epoch_drawdown_limit=0.5)))
 
     def test_cash_flow_fingerprint_is_order_independent_and_sensitive(self):
-        a = {"applied": [{"identities": ["1"]}, {"identities": ["2"]}]}
-        b = {"applied": [{"identities": ["2"]}, {"identities": ["1"]}]}
-        c = {"applied": [{"identities": ["1"]}, {"identities": ["2"]}, {"identities": ["3"]}]}
-        self.assertEqual(risk_epoch.cash_flow_fingerprint(a), risk_epoch.cash_flow_fingerprint(b))
-        self.assertNotEqual(risk_epoch.cash_flow_fingerprint(a), risk_epoch.cash_flow_fingerprint(c))
+        r1 = {"reconciliation_id": "a", "identities": ["1"], "net_amount": 5.0}
+        r2 = {"reconciliation_id": "b", "identities": ["2"], "net_amount": 2.7808}
+        a = {"applied": [r1, r2]}
+        b = {"applied": [r2, r1]}
+        c = {"applied": [r1, r2, {"reconciliation_id": "c", "identities": ["3"], "net_amount": 1}]}
+        d = {"applied": [r1, dict(r2, net_amount=12.7808)]}
+        e = {"applied": [r1, r2], "pending": [{"identity": "9", "amount": 1.0}]}
+        fp = risk_epoch.cash_flow_fingerprint
+        self.assertEqual(fp(a), fp(b))
+        for other in (c, d, e):
+            self.assertNotEqual(fp(a), fp(other))
 
 
 class RiskEpochGateTests(unittest.TestCase):

@@ -34,10 +34,10 @@ Nada disso foi alterado.
 `bot/risk_epoch.py`, autoridade `TIGHTEN_ONLY`:
 
 - Época identificada por `RISK_EPOCH_ID`, limite próprio `RISK_EPOCH_MAX_DRAWDOWN` (padrão e teto rígido de 30%).
-- Baseline criada uma única vez, por CAS no PostgreSQL, só com: capital autenticado confirmado, conta flat, zero ordens pendentes, zero fluxo externo pendente, HWM histórico presente. Registra equity inicial, HWM e drawdown históricos no início, limite histórico vigente, impressão digital do ledger de fluxos, SHA do código e a época anterior. Os campos imutáveis são protegidos por SHA-256 (`baseline_digest`).
-- `epoch_drawdown = (epoch_peak - equity) / epoch_peak`, com `epoch_peak` subindo só com equity autenticada observada.
-- Estados que bloqueiam: `PENDING_BASELINE`, `BREACHED` (persistente, sobrevive a restart e a recuperação de equity), `INVALID` (adulteração, troca de limite, reuso de id), `FLOW_CHANGED` (qualquer aporte/saque após a baseline), `UNKNOWN` (falha de persistência), `CONFIG_INVALID`.
-- Nova época após uma época rompida exige `RISK_EPOCH_SUPERSEDE_BREACHED_ACK=<id anterior>`; o registro antigo fica intacto e o índice é só de acréscimo.
+- Baseline criada uma única vez, por CAS no PostgreSQL, só com: capital autenticado confirmado, conta flat, zero ordens pendentes, zero fluxo externo pendente, HWM histórico presente. Registra equity inicial, HWM e drawdown históricos no início, limite histórico vigente, impressão digital do ledger de fluxos, SHA do código e a época anterior. Os campos imutáveis carregam um SHA-256 (`baseline_digest`) que detecta corrupção ou deriva acidental; não é autenticação contra quem tem escrita no banco.
+- `epoch_drawdown = (epoch_peak - equity) / epoch_peak`, com `epoch_peak` subindo só com equity autenticada observada. Toda mudança de equity é gravada (checkpoint durável com `last_equity`, `min_equity` e `max_epoch_drawdown`), então uma perda abaixo do limite sobrevive a reinício e entra no resumo da época sucessora.
+- Estados que bloqueiam: `PENDING_BASELINE`, `BREACHED` (persistente, sobrevive a restart e a recuperação de equity), `INVALID` (adulteração, troca de limite, reuso de id), `FLOW_CHANGED` (qualquer aporte/saque após a baseline, ou alteração de valor de um fluxo já aplicado: a impressão digital cobre id, identidades, valor líquido, equity pré/pós e HWM ajustado, e os totais são conferidos), `UNKNOWN` (falha de persistência), `CONFIG_INVALID`.
+- Qualquer época sucessora, com a anterior ACTIVE ou BREACHED, exige `RISK_EPOCH_SUPERSEDE_ACK=<id exato da anterior>`. Sem isso nenhuma sucessora é criada, então trocar só o `RISK_EPOCH_ID` não reinicia o medidor. A anterior é encerrada formalmente na mesma transação (`closed`, `closed_by_epoch_id`, `closing_status`), mantendo baseline e evidência de quebra; uma época encerrada não pode ser reativada. O índice é só de acréscimo.
 - Nunca escreve HWM, proveniência, ledger, PnL ou estado de exchange.
 
 Integração:
@@ -99,7 +99,7 @@ A evidência quantitativa é contra: as aprovações do NEXUS rendem menos que a
 
 ## 8. Testes
 
-- `tests/test_risk_epoch_postgres.py` (12, PostgreSQL 16 real, obrigatório no CI): baseline verificável, preservação byte a byte de HWM/proveniência/ledger, pré-condições de baseline, reinício com novo SHA, adulteração, limite imutável, quebra persistente pós-restart, fluxo externo, criação concorrente (4 sessões), cadeia de épocas com ACK, gate histórico ainda soberano, veto da época com gate histórico passando, época desabilitada sem I/O.
+- `tests/test_risk_epoch_postgres.py` (15, PostgreSQL 16 real, obrigatório no CI): baseline verificável, preservação byte a byte de HWM/proveniência/ledger, pré-condições de baseline, reinício com novo SHA, adulteração, limite imutável, quebra persistente pós-restart, fluxo externo, criação concorrente (4 sessões), cadeia de épocas com ACK, gate histórico ainda soberano, veto da época com gate histórico passando, época desabilitada sem I/O, perda sub-limite durável até a sucessora, alteração de valor com mesma identidade de fluxo, sucessão ACTIVE sem ACK ou com ACK errado.
 - `tests/test_risk_epoch.py` (15): configuração, matemática, digest, matriz de bloqueio, telemetria com nomes separados, API de status, log de startup.
 - `tests/test_controlled_live_reentry_v1.py` (+6): one-shot exige época ACTIVE com folga.
 - Suíte offline completa: 2796/2796 (antes 2763/2763), `MANDATORY_SKIPPED=0`; `bot.release_proof` PASS.

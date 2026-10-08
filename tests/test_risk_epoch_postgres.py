@@ -323,7 +323,7 @@ class RiskEpochPostgresProof(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, _env(**{risk_epoch.EPOCH_ID_ENV: second_id}), clear=False):
             refused = await risk_epoch.observe(engine)
         self.assertEqual(refused["status"], risk_epoch.PENDING_BASELINE)
-        self.assertEqual(refused["reason"], "previous_epoch_breached_ack_missing")
+        self.assertEqual(refused["reason"], "previous_epoch_supersede_ack_missing")
 
         with patch.dict(os.environ, _env(**{
             risk_epoch.EPOCH_ID_ENV: second_id,
@@ -335,8 +335,15 @@ class RiskEpochPostgresProof(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["previous_epoch_id"], EPOCH_ID)
         self.assertEqual(second["previous_epoch_status"], risk_epoch.BREACHED)
         self.assertAlmostEqual(second["previous_epoch_drawdown"], old_record["breach_drawdown"])
-        # The breached epoch record is preserved verbatim.
-        self.assertEqual(await self._record(), old_record)
+        # The breached epoch keeps its baseline and breach evidence verbatim
+        # and only gains the formal closure fields.
+        closed = await self._record()
+        closure = {"closed", "closed_at", "closed_by_epoch_id", "closing_status"}
+        self.assertEqual({k: v for k, v in closed.items() if k not in closure},
+                         {k: v for k, v in old_record.items() if k not in closure})
+        self.assertTrue(closed["closed"])
+        self.assertEqual(closed["closed_by_epoch_id"], second_id)
+        self.assertEqual(closed["closing_status"], risk_epoch.BREACHED)
         index = json.loads(await self._get(risk_epoch.index_key(NAMESPACE)))
         self.assertEqual(index["epochs"], [EPOCH_ID, second_id])
 
@@ -347,6 +354,85 @@ class RiskEpochPostgresProof(unittest.IsolatedAsyncioTestCase):
             reused = await risk_epoch.observe(engine)
         self.assertEqual(reused["status"], risk_epoch.INVALID)
         self.assertEqual(reused["reason"], "epoch_id_reused")
+
+    async def test_sub_limit_loss_is_durable_across_restart_and_into_successor(self):
+        engine = await self._engine()
+        with patch.dict(os.environ, _env(), clear=False):
+            await risk_epoch.observe(engine)
+            await self._set_equity(engine, 4.00)   # -24.78%, peak unchanged
+            state = await risk_epoch.observe(engine)
+        self.assertEqual(state["status"], risk_epoch.ACTIVE)
+        expected_dd = (EQUITY - 4.00) / EQUITY
+        record = await self._record()
+        self.assertEqual(record["last_equity"], 4.00)
+        self.assertAlmostEqual(record["max_epoch_drawdown"], expected_dd)
+        self.assertEqual(record["epoch_peak_equity"], EQUITY)
+
+        # Restart at a partial recovery: the worst sub-limit loss stays on record.
+        restarted = await self._engine(equity=4.50)
+        with patch.dict(os.environ, _env(), clear=False):
+            state = await risk_epoch.observe(restarted)
+        record = await self._record()
+        self.assertAlmostEqual(state["epoch_drawdown"], (EQUITY - 4.50) / EQUITY)
+        self.assertAlmostEqual(record["max_epoch_drawdown"], expected_dd)
+        self.assertEqual(record["min_equity"], 4.00)
+
+        second_id = "BGX_EPOCH_30PCT_TEST_V2"
+        with patch.dict(os.environ, _env(**{
+            risk_epoch.EPOCH_ID_ENV: second_id, risk_epoch.SUPERSEDE_ACK_ENV: EPOCH_ID,
+        }), clear=False):
+            created = await risk_epoch.observe(restarted)
+        self.assertEqual(created["status"], risk_epoch.ACTIVE)
+        second = json.loads(await self._get(risk_epoch.epoch_key(second_id, NAMESPACE)))
+        self.assertEqual(second["previous_epoch_status"], "CLOSED_BY_SUCCESSOR")
+        self.assertAlmostEqual(second["previous_epoch_drawdown"], expected_dd)
+        closed = await self._record()
+        self.assertTrue(closed["closed"])
+        self.assertEqual(closed["closed_by_epoch_id"], second_id)
+        self.assertEqual(closed["baseline_digest"], risk_epoch.baseline_digest(closed))
+
+        # The closed epoch can never be revived by switching the id back.
+        with patch.dict(os.environ, _env(), clear=False):
+            revived = await risk_epoch.observe(restarted)
+            blocked, _ = risk_epoch.blocks_new_entries(revived)
+        self.assertEqual(revived["status"], risk_epoch.INVALID)
+        self.assertEqual(revived["reason"], "epoch_closed_by_successor")
+        self.assertTrue(blocked)
+
+    async def test_amount_change_on_same_flow_identity_is_detected(self):
+        engine = await self._engine()
+        with patch.dict(os.environ, _env(), clear=False):
+            await risk_epoch.observe(engine)
+            altered = json.loads(json.dumps(LEDGER_DOC))
+            altered["applied"][1]["net_amount"] = 12.7808   # same id, new amount
+            await self._put(cash_flow_ledger.LEDGER_KEY, json.dumps(altered))
+            state = await risk_epoch.observe(engine)
+            blocked, _ = risk_epoch.blocks_new_entries(state)
+        self.assertEqual(state["status"], risk_epoch.FLOW_CHANGED)
+        self.assertTrue(blocked)
+
+    async def test_active_epoch_succession_requires_exact_explicit_ack(self):
+        engine = await self._engine()
+        with patch.dict(os.environ, _env(), clear=False):
+            await risk_epoch.observe(engine)
+        before = await self._record()
+        second_id = "BGX_EPOCH_30PCT_TEST_V2"
+        for ack in (None, "WRONG_EPOCH_ID_V0"):
+            extra = {risk_epoch.EPOCH_ID_ENV: second_id}
+            if ack:
+                extra[risk_epoch.SUPERSEDE_ACK_ENV] = ack
+            with patch.dict(os.environ, _env(**extra), clear=False):
+                if ack is None:
+                    os.environ.pop(risk_epoch.SUPERSEDE_ACK_ENV, None)
+                state = await risk_epoch.observe(engine)
+                blocked, _ = risk_epoch.blocks_new_entries(state)
+            self.assertEqual(state["status"], risk_epoch.PENDING_BASELINE, ack)
+            self.assertEqual(state["reason"], "previous_epoch_supersede_ack_missing")
+            self.assertTrue(blocked)
+        self.assertIsNone(await self._get(risk_epoch.epoch_key(second_id, NAMESPACE)))
+        self.assertEqual(await self._record(), before)
+        index = json.loads(await self._get(risk_epoch.index_key(NAMESPACE)))
+        self.assertEqual(index["epochs"], [EPOCH_ID])
 
     # ── gates ──────────────────────────────────────────────────────────────
 
