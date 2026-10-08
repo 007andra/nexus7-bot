@@ -1203,6 +1203,9 @@ async def _maybe_emit_counterfactual_approval_failure_analysis(db):
         log.info("%s", analysis.format_concentration(report))
         log.info("%s", analysis.format_worst_groups(report, horizon=60))
         log.info("%s", analysis.format_worst_groups(report, horizon=240))
+        # Read-only matched-stratum analysis; no candidate/risk/dispatch effect.
+        log.info("%s", analysis.format_selection_strata(report, horizon=60))
+        log.info("%s", analysis.format_selection_strata(report, horizon=240))
         return report
     except Exception as exc:
         _emit("COUNTERFACTUAL_APPROVAL_FAILURE_ANALYSIS_V1", {
