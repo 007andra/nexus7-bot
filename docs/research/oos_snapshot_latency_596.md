@@ -18,9 +18,12 @@ non-authoritative.
   research snapshot, including successful, timed-out and errored attempts.
 - Records `elapsed_ms` (wall-clock), `metadata_ms`, `candidates_ms`,
   `outcomes_ms`, `compute_ms`, exact wait duration at the shared DB I/O
-  lock, time spent within the DB fetch after acquiring the lock, total fetch
-  calls, counts of rows returned, fetch cancellations and whether lock was
-  never acquired.
+  lock (including metadata DDL), time within DB fetch or metadata execute
+  after acquiring the lock, total fetch/execute calls, rows returned,
+  cancellations and whether the shared lock was never acquired.
+- The metadata stage also invokes `_exec` for DDL/insert. `db_exec_ms`,
+  `exec_calls` and `exec_cancelled` cover those calls separately from SELECTs.
+  Client-call times include network and server response, not server-only query time.
 - `stage` means the last/cancelled logical stage, not causal proof.
   The `metadata` stage can contain schema/metadata initialization. Only
   measured `db_fetch_ms` covers actual `_fetchall` query scope (client
@@ -54,8 +57,8 @@ claims of cause from a single candle-time coincidence.
 
 `python -m unittest -v tests.test_oos_snapshot_timing_596` verifies
 redacted fields, no-op default `ContextVar`, lock-held vs DB-fetch
-timeouts, cancellation, unchanged 3.0-second budget, error isolation and
-same report return on success. Source is kept on independent PR/branch for
+timeouts, metadata DDL lock/client timeouts, cancellation, unchanged
+3.0-second budget, error isolation and same report return on success. Source is kept on independent PR/branch for
 #596, not mixed with OOS dataset/export PR #595.
 
 No production Railway credential is required for these tests.
