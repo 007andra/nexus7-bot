@@ -43,6 +43,20 @@ class RailwayLogTests(unittest.TestCase):
         self.assertNotIn("risk_budget", inputs[0])
         self.assertIsNone(inputs[0]["cost_snapshot"])
 
+
+    def test_scientific_approval_epoch_rounding_is_not_false_mismatch(self):
+        a = approved()
+        a["message"] = a["message"].replace("1791465300.001", "1.7914653e+09")
+        rows, stats = extract([a, shadow()])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(stats["approved_input_pairs"], 1)
+
+    def test_scientific_approval_epoch_outside_display_precision_rejected(self):
+        a = approved()
+        a["message"] = a["message"].replace("1791465300.001", "1.7914654e+09")
+        with self.assertRaisesRegex(ValueError, "CAPTURE_MISMATCH"):
+            extract([a, shadow()])
+
     def test_missing_shadow_is_explicit(self):
         records, report = extract([approved()])
         self.assertEqual(records, [])
