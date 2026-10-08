@@ -6,7 +6,9 @@ postgres:16. All writes use disposable, namespaced test keys only.
 import asyncio
 import os
 import sys
+import sysconfig
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from bot import database as db
@@ -241,6 +243,8 @@ class PostgresCasSessionIsolationTests(unittest.IsolatedAsyncioTestCase):
     async def test_independent_process_writers_and_restart_reject_stale_guard(self):
         program = '''
 import asyncio, os, sys
+from tests.run_offline import install_network_guard
+install_network_guard()
 import asyncpg
 from bot import database as db
 from bot.atomic_key_value import save_key_values_atomic_cas, CompareAndSwapConflict
@@ -261,9 +265,16 @@ async def main():
 asyncio.run(main())
 '''
         key = self.prefix + "process_race"
+        child_env = {name: os.environ[name] for name in
+                     ("PATH", "HOME", "LANG", "TEST_POSTGRES_DSN") if name in os.environ}
+        child_env.update(
+            PYTHONPATH=os.pathsep.join((str(Path(__file__).resolve().parents[1]),
+                                       sysconfig.get_paths()["purelib"])),
+            PAPER_TRADE="true", NEXUS_TELEGRAM="false", LOG_LEVEL="ERROR",
+        )
         async def contender(value):
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-c", program, key, value,
+                sys.executable, "-S", "-c", program, key, value, env=child_env,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             try:
