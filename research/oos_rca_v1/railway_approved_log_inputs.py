@@ -69,10 +69,16 @@ def extract(logs):
         dest[cid] = fields
     dataset, missing = [], []
     for cid, approval in sorted(approvals.items()):
+        if not cid.startswith("HARD_GATE_SHADOW:") or approval.get("approval_state") != "NATURAL_COUNTERFACTUAL_NEXUS_APPROVED":
+            raise ValueError("APPROVAL_NOT_FROZEN_RESEARCH_STATE")
         raw = shadow.get(cid)
         if raw is None:
             missing.append(cid)
             continue
+        if (raw.get("shadow_only") != "true" or raw.get("population") != "HARD_GATE_SHADOW"
+                or raw.get("live_eligible") != "false" or raw.get("decision_effect") != "NONE"
+                or raw.get("execution_effect") != "NONE"):
+            raise ValueError("SHADOW_AUTHORITY_MISMATCH")
         if any(raw.get(k) != approval.get(k) for k in PAIR_FIELDS):
             raise ValueError("APPROVAL_SHADOW_IDENTITY_MISMATCH")
         cap = _number(raw.get("captured_epoch"))
