@@ -2,19 +2,23 @@
 -- Run only in an authorized Postgres SQL client. Export SELECT result privately.
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 
-WITH frozen AS (
+WITH frozen_source AS (
   SELECT cohort_id,
          CASE WHEN pg_input_is_valid(payload,'jsonb') THEN payload::jsonb END AS metadata
   FROM prospective_oos_cohort_v1
   WHERE cohort_id = 'CALIBRATION_GENERALIZATION_V1'
-    AND (payload::jsonb ->> 'hypothesis_frozen') = 'true'
-    AND (payload::jsonb ->> 'reset_allowed') = 'false'
-    AND (payload::jsonb ->> 'started_epoch') =
-        (payload::jsonb ->> 'discovery_cutoff_epoch')
+), frozen AS (
+  SELECT cohort_id, metadata
+  FROM frozen_source
+  WHERE metadata ->> 'hypothesis_frozen' = 'true'
+    AND metadata ->> 'reset_allowed' = 'false'
+    AND metadata ->> 'started_epoch' = metadata ->> 'discovery_cutoff_epoch'
+    AND pg_input_is_valid(metadata ->> 'started_epoch', 'double precision')
 ), candidates AS (
   SELECT f.cohort_id,
     (f.metadata ->> 'started_epoch')::double precision AS started_epoch,
-    c.candidate_id, c.symbol, p.signal AS signal,
+    c.candidate_id, c.symbol, c.captured_epoch AS captured_epoch_real,
+    p.signal AS signal,
     CASE WHEN pg_input_is_valid(p.signal->>'captured_epoch','double precision')
       THEN (p.signal->>'captured_epoch')::double precision END AS capture,
     p.signal -> 'counterfactual_nexus_v1' AS cf
@@ -45,6 +49,8 @@ SELECT validated.cohort_id,
   EXTRACT(EPOCH FROM transaction_timestamp()) AS snapshot_as_of_epoch,
   validated.started_epoch AS frozen_started_epoch,
   validated.candidate_id, validated.capture AS captured_epoch,
+  validated.captured_epoch_real,
+  'JSON_PRECISE' AS export_scope,
   validated.symbol, validated.signal ->> 'side' AS side,
   validated.signal ->> 'regime' AS regime,
   validated.signal ->> 'setup' AS setup,
@@ -56,7 +62,9 @@ SELECT validated.cohort_id,
     ELSE 'COUNTERFACTUAL_REJECTED'
   END AS decision_state,
   h.horizon AS outcome_horizon_minutes,
-  COALESCE(op.outcome ->> 'outcome','MISSING') AS outcome_state,
+  CASE WHEN o.candidate_id IS NOT NULL AND op.outcome IS NULL
+    THEN 'MALFORMED_JSON' ELSE COALESCE(op.outcome ->> 'outcome','MISSING') END AS outcome_state,
+  o.candidate_id IS NULL OR op.outcome IS NOT NULL AS outcome_payload_parse_ok,
   op.outcome ->> 'return_basis' AS return_basis,
   op.outcome ->> 'future_return' AS hypothetical_gross_return,
   op.outcome ->> 'MFE' AS hypothetical_mfe,
