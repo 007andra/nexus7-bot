@@ -218,20 +218,39 @@ async def _exec(sql: str, params: tuple = (), *, strict: bool = False):
         if strict:
             raise PersistenceError("database unavailable")
         return False
-    async with _io_lock:
-        try:
-            if _is_pg:
-                await _conn.execute(_pg_sql(sql), *params)
-            else:
-                await _conn.execute(sql, params)
-                await _conn.commit()
-            return True
-        except Exception as e:
-            log.error(f"DB exec: {e}")
-            if strict:
-                raise PersistenceError("database write failed") from e
-            return False
-
+    # Attribute metadata DDL/insert lock wait, without changing DB semantics.
+    # For non-OOS tasks this ContextVar is None and timing is not sampled.
+    _probe = _oos_snapshot_probe.get()
+    _enter = time.perf_counter() if _probe is not None else None
+    _acquired = None
+    _cancelled = False
+    try:
+        async with _io_lock:
+            if _probe is not None:
+                _acquired = time.perf_counter()
+            try:
+                if _is_pg:
+                    await _conn.execute(_pg_sql(sql), *params)
+                else:
+                    await _conn.execute(sql, params)
+                    await _conn.commit()
+                return True
+            except Exception as e:
+                log.error(f"DB exec: {e}")
+                if strict:
+                    raise PersistenceError("database write failed") from e
+                return False
+    except asyncio.CancelledError:
+        _cancelled = True
+        raise
+    finally:
+        if _probe is not None:
+            _finished = time.perf_counter()
+            _probe.record_exec(
+                waited_ms=((_acquired if _acquired is not None else _finished) - _enter) * 1000,
+                executed_ms=(_finished - _acquired) * 1000 if _acquired is not None else 0,
+                lock_acquired=_acquired is not None, cancelled=_cancelled,
+            )
 
 async def _fetchone(sql: str, params: tuple = (), *, strict: bool = False):
     if not _conn:
