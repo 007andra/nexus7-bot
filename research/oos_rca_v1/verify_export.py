@@ -10,6 +10,7 @@ import csv
 import hashlib
 import json
 import math
+import struct
 from collections import Counter
 from pathlib import Path
 
@@ -19,6 +20,8 @@ REQUIRED = {
     "outcome_horizon_minutes", "outcome_state", "return_basis",
     "hypothetical_gross_return", "hypothetical_mfe", "hypothetical_mae",
     "observation_start_epoch", "outcome_identity_ok", "outcome_horizon_ok",
+    "captured_epoch_real", "export_scope", "counterfactual_status",
+    "execution_allowed_source", "outcome_payload_parse_ok",
 }
 COHORT = "CALIBRATION_GENERALIZATION_V1"
 APPROVED = "COUNTERFACTUAL_APPROVED"
@@ -49,7 +52,7 @@ def validate(records):
     if not records:
         raise ValueError("EMPTY_EXPORT_OR_FROZEN_COHORT_NOT_FOUND")
     seen, ids = set(), {}
-    snapshot, frozen = None, None
+    snapshot, frozen, scope = None, None, None
     problems, missing = [], Counter()
     validated = {(g, h): [] for g in (APPROVED, REJECTED) for h in HORIZONS}
     observed_missing_basis = invalid_observed = 0
@@ -69,17 +72,42 @@ def validate(records):
         now = number(row.get("snapshot_as_of_epoch"))
         started = number(row.get("frozen_started_epoch"))
         captured = number(row.get("captured_epoch"))
-        if None in (now, started, captured):
+        stored_real = number(row.get("captured_epoch_real"))
+        row_scope = row.get("export_scope")
+        if row_scope not in ("JSON_PRECISE", "REAL_COARSE"):
+            problems.append(f"row {line}: UNKNOWN_EXPORT_SCOPE")
+        if scope is None:
+            scope = row_scope
+        elif scope != row_scope:
+            problems.append(f"row {line}: MIXED_CUTOFF_SCOPES")
+        if None in (now, started, captured, stored_real):
             problems.append(f"row {line}: MISSING_CAPTURE_OR_SNAPSHOT")
             continue
         if snapshot is None:
             snapshot, frozen = now, started
         if abs(now - snapshot) > 0.01 or abs(started - frozen) > 0.01:
             problems.append(f"row {line}: NON_ATOMIC_SNAPSHOT")
-        if captured + 1e-6 < started or captured > now + 1e-6:
-            problems.append(f"row {line}: CANDIDATE_OUTSIDE_FROZEN_CUTOFF_OR_SNAPSHOT")
-        if decision not in (APPROVED, REJECTED, "INDETERMINATE_ERROR", "INDETERMINATE"):
+        # Strict maturation review checks precise JSON epoch. Old OOS snapshot
+        # queries the PostgreSQL REAL column using a float32 cutoff.
+        if row_scope == "JSON_PRECISE":
+            in_scope = captured + 1e-9 >= started
+        elif row_scope == "REAL_COARSE":
+            try:
+                started_float4 = struct.unpack("!f", struct.pack("!f", started))[0]
+            except (OverflowError, struct.error):
+                started_float4 = None
+            in_scope = started_float4 is not None and stored_real >= started_float4
+        else:
+            in_scope = False
+        if not in_scope or captured > now + 1e-6:
+            problems.append(f"row {line}: CANDIDATE_OUTSIDE_SELECTED_CUTOFF_OR_SNAPSHOT")
+        if decision not in (APPROVED, REJECTED):
             problems.append(f"row {line}: INVALID_COUNTERFACTUAL_DECISION")
+        # Both production snapshots use (execution_allowed is True): missing,
+        # null or false values mean rejected, not indeterminate.
+        should_approve = str(row.get("execution_allowed_source")).lower() == "true"
+        if decision != (APPROVED if should_approve else REJECTED):
+            problems.append(f"row {line}: COUNTERFACTUAL_DECISION_MISMATCH")
         attributes = tuple(row.get(k) for k in (
             "symbol", "side", "regime", "setup", "captured_epoch", "decision_state"
         ))
@@ -91,6 +119,8 @@ def validate(records):
             problems.append(f"row {line}: OUTCOME_CANDIDATE_ID_MISMATCH")
         if str(row.get("outcome_horizon_ok")).lower() not in ("t", "true"):
             problems.append(f"row {line}: OUTCOME_HORIZON_MISMATCH")
+        if str(row.get("outcome_payload_parse_ok")).lower() not in ("t", "true"):
+            problems.append(f"row {line}: MALFORMED_OUTCOME_PAYLOAD")
         state = row.get("outcome_state")
         if state != "OBSERVED":
             missing[(str(decision), horizon, state or "MISSING")] += 1
@@ -99,7 +129,12 @@ def validate(records):
         gain = number(row.get("hypothetical_gross_return"))
         mfe = number(row.get("hypothetical_mfe"))
         mae = number(row.get("hypothetical_mae"))
+        # Old COHORT_V1 _outcome_map accepts observed finite return/MFE/MAE
+        # (without maturity proof) and excludes status=ERROR from _matched.
+        # MATURATION_REVIEW_V1 requires verified horizon maturity and permits
+        # any _candidate with execution_allowed is not True as rejected.
         mature = (
+            True if row_scope == "REAL_COARSE" else
             observed_at is not None
             and observed_at + horizon * 60 <= now + 1e-6
             and observed_at + 1e-6 >= math.ceil(captured / 900) * 900
@@ -112,6 +147,9 @@ def validate(records):
         # Preserve the production-validated gross mark but flag this limitation.
         if row.get("return_basis") != "hypothetical_entry_gross":
             observed_missing_basis += 1
+        if row_scope == "REAL_COARSE" and row.get("counterfactual_status") == "ERROR":
+            missing[(str(decision), horizon, "LEGACY_EXCLUDES_STATUS_ERROR")] += 1
+            continue
         if decision in (APPROVED, REJECTED):
             validated[(decision, horizon)].append(gain)
     for cid in ids:
@@ -130,7 +168,10 @@ def validate(records):
             and rejected["mean_gross_fraction"] is not None else None
         )
     return {
-        "cohort_id": COHORT, "as_of_epoch": snapshot,
+        "cohort_id": COHORT, "export_scope": scope,
+        "reference_report": ("PROSPECTIVE_OOS_COHORT_V1" if scope == "REAL_COARSE"
+                             else "PROSPECTIVE_OOS_MATURATION_REVIEW_V1"),
+        "as_of_epoch": snapshot,
         "frozen_started_epoch": frozen, "unique_candidates": len(ids),
         "total_rows": len(records), "decision_counts": dict(sorted(decisions.items())),
         "outcomes_matching_production_validator": samples,
