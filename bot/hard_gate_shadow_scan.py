@@ -57,6 +57,8 @@ _PROSPECTIVE_OOS_INTERVAL_S = 300.0
 _PROSPECTIVE_OOS_LAST_EMIT = 0.0
 _SHORT_DOWN_BOS_INTERVAL_S = 60.0
 _SHORT_DOWN_BOS_LAST_EMIT = 0.0
+_V4_ABLATION_INTERVAL_S = 600.0
+_V4_ABLATION_LAST_EMIT = 0.0
 _OOS_GATE_CLEAR_CONTINUITY_INTERVAL_S = 30.0
 _OOS_GATE_CLEAR_CONTINUITY_LAST_RUN = 0.0
 _TABLE = """CREATE TABLE IF NOT EXISTS hard_gate_shadow_candidates_v1 (
@@ -1343,6 +1345,38 @@ async def _maybe_emit_prospective_oos_cohort(db):
         log.info("%s", _timing.log_line(status=_timing_status, timeout_s=3.0))
 
 
+async def _maybe_emit_v4_ablation_phase_a(db):
+    """Optional read-only, strictly post-issue #602 V4 audit, never trading authority."""
+    global _V4_ABLATION_LAST_EMIT
+    from bot import v4_prospective_ablation_phase_a as study
+    if not study.enabled():
+        return None
+    now = time.monotonic()
+    if (_V4_ABLATION_LAST_EMIT > 0.0
+            and now - _V4_ABLATION_LAST_EMIT < _V4_ABLATION_INTERVAL_S):
+        return None
+    _V4_ABLATION_LAST_EMIT = now
+    try:
+        report = await asyncio.wait_for(study.snapshot(db), timeout=3.0)
+        log.warning("%s", study.format_log(report))
+        return report
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _emit("V4_PROSPECTIVE_ABLATION_PHASE_A", {
+            "status": "ERROR",
+            "error": type(exc).__name__,
+            "research_only": True,
+            "gross_only": True,
+            "net_proven": False,
+            "promotion_allowed": False,
+            "live_allowed": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        })
+        return None
+
+
 async def _maybe_emit_short_down_bos_prospective(db):
     """Read-only frozen segment validation; never grants LIVE authority."""
     global _SHORT_DOWN_BOS_LAST_EMIT
@@ -1760,6 +1794,9 @@ async def scan(engine, *, db=None, bbo_views=None):
         prospective_oos_report = await _maybe_emit_prospective_oos_cohort(db)
         _check(engine)
         await _maybe_emit_short_down_bos_prospective(db)
+        _check(engine)
+        # Completely separate post-cutoff challenger; no changes to decisions.
+        await _maybe_emit_v4_ablation_phase_a(db)
         _check(engine)
 
         # The prospective OOS cohort/ledger/reviews are independent research
