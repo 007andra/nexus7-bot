@@ -8,6 +8,7 @@ Fault-tolerant: se DB cair, bot continua operando.
 import os, json, asyncio
 import time
 from bot.prospective_oos_snapshot_timing_v1 import active_probe as _oos_snapshot_probe
+from bot.db_lock_owner_trace_v1 import LockHolderTracker, safe_query_label, safe_serialized_label
 from datetime import datetime, timezone, date
 from functools import wraps
 from bot.logger import log
@@ -17,6 +18,20 @@ SQLITE_PATH  = "/tmp/bgx_capital.db"
 _conn        = None
 _is_pg       = False
 _io_lock     = asyncio.Lock()
+# Operator-controlled diagnostic; the original asyncio.Lock stays in use.
+_OOS_LOCK_OWNER_TRACE_ENABLED = os.environ.get("OOS_DB_LOCK_OWNER_TRACE_V1", "false").strip().lower() in {"1", "true", "yes", "on"}
+_io_lock_holder = LockHolderTracker()
+
+
+def _io_lock_scope(label):
+    return (_io_lock_holder.hold(_io_lock, label)
+            if _OOS_LOCK_OWNER_TRACE_ENABLED else _io_lock)
+
+
+def _io_lock_initial_owner(probe):
+    return (_io_lock_holder.initial_holder(_io_lock)
+            if probe is not None and _OOS_LOCK_OWNER_TRACE_ENABLED
+            else "NOT_SAMPLED")
 
 
 class PersistenceError(RuntimeError):
@@ -26,7 +41,8 @@ class PersistenceError(RuntimeError):
 def _serialized_io(func):
     @wraps(func)
     async def wrapped(*args, **kwargs):
-        async with _io_lock:
+        label = safe_serialized_label(func.__name__) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
+        async with _io_lock_scope(label):
             return await func(*args, **kwargs)
     return wrapped
 
@@ -222,10 +238,12 @@ async def _exec(sql: str, params: tuple = (), *, strict: bool = False):
     # For non-OOS tasks this ContextVar is None and timing is not sampled.
     _probe = _oos_snapshot_probe.get()
     _enter = time.perf_counter() if _probe is not None else None
+    _owner_at_start = _io_lock_initial_owner(_probe)
     _acquired = None
     _cancelled = False
+    label = safe_query_label("exec", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
     try:
-        async with _io_lock:
+        async with _io_lock_scope(label):
             if _probe is not None:
                 _acquired = time.perf_counter()
             try:
@@ -250,6 +268,7 @@ async def _exec(sql: str, params: tuple = (), *, strict: bool = False):
                 waited_ms=((_acquired if _acquired is not None else _finished) - _enter) * 1000,
                 executed_ms=(_finished - _acquired) * 1000 if _acquired is not None else 0,
                 lock_acquired=_acquired is not None, cancelled=_cancelled,
+                owner_at_wait_start=_owner_at_start,
             )
 
 async def _fetchone(sql: str, params: tuple = (), *, strict: bool = False):
@@ -257,7 +276,8 @@ async def _fetchone(sql: str, params: tuple = (), *, strict: bool = False):
         if strict:
             raise PersistenceError("database unavailable")
         return None
-    async with _io_lock:
+    label = safe_query_label("fetchone", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
+    async with _io_lock_scope(label):
         try:
             if _is_pg:
                 return await _conn.fetchrow(_pg_sql(sql), *params)
@@ -279,11 +299,13 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
     # Default callers have identical DB queries, lock and exception semantics.
     _probe = _oos_snapshot_probe.get()
     _enter = time.perf_counter() if _probe is not None else None
+    _owner_at_start = _io_lock_initial_owner(_probe)
     _acquired = None
     _row_count = None
     _cancelled = False
+    label = safe_query_label("fetchall", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
     try:
-        async with _io_lock:
+        async with _io_lock_scope(label):
             if _probe is not None:
                 _acquired = time.perf_counter()
             try:
@@ -311,6 +333,7 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
                 fetched_ms=(_finished - _acquired) * 1000 if _acquired is not None else 0,
                 rows=_row_count, lock_acquired=_acquired is not None,
                 cancelled=_cancelled,
+                owner_at_wait_start=_owner_at_start,
             )
 
 
