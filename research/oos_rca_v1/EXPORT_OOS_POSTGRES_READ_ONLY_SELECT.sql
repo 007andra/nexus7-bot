@@ -1,0 +1,76 @@
+-- NEXUS-7: read-only snapshot of frozen OOS research cohort.
+-- Run only in an authorized Postgres SQL client. Export SELECT result privately.
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+
+WITH frozen AS (
+  SELECT cohort_id, payload::jsonb AS metadata
+  FROM prospective_oos_cohort_v1
+  WHERE cohort_id = 'CALIBRATION_GENERALIZATION_V1'
+    AND (payload::jsonb ->> 'hypothesis_frozen') = 'true'
+    AND (payload::jsonb ->> 'reset_allowed') = 'false'
+    AND (payload::jsonb ->> 'started_epoch') =
+        (payload::jsonb ->> 'discovery_cutoff_epoch')
+), candidates AS (
+  SELECT f.cohort_id,
+    (f.metadata ->> 'started_epoch')::double precision AS started_epoch,
+    c.candidate_id, c.symbol, c.payload::jsonb AS signal,
+    (c.payload::jsonb ->> 'captured_epoch')::double precision AS capture,
+    c.payload::jsonb -> 'counterfactual_nexus_v1' AS cf
+  FROM hard_gate_shadow_candidates_v1 AS c
+  CROSS JOIN frozen AS f
+  WHERE c.population = 'HARD_GATE_SHADOW'
+    -- Column captured_epoch is REAL; compare full-precision JSON timestamp.
+    AND (c.payload::jsonb ->> 'captured_epoch')::double precision >=
+        (f.metadata ->> 'started_epoch')::double precision
+    AND (c.payload::jsonb ->> 'captured_epoch')::double precision <=
+        EXTRACT(EPOCH FROM transaction_timestamp())::double precision
+), validated AS (
+  SELECT * FROM candidates AS c
+  WHERE c.cf ->> 'cohort' = 'MIN_ORDER_BLOCKED_COUNTERFACTUAL_NEXUS'
+    AND c.cf ->> 'candidate_id' = c.candidate_id
+    AND c.signal ->> 'candidate_id' = c.candidate_id
+    AND c.cf ->> 'risk_epoch_traversal_credit' = 'false'
+    AND c.signal ->> 'shadow_only' = 'true'
+    AND c.signal ->> 'live_eligible' = 'false'
+)
+SELECT validated.cohort_id,
+  EXTRACT(EPOCH FROM transaction_timestamp()) AS snapshot_as_of_epoch,
+  validated.started_epoch AS frozen_started_epoch,
+  validated.candidate_id, validated.capture AS captured_epoch,
+  validated.symbol, validated.signal ->> 'side' AS side,
+  validated.signal ->> 'regime' AS regime,
+  validated.signal ->> 'setup' AS setup,
+  validated.signal ->> 'entry' AS entry_reference,
+  validated.signal ->> 'stop' AS stop_reference,
+  validated.signal ->> 'target' AS target_reference,
+  CASE
+    WHEN validated.cf ->> 'status' = 'ERROR' THEN 'INDETERMINATE_ERROR'
+    WHEN validated.cf ->> 'execution_allowed' = 'true' THEN 'COUNTERFACTUAL_APPROVED'
+    WHEN validated.cf ->> 'execution_allowed' = 'false' THEN 'COUNTERFACTUAL_REJECTED'
+    ELSE 'INDETERMINATE'
+  END AS decision_state,
+  h.horizon AS outcome_horizon_minutes,
+  COALESCE(o.payload::jsonb ->> 'outcome','MISSING') AS outcome_state,
+  o.payload::jsonb ->> 'return_basis' AS return_basis,
+  o.payload::jsonb ->> 'future_return' AS hypothetical_gross_return,
+  o.payload::jsonb ->> 'MFE' AS hypothetical_mfe,
+  o.payload::jsonb ->> 'MAE' AS hypothetical_mae,
+  o.payload::jsonb ->> 'observation_start' AS observation_start_epoch,
+  CASE
+    WHEN o.candidate_id IS NULL THEN true
+    ELSE COALESCE(o.payload::jsonb ->> 'candidate_id',validated.candidate_id) =
+         validated.candidate_id
+  END AS outcome_identity_ok,
+  CASE
+    WHEN o.candidate_id IS NULL THEN true
+    ELSE (o.payload::jsonb ->> 'horizon') = h.horizon::text
+  END AS outcome_horizon_ok
+FROM validated
+CROSS JOIN (VALUES (60),(240)) AS h(horizon)
+LEFT JOIN hard_gate_shadow_outcomes_v1 AS o
+  ON o.candidate_id=validated.candidate_id
+  AND o.horizon=h.horizon
+  AND o.population='HARD_GATE_SHADOW'
+ORDER BY validated.capture, validated.candidate_id, h.horizon;
+
+ROLLBACK;
