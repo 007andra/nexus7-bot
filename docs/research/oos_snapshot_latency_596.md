@@ -21,6 +21,11 @@ non-authoritative.
   lock (including metadata DDL), time within DB fetch or metadata execute
   after acquiring the lock, total fetch/execute calls, rows returned,
   cancellations and whether the shared lock was never acquired.
+- Splits successful fetched rows into `metadata_rows`, `candidate_rows`,
+  `outcome_rows`, and `unattributed_rows` while preserving `rows_fetched`.
+  These are **database result-row counts**, not unique candidates, final
+  matched outcomes or deduplicated/cohort-eligible records. The split is
+  purely from the active logical stage and never contains payload fields.
 - The metadata stage also invokes `_exec` for DDL/insert. `db_exec_ms`,
   `exec_calls` and `exec_cancelled` cover those calls separately from SELECTs.
   Client-call times include network and server response, not server-only query time.

@@ -31,6 +31,8 @@ class SnapshotTimingProbe:
         self.db_fetch_ms = 0.0
         self.lock_not_acquired = 0
         self.rows_fetched = 0
+        self.rows_by_stage = {name: 0 for name in ("metadata", "candidates", "outcomes")}
+        self.unattributed_rows = 0
         self.fetch_cancelled = 0
         self.missing_row_counts = 0
 
@@ -74,7 +76,12 @@ class SnapshotTimingProbe:
         if rows is None:
             self.missing_row_counts += 1
         else:
-            self.rows_fetched += max(0, int(rows))
+            count = max(0, int(rows))
+            self.rows_fetched += count
+            if self.active_stage in self.rows_by_stage:
+                self.rows_by_stage[self.active_stage] += count
+            else:
+                self.unattributed_rows += count
 
     def record_exec(self, *, waited_ms, executed_ms, lock_acquired,
                     cancelled):
@@ -108,6 +115,10 @@ class SnapshotTimingProbe:
             "exec_cancelled": self.exec_cancelled,
             "fetch_calls": self.fetch_calls,
             "rows_fetched": self.rows_fetched,
+            "metadata_rows": self.rows_by_stage["metadata"],
+            "candidate_rows": self.rows_by_stage["candidates"],
+            "outcome_rows": self.rows_by_stage["outcomes"],
+            "unattributed_rows": self.unattributed_rows,
             "lock_not_acquired": self.lock_not_acquired,
             "fetch_cancelled": self.fetch_cancelled,
             "missing_row_counts": self.missing_row_counts,

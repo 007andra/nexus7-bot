@@ -34,6 +34,41 @@ class TimingProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("candidate_id", probe.log_line(status="OK"))
         self.assertNotIn("database_url", probe.log_line(status="OK").lower())
 
+    async def test_row_counts_attributed_without_query_or_payload(self):
+        probe = timing.SnapshotTimingProbe()
+        async def fetch_stage(n):
+            probe.record_fetch(waited_ms=0, fetched_ms=1, rows=n,
+                               lock_acquired=True, cancelled=False)
+        await probe.await_stage("metadata", fetch_stage(1))
+        await probe.await_stage("candidates", fetch_stage(3500))
+        await probe.await_stage("outcomes", fetch_stage(1500))
+        fields = probe.fields(status="OK")
+        self.assertEqual(fields["metadata_rows"], 1)
+        self.assertEqual(fields["candidate_rows"], 3500)
+        self.assertEqual(fields["outcome_rows"], 1500)
+        self.assertEqual(fields["unattributed_rows"], 0)
+        self.assertEqual(fields["rows_fetched"], 5001)
+        self.assertEqual(fields["fetch_calls"], 3)
+        self.assertFalse(fields["live_allowed"])
+        self.assertNotIn("payload", probe.log_line(status="OK").lower())
+        self.assertNotIn("candidate_id", probe.log_line(status="OK"))
+
+    async def test_unattributed_and_cancelled_fetch_counts_stay_consistent(self):
+        probe = timing.SnapshotTimingProbe()
+        probe.record_fetch(waited_ms=0, fetched_ms=0, rows=2,
+                           lock_acquired=True, cancelled=False)
+        async def cancelled_fetch():
+            probe.record_fetch(waited_ms=9, fetched_ms=0, rows=None,
+                               lock_acquired=False, cancelled=True)
+        await probe.await_stage("outcomes", cancelled_fetch())
+        fields = probe.fields(status="TIMEOUT")
+        self.assertEqual(fields["unattributed_rows"], 2)
+        self.assertEqual(fields["outcome_rows"], 0)
+        self.assertEqual(fields["rows_fetched"], 2)
+        self.assertEqual(fields["fetch_cancelled"], 1)
+        self.assertEqual(fields["lock_not_acquired"], 1)
+        self.assertEqual(fields["missing_row_counts"], 1)
+
     async def test_cancellation_keeps_stage_without_errors_or_resurrection(self):
         probe = timing.SnapshotTimingProbe()
         blocker = asyncio.Event()
