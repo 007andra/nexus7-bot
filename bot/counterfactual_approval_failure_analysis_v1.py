@@ -332,6 +332,12 @@ def build_report(payloads, outcomes60=(), outcomes240=(), *, epoch_id="UNKNOWN",
         for dim in ("symbol", "setup", "side", "regime", "time_bucket")
     }
 
+    # Research-only descriptive control for simple side/regime/setup mix effects.
+    # It cannot identify a causal approval edge or change runtime decisions.
+    from bot import selection_bias_stratified_v1 as strata
+    strata60 = strata.evaluate(m60)
+    strata240 = strata.evaluate(m240)
+
     return {
         **AUTHORITY,
         "epoch_id": epoch_id,
@@ -364,6 +370,8 @@ def build_report(payloads, outcomes60=(), outcomes240=(), *, epoch_id="UNKNOWN",
         "approval_concentration": _concentration(records),
         "dimensions_60m": dimensions60,
         "dimensions_240m": dimensions240,
+        "selection_strata_60m": strata60,
+        "selection_strata_240m": strata240,
         "minimum_group_n_for_interpretation": MIN_GROUP_N,
         "interpretation_guard": (
             "DIAGNOSTIC_ASSOCIATIONS_ONLY_REQUIRE_NEW_PROSPECTIVE_OOS_COHORT"
@@ -501,3 +509,12 @@ def format_worst_groups(report, *, horizon=60, limit=10):
         + ("|".join(parts) if parts else "NONE")
         + " small_n_guard=true association_not_causation=true execution_effect=NONE"
     )
+
+
+def format_selection_strata(report, *, horizon=60):
+    """Observational disaggregation; does not authorize score/threshold changes."""
+    from bot import selection_bias_stratified_v1 as strata
+    if horizon not in (60, 240):
+        raise ValueError("INVALID_HORIZON")
+    key = "selection_strata_60m" if horizon == 60 else "selection_strata_240m"
+    return strata.format_log(report[key], horizon=horizon)
