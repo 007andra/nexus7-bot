@@ -47,6 +47,18 @@ def safe_serialized_label(func_name: str) -> str:
     return "serialized:" + SERIALIZED_CLASSES.get(func_name, "other")
 
 
+SAFE_LABELS = {
+    kind + ":" + label
+    for kind in ("exec", "fetchone", "fetchall")
+    for label in (tuple(name for _, name in TABLE_CLASSES) + ("other",))
+} | {"serialized:" + name for name in (*SERIALIZED_CLASSES.values(), "other")}
+SAFE_LABELS |= {"NOT_SAMPLED", "UNHELD_AT_START", "UNKNOWN_AT_START"}
+
+
+def is_safe_holder_label(value):
+    return isinstance(value, str) and value in SAFE_LABELS
+
+
 class LockHolderTracker:
     def __init__(self):
         self.holder = None
