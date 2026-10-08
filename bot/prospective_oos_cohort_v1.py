@@ -138,6 +138,40 @@ def _concentration(records):
     return result
 
 
+# Explicit opt-in performance experiment. Frozen metadata stays durable and
+# authoritative; do not mutate, reset, or backfill it for research convenience.
+METADATA_FAST_PATH_FLAG = "OOS_METADATA_FROZEN_READONLY_V1"
+
+
+def metadata_fast_path_enabled() -> bool:
+    return os.environ.get(METADATA_FAST_PATH_FLAG, "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+async def load_frozen_metadata_for_snapshot(db, *, use_fast_path=None):
+    """Read existing immutable metadata first; preserve legacy fallback.
+
+    Under the default OFF setting the exact former ensure_cohort path runs.
+    ON: one existing SELECT rather than DDL+SELECT when the row exists.
+    If the table or cohort row is missing, return to the original guarded
+    ensure_cohort path; do not create a new cohort without that guard.
+    No new tables, risk authority, candidate/outcome selection or timer change.
+    """
+    if use_fast_path is None:
+        use_fast_path = metadata_fast_path_enabled()
+    if not use_fast_path:
+        return await ensure_cohort(db)
+    rows = await db._fetchall(
+        "SELECT payload FROM prospective_oos_cohort_v1 WHERE cohort_id=?",
+        (COHORT_ID,),
+    )
+    if rows:
+        raw = rows[0]["payload"] if hasattr(rows[0], "keys") else rows[0][0]
+        return json.loads(raw)
+    return await ensure_cohort(db)
+
+
 async def ensure_cohort(db, *, started_epoch=None):
     await db._exec(_META)
     rows = await db._fetchall(
@@ -277,7 +311,14 @@ def build_report(payloads, outcomes60=(), outcomes240=(), *, baseline):
 async def snapshot(db, *, timing_probe=None):
     # Optional per-stage metrics only; no change to SQL, cohort membership or
     # trading authority. Normal callers retain the exact previous behavior.
-    _meta_work = ensure_cohort(db)
+    _meta_work = load_frozen_metadata_for_snapshot(db)
+    if timing_probe is not None:
+        # The label describes the selected mode, not a claim of server speed.
+        timing_probe.metadata_read_mode = (
+            "IMMUTABLE_READ_FIRST"
+            if metadata_fast_path_enabled()
+            else "LEGACY_DDL_GUARDED"
+        )
     baseline = (
         await timing_probe.await_stage("metadata", _meta_work)
         if timing_probe is not None else await _meta_work
