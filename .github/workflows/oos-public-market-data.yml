@@ -27,6 +27,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: binance-usdm-public-15m-20261005-08
-          path: public_market_archive/
+          path: |
+            public_market_archive/
+            research/oos_rca_v1/binance_path_replay.py
+            research/oos_rca_v1/join_candles.py
+            research/oos_rca_v1/fetch_public_binance_klines.py
+          # Source files here are public research code, never private user telemetry.
           retention-days: 7
           if-no-files-found: error
