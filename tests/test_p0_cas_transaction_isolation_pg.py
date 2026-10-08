@@ -5,7 +5,10 @@ postgres:16. All writes use disposable, namespaced test keys only.
 """
 import asyncio
 import os
+import sys
+import sysconfig
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from bot import database as db
@@ -131,6 +134,163 @@ class PostgresCasSessionIsolationTests(unittest.IsolatedAsyncioTestCase):
             [(lock_key, "v2")], expected={lock_key: None}, strict=True
         )
         self.assertEqual(await self.get("cancel"), "v2")
+
+    async def wait_for_backend(self, pid, *, query_fragment, wait_type):
+        async def poll():
+            while True:
+                row = await self.admin.fetchrow(
+                    "SELECT query, wait_event_type FROM pg_stat_activity WHERE pid=$1", pid
+                )
+                if row and query_fragment in row[0] and row[1] == wait_type:
+                    return
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(poll(), timeout=5)
+
+    async def test_real_failed_begin_leaves_shared_driver_state_desynchronized(self):
+        # A causal reproducer for one possible mechanism, NOT proof that this
+        # unprotected overlap was the production incident's initiating event.
+        shared = await self.asyncpg.connect(self.test_dsn)
+        sleeper = asyncio.create_task(shared.execute("SELECT pg_sleep(0.5)"))
+        try:
+            await self.wait_for_backend(
+                shared.get_server_pid(), query_fragment="pg_sleep", wait_type="Timeout"
+            )
+            with self.assertRaises(self.asyncpg.InterfaceError):
+                await shared.transaction().start()
+            await sleeper
+            self.assertFalse(shared.is_in_transaction())
+            with self.assertRaisesRegex(
+                self.asyncpg.PostgresError,
+                "SAVEPOINT can only be used in transaction blocks",
+            ):
+                await shared.transaction().start()
+            db._conn = shared
+            key = self.prefix + "real_poison"
+            self.assertTrue(await save_key_values_atomic_cas(
+                [(key, "durable")], expected={key: None}, strict=True
+            ))
+            self.assertEqual(await self.get("real_poison"), "durable")
+        finally:
+            await asyncio.gather(sleeper, return_exceptions=True)
+            await shared.close()
+
+    async def test_server_error_after_first_write_rolls_back_all_keys(self):
+        # PostgreSQL rejects NUL in text in the SECOND statement, after the
+        # first INSERT really ran. This is not merely a guard-before-write test.
+        first = self.prefix + "partial_first"
+        second = self.prefix + "partial_second"
+        with self.assertRaises(db.PersistenceError):
+            await save_key_values_atomic_cas(
+                [(first, "must_rollback"), (second, "invalid\x00text")],
+                expected={first: None}, strict=True,
+            )
+        self.assertIsNone(await self.get("partial_first"))
+        self.assertIsNone(await self.get("partial_second"))
+        self.assertTrue(await save_key_values_atomic_cas(
+            [(first, "recovered"), (second, "recovered")],
+            expected={first: None, second: None}, strict=True,
+        ))
+
+    async def test_cancel_after_first_write_rolls_back_and_releases_session(self):
+        first = self.prefix + "cancel_first"
+        second = self.prefix + "cancel_second"
+        await self.admin.execute(
+            "INSERT INTO key_value(key,value) VALUES($1,'old')", second
+        )
+        blocker = await self.asyncpg.connect(self.test_dsn)
+        task = None
+        try:
+            async with blocker.transaction():
+                await blocker.fetchrow(
+                    "SELECT value FROM key_value WHERE key=$1 FOR UPDATE", second
+                )
+                task = asyncio.create_task(save_key_values_atomic_cas(
+                    [(first, "uncommitted"), (second, "new")],
+                    expected={first: None}, strict=True,
+                ))
+                async def blocked_writer():
+                    while True:
+                        rows = await self.admin.fetch(
+                            "SELECT pid FROM pg_stat_activity WHERE datname=current_database() "
+                            "AND wait_event_type='Lock' AND query LIKE 'INSERT INTO key_value%'"
+                        )
+                        if rows:
+                            return rows[0][0]
+                        if task.done():
+                            await task
+                            self.fail("CAS finished without reaching the blocked second write")
+                        await asyncio.sleep(0.01)
+                pid = await asyncio.wait_for(blocked_writer(), timeout=5)
+                self.assertIsNone(await self.get("cancel_first"))
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=5)
+            self.assertIsNone(await self.get("cancel_first"))
+            self.assertEqual(await self.get("cancel_second"), "old")
+            self.assertFalse(await self.admin.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)", pid
+            ))
+            self.assertTrue(await save_key_values_atomic_cas(
+                [(first, "recovered"), (second, "new")],
+                expected={first: None, second: "old"}, strict=True,
+            ))
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await blocker.close()
+
+    async def test_independent_process_writers_and_restart_reject_stale_guard(self):
+        program = '''
+import asyncio, os, sys
+from tests.run_offline import install_network_guard
+install_network_guard()
+import asyncpg
+from bot import database as db
+from bot.atomic_key_value import save_key_values_atomic_cas, CompareAndSwapConflict
+async def main():
+    db.DATABASE_URL = os.environ["TEST_POSTGRES_DSN"]
+    db._conn = await asyncpg.connect(db.DATABASE_URL)
+    db._is_pg = True
+    db._io_lock = asyncio.Lock()
+    try:
+        try:
+            await save_key_values_atomic_cas([(sys.argv[1], sys.argv[2])],
+                                             expected={sys.argv[1]: None}, strict=True)
+            print("RESULT=written")
+        except CompareAndSwapConflict:
+            print("RESULT=conflict")
+    finally:
+        await db._conn.close()
+asyncio.run(main())
+'''
+        key = self.prefix + "process_race"
+        child_env = {name: os.environ[name] for name in
+                     ("PATH", "HOME", "LANG", "TEST_POSTGRES_DSN") if name in os.environ}
+        child_env.update(
+            PYTHONPATH=os.pathsep.join((str(Path(__file__).resolve().parents[1]),
+                                       sysconfig.get_paths()["purelib"])),
+            PAPER_TRADE="true", NEXUS_TELEGRAM="false", LOG_LEVEL="ERROR",
+        )
+        async def contender(value):
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-S", "-c", program, key, value, env=child_env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+                self.assertEqual(proc.returncode, 0)
+                return next(line for line in stdout.decode().splitlines()
+                            if line.startswith("RESULT="))
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+        results = await asyncio.gather(contender("one"), contender("two"))
+        self.assertEqual(sorted(results), ["RESULT=conflict", "RESULT=written"])
+        before = await self.get("process_race")
+        self.assertEqual(await contender("restart"), "RESULT=conflict")
+        self.assertEqual(await self.get("process_race"), before)
 
 
 if __name__ == "__main__":
