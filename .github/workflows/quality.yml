@@ -111,8 +111,8 @@ jobs:
       - name: P0 CAS real PostgreSQL incident regression (must not skip)
         run: |
           test -n "$TEST_POSTGRES_DSN"
-          python -m unittest -v \\
-            tests.test_p0_cas_transaction_isolation_pg \\
+          python -m unittest -v \
+            tests.test_p0_cas_transaction_isolation_pg \
             tests.test_cash_flow_cas_postgres
 
       - name: Final pre-release proof pack
