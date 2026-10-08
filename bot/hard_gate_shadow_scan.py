@@ -1642,7 +1642,7 @@ async def scan(engine, *, db=None, bbo_views=None):
         try:
             from bot import short_down_bos_v2_outcome_proof as v2_proof
             v2_row = await asyncio.wait_for(
-                v2_proof.maybe_snapshot(db), timeout=3.0
+                v2_proof.maybe_snapshot(db), timeout=5.0
             )
             if v2_row is not None:
                 _emit("SHORT_DOWN_BOS_V2_OUTCOME_PROOF", {
