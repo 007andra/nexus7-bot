@@ -172,6 +172,24 @@ class TestPostgresCsvIntegrity(unittest.TestCase):
             self.assertEqual(query,inner)
 
 
+    def test_legacy_observed_without_start_still_counts(self):
+        # Legacy _outcome_map validates finite return/MFE/MAE, not start.
+        records=[sample(),sample(h=240)]
+        for r in records:
+            r["export_scope"]="REAL_COARSE"
+            r["observation_start_epoch"]=""
+        out=validate(records)
+        self.assertTrue(out["passed_schema_and_identity"])
+        self.assertEqual(out["outcomes_matching_production_validator"]["60"][APPROVED]["n"],1)
+
+    def test_precise_observed_without_start_is_not_verified(self):
+        records=[sample(),sample(h=240)]
+        for r in records:
+            r["observation_start_epoch"]=""
+        out=validate(records)
+        self.assertEqual(out["outcomes_matching_production_validator"]["60"][APPROVED]["n"],0)
+
+
 
 if __name__=="__main__":
     unittest.main()
