@@ -1,5 +1,7 @@
 """Offline regression checks for frozen-cohort PostgreSQL CSV integrity."""
 import unittest
+import re
+from pathlib import Path
 from research.oos_rca_v1.verify_export import validate, APPROVED, REJECTED
 
 
@@ -131,6 +133,43 @@ class TestPostgresCsvIntegrity(unittest.TestCase):
         records[0]["outcome_payload_parse_ok"] = "false"
         records[0]["outcome_state"] = "MALFORMED_JSON"
         self.assertFalse(validate(records)["passed_schema_and_identity"])
+
+
+
+    def test_sql_scopes_distinct_and_readonly(self):
+        root=Path(__file__).resolve().parents[1] / "research" / "oos_rca_v1"
+        js=(root/"EXPORT_OOS_POSTGRES_READ_ONLY_SELECT.sql").read_text()
+        real=(root/"EXPORT_OOS_POSTGRES_LEGACY_REAL_SELECT.sql").read_text()
+        self.assertIn("'JSON_PRECISE' AS export_scope",js)
+        self.assertIn("'REAL_COARSE' AS export_scope",real)
+        self.assertIn("c.captured_epoch >= ((f.metadata ->> 'started_epoch')::real)",real)
+        self.assertIn("(p.signal->>'captured_epoch')::double precision >=",js)
+        self.assertNotIn("c.captured_epoch >= ((f.metadata ->> 'started_epoch')::real)",js)
+        for sql in (js,real):
+            self.assertIn("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",sql)
+            self.assertIn("ROLLBACK;",sql)
+            self.assertNotIn("THEN 'INDETERMINATE'",sql)
+            self.assertIn("ELSE 'COUNTERFACTUAL_REJECTED'",sql)
+            self.assertIn("pg_input_is_valid(",sql)
+            self.assertIn("MALFORMED_JSON",sql)
+
+    def test_client_side_copy_has_same_query_as_sql_select(self):
+        root=Path(__file__).resolve().parents[1] / "research" / "oos_rca_v1"
+        for select_path,copy_path in (
+            ("EXPORT_OOS_POSTGRES_READ_ONLY_SELECT.sql","EXPORT_OOS_POSTGRES_PSQL_COPY.sql"),
+            ("EXPORT_OOS_POSTGRES_LEGACY_REAL_SELECT.sql","EXPORT_OOS_POSTGRES_LEGACY_REAL_COPY.sql")
+        ):
+            src=(root/select_path).read_text()
+            copy=(root/copy_path).read_text()
+            self.assertIn("\\set ON_ERROR_STOP on",copy)
+            self.assertIn("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;",copy)
+            self.assertIn("ROLLBACK;",copy)
+            self.assertIn("\\copy (",copy)
+            first=src.index("WITH frozen_source AS (")
+            last=src.rindex(";\n\nROLLBACK;")
+            query=re.sub(r"\s+"," ",re.sub(r"--[^\n]*","",src[first:last]).strip())
+            inner=copy.split("\\copy (",1)[1].split(") TO 'private_oos_evidence/",1)[0]
+            self.assertEqual(query,inner)
 
 
 
