@@ -98,20 +98,51 @@ async def save_key_values_atomic_cas(items, *, expected, strict: bool = True) ->
         try:
             ts = db._now()
             if db._is_pg:
-                async with conn.transaction():
-                    for key, want in guards.items():
-                        row = await conn.fetchrow(
-                            "SELECT value FROM key_value WHERE key=$1 FOR UPDATE", key,
-                        )
-                        have = row[0] if row else None
-                        if have != want:
-                            raise CompareAndSwapConflict(f"compare-and-swap conflict on {key}")
-                    for key, value in pairs:
-                        await conn.execute(
-                            "INSERT INTO key_value (key,value,updated_at) VALUES ($1,$2,$3) "
-                            "ON CONFLICT (key) DO UPDATE SET value=$2,updated_at=$3",
-                            key, value, ts,
-                        )
+                # The runtime database connection is shared by long-running
+                # readers and bounded/cancellable shadow tasks.  An interrupted
+                # transaction on that shared session can leave asyncpg believing
+                # an outer transaction exists while PostgreSQL has already
+                # rolled it back.  The next nested transaction then issues a
+                # SAVEPOINT outside a transaction and the durable risk refresh
+                # fails indefinitely.  Never use that session for critical CAS.
+                #
+                # A fresh PostgreSQL session is isolated for this ONE atomic
+                # commit. A connection or transaction failure raises without
+                # retrying or changing the risk ledger/HWM.
+                if not db.DATABASE_URL.startswith("postgresql"):
+                    raise db.PersistenceError(
+                        "atomic PostgreSQL CAS requires configured PostgreSQL DSN"
+                    )
+                import asyncpg
+                cas_conn = await asyncpg.connect(db.DATABASE_URL, timeout=10)
+                try:
+                    async with cas_conn.transaction():
+                        # Lock absent keys too: SELECT FOR UPDATE alone cannot
+                        # serialize concurrent CAS writers on a missing row.
+                        # Sorted advisory locks prevent lock-order deadlocks.
+                        for key in sorted(set(guards) | {key for key, _ in pairs}):
+                            await cas_conn.fetchval(
+                                "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", key
+                            )
+                        for key, want in guards.items():
+                            row = await cas_conn.fetchrow(
+                                "SELECT value FROM key_value WHERE key=$1 FOR UPDATE", key,
+                            )
+                            have = row[0] if row else None
+                            if have != want:
+                                raise CompareAndSwapConflict(
+                                    f"compare-and-swap conflict on {key}"
+                                )
+                        for key, value in pairs:
+                            await cas_conn.execute(
+                                "INSERT INTO key_value (key,value,updated_at) VALUES ($1,$2,$3) "
+                                "ON CONFLICT (key) DO UPDATE SET value=$2,updated_at=$3",
+                                key, value, ts,
+                            )
+                finally:
+                    # A cancelled CAS must not leak a transaction/session.
+                    # asyncpg terminates the session if close is interrupted.
+                    await cas_conn.close(timeout=3)
             else:
                 await conn.execute("BEGIN IMMEDIATE")
                 for key, want in guards.items():
