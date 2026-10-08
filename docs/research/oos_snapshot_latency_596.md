@@ -26,6 +26,18 @@ non-authoritative.
   These are **database result-row counts**, not unique candidates, final
   matched outcomes or deduplicated/cohort-eligible records. The split is
   purely from the active logical stage and never contains payload fields.
+- To diagnose intermittent shared-lock contention, the probe also partitions
+  existing `lock_wait_ms` by logical stage: `metadata_lock_wait_ms`,
+  `candidates_lock_wait_ms`, `outcomes_lock_wait_ms`, and
+  `unattributed_lock_wait_ms`. The sum equals the existing aggregate before
+  output rounding. It includes metadata DDL/insert lock wait; it does **not**
+  disclose the unrelated lock holder or the SQL of that holder.
+- The same `db_fetch_ms` total is partitioned into
+  `metadata_fetch_ms`, `candidates_fetch_ms`, `outcomes_fetch_ms` and
+  `unattributed_fetch_ms`. These client-side fetch durations cannot
+  distinguish PostgreSQL server execution from network/transfer/decoding.
+  The existing `db_exec_ms` remains the DDL/insert client-time aggregate.
+  Stage wall-times overlap these submetrics; they must not be added together.
 - The metadata stage also invokes `_exec` for DDL/insert. `db_exec_ms`,
   `exec_calls` and `exec_cancelled` cover those calls separately from SELECTs.
   Client-call times include network and server response, not server-only query time.

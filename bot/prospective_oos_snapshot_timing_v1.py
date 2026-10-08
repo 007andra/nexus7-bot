@@ -29,6 +29,11 @@ class SnapshotTimingProbe:
         self.exec_cancelled = 0
         self.lock_wait_ms = 0.0
         self.db_fetch_ms = 0.0
+        # Stage partition of existing I/O counters, not new DB calls.
+        self.lock_wait_by_stage = {name: 0.0 for name in ("metadata", "candidates", "outcomes")}
+        self.db_fetch_by_stage = {name: 0.0 for name in ("metadata", "candidates", "outcomes")}
+        self.unattributed_lock_wait_ms = 0.0
+        self.unattributed_fetch_ms = 0.0
         self.lock_not_acquired = 0
         self.rows_fetched = 0
         self.rows_by_stage = {name: 0 for name in ("metadata", "candidates", "outcomes")}
@@ -67,8 +72,16 @@ class SnapshotTimingProbe:
                      cancelled):
         # Pure arithmetic only: this method never raises due to app data.
         self.fetch_calls += 1
-        self.lock_wait_ms += max(0.0, waited_ms)
-        self.db_fetch_ms += max(0.0, fetched_ms)
+        wait = max(0.0, waited_ms)
+        fetch = max(0.0, fetched_ms)
+        self.lock_wait_ms += wait
+        self.db_fetch_ms += fetch
+        if self.active_stage in self.lock_wait_by_stage:
+            self.lock_wait_by_stage[self.active_stage] += wait
+            self.db_fetch_by_stage[self.active_stage] += fetch
+        else:
+            self.unattributed_lock_wait_ms += wait
+            self.unattributed_fetch_ms += fetch
         if not lock_acquired:
             self.lock_not_acquired += 1
         if cancelled:
@@ -87,8 +100,13 @@ class SnapshotTimingProbe:
                     cancelled):
         # Metadata may execute DDL under the same lock as read-only SELECTs.
         self.exec_calls += 1
-        self.lock_wait_ms += max(0.0, waited_ms)
+        wait = max(0.0, waited_ms)
+        self.lock_wait_ms += wait
         self.db_exec_ms += max(0.0, executed_ms)
+        if self.active_stage in self.lock_wait_by_stage:
+            self.lock_wait_by_stage[self.active_stage] += wait
+        else:
+            self.unattributed_lock_wait_ms += wait
         if not lock_acquired:
             self.lock_not_acquired += 1
         if cancelled:
@@ -109,7 +127,15 @@ class SnapshotTimingProbe:
             "outcomes_ms": round(self.stage_ms["outcomes"], 3),
             "compute_ms": round(self.stage_ms["compute"], 3),
             "lock_wait_ms": round(self.lock_wait_ms, 3),
+            "metadata_lock_wait_ms": round(self.lock_wait_by_stage["metadata"], 3),
+            "candidates_lock_wait_ms": round(self.lock_wait_by_stage["candidates"], 3),
+            "outcomes_lock_wait_ms": round(self.lock_wait_by_stage["outcomes"], 3),
+            "unattributed_lock_wait_ms": round(self.unattributed_lock_wait_ms, 3),
             "db_fetch_ms": round(self.db_fetch_ms, 3),
+            "metadata_fetch_ms": round(self.db_fetch_by_stage["metadata"], 3),
+            "candidates_fetch_ms": round(self.db_fetch_by_stage["candidates"], 3),
+            "outcomes_fetch_ms": round(self.db_fetch_by_stage["outcomes"], 3),
+            "unattributed_fetch_ms": round(self.unattributed_fetch_ms, 3),
             "db_exec_ms": round(self.db_exec_ms, 3),
             "exec_calls": self.exec_calls,
             "exec_cancelled": self.exec_cancelled,

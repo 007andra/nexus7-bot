@@ -69,6 +69,67 @@ class TimingProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fields["lock_not_acquired"], 1)
         self.assertEqual(fields["missing_row_counts"], 1)
 
+    async def test_per_stage_lock_and_client_fetch_partition(self):
+        probe = timing.SnapshotTimingProbe()
+        async def read(wait_ms, fetch_ms, count):
+            probe.record_fetch(
+                waited_ms=wait_ms, fetched_ms=fetch_ms, rows=count,
+                lock_acquired=True, cancelled=False,
+            )
+        await probe.await_stage("metadata", read(5, 20, 1))
+        await probe.await_stage("candidates", read(578.782, 193.54, 1734))
+        await probe.await_stage("outcomes", read(0.02, 158.955, 3319))
+        fields = probe.fields(status="OK")
+        self.assertAlmostEqual(fields["lock_wait_ms"], 583.802)
+        self.assertAlmostEqual(fields["metadata_lock_wait_ms"], 5)
+        self.assertAlmostEqual(fields["candidates_lock_wait_ms"], 578.782)
+        self.assertAlmostEqual(fields["outcomes_lock_wait_ms"], 0.02)
+        self.assertEqual(fields["unattributed_lock_wait_ms"], 0)
+        self.assertAlmostEqual(fields["db_fetch_ms"], 372.495)
+        self.assertEqual(fields["metadata_fetch_ms"], 20)
+        self.assertEqual(fields["candidates_fetch_ms"], 193.54)
+        self.assertEqual(fields["outcomes_fetch_ms"], 158.955)
+        self.assertEqual(fields["unattributed_fetch_ms"], 0)
+        self.assertEqual(fields["rows_fetched"], 5054)
+        self.assertFalse(fields["live_allowed"])
+        self.assertNotIn("candidate_id", probe.log_line(status="OK"))
+
+    async def test_metadata_exec_and_cancelled_lock_partition(self):
+        probe = timing.SnapshotTimingProbe()
+        async def metadata():
+            probe.record_exec(
+                waited_ms=7.5, executed_ms=145,
+                lock_acquired=True, cancelled=False,
+            )
+            probe.record_fetch(
+                waited_ms=0.25, fetched_ms=90, rows=1,
+                lock_acquired=True, cancelled=False,
+            )
+        await probe.await_stage("metadata", metadata())
+        async def cancelled():
+            probe.record_fetch(
+                waited_ms=15, fetched_ms=0, rows=None,
+                lock_acquired=False, cancelled=True,
+            )
+        await probe.await_stage("outcomes", cancelled())
+        probe.record_fetch(
+            waited_ms=2, fetched_ms=3, rows=0,
+            lock_acquired=True, cancelled=False,
+        )
+        f = probe.fields(status="TIMEOUT")
+        self.assertAlmostEqual(f["metadata_lock_wait_ms"], 7.75)
+        self.assertEqual(f["outcomes_lock_wait_ms"], 15)
+        self.assertEqual(f["unattributed_lock_wait_ms"], 2)
+        self.assertAlmostEqual(f["lock_wait_ms"], 24.75)
+        self.assertEqual(f["metadata_fetch_ms"], 90)
+        self.assertEqual(f["unattributed_fetch_ms"], 3)
+        self.assertEqual(f["db_fetch_ms"], 93)
+        self.assertEqual(f["db_exec_ms"], 145)
+        self.assertEqual(f["lock_not_acquired"], 1)
+        self.assertEqual(f["fetch_cancelled"], 1)
+        self.assertEqual(f["missing_row_counts"], 1)
+        self.assertFalse(f["promotion_allowed"])
+
     async def test_cancellation_keeps_stage_without_errors_or_resurrection(self):
         probe = timing.SnapshotTimingProbe()
         blocker = asyncio.Event()
