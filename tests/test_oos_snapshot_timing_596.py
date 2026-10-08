@@ -53,6 +53,36 @@ class TimingProbeTests(unittest.IsolatedAsyncioTestCase):
         timing.active_probe.reset(token)
         self.assertIsNone(timing.active_probe.get())
 
+    async def test_real_snapshot_instrumentation_preserves_report_and_queries(self):
+        from bot import prospective_oos_cohort_v1 as oos
+        baseline = {
+            "cohort_id": oos.COHORT_ID,
+            "started_epoch": 1000.0,
+            "discovery_cutoff_epoch": 1000.0,
+            "hypothesis": oos.FROZEN_HYPOTHESIS,
+            "hypothesis_frozen": True,
+            "reset_allowed": False,
+        }
+        class EmptyDB:
+            def __init__(self):
+                self.calls = []
+            async def _fetchall(self, sql, params):
+                self.calls.append((sql, params))
+                return []
+        async def frozen_baseline(db):
+            return baseline
+        plain_db, observed_db = EmptyDB(), EmptyDB()
+        with patch.object(oos, "ensure_cohort", frozen_baseline):
+            plain = await oos.snapshot(plain_db)
+            observed = await oos.snapshot(
+                observed_db, timing_probe=timing.SnapshotTimingProbe()
+            )
+        self.assertEqual(plain, observed)
+        self.assertEqual(plain_db.calls, observed_db.calls)
+        self.assertEqual(len(plain_db.calls), 2)
+        self.assertEqual(plain["status"], "COLLECTING_PROSPECTIVE_OOS")
+        self.assertFalse(plain["live_allowed"])
+
     async def test_invalid_stage_rejected(self):
         probe = timing.SnapshotTimingProbe()
         with self.assertRaises(ValueError):
@@ -201,11 +231,17 @@ class CallerTimeoutTests(unittest.IsolatedAsyncioTestCase):
         old = scan._PROSPECTIVE_OOS_LAST_EMIT
         scan._PROSPECTIVE_OOS_LAST_EMIT = 0.0
         called = []
+        observed_timeouts = []
+        original_wait_for = asyncio.wait_for
+        async def recording_wait_for(work, *, timeout):
+            observed_timeouts.append(timeout)
+            return await original_wait_for(work, timeout=timeout)
         async def blocked(db, *, timing_probe=None):
             called.append(timing_probe is not None)
             raise asyncio.TimeoutError()
         try:
             with patch.object(oos, "snapshot", blocked), \
+                 patch.object(scan.asyncio, "wait_for", recording_wait_for), \
                  patch.object(scan, "_emit", lambda name, fields: called.append((name, fields))), \
                  patch.object(oos, "enabled", lambda: True), \
                  patch.object(scan.log, "info"):
@@ -213,6 +249,7 @@ class CallerTimeoutTests(unittest.IsolatedAsyncioTestCase):
         finally:
             scan._PROSPECTIVE_OOS_LAST_EMIT = old
         self.assertIsNone(result)
+        self.assertEqual(observed_timeouts, [3.0])
         self.assertTrue(called[0])
         errors = [x for x in called if isinstance(x, tuple) and x[0]=="PROSPECTIVE_OOS_COHORT_V1"]
         self.assertEqual(len(errors), 1)
