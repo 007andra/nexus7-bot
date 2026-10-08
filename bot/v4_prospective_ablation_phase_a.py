@@ -124,7 +124,7 @@ def _outcome(raw, *, candidate, horizon, now_epoch):
     if None in (start, ret, mfe, mae):
         return None
     expected = math.ceil(candidate["captured_epoch"] / 900) * 900
-    if (start < expected or
+    if (abs(start - expected) > 1e-4 or
             start + 60 * horizon > float(now_epoch)):
         return None
     return {"gross_return": ret, "MFE": mfe, "MAE": mae}
@@ -274,8 +274,30 @@ def evaluate(payloads, outcomes60=(), outcomes240=(), *, now_epoch):
     }
 
 
+def _selected_approved_ids(payloads):
+    """Bound outcome SQL to the first 100 future canonical approvals only."""
+    valid = sorted(
+        (r for raw in payloads if (r := _candidate(raw)) is not None
+         and r["champion_approved"]),
+        key=lambda row: (row["captured_epoch"], row["candidate_id"]),
+    )
+    selected, seen, counts = [], set(), Counter()
+    for row in valid:
+        cid, symbol = row["candidate_id"], row["symbol"]
+        if cid in seen:
+            continue
+        seen.add(cid)
+        if counts[symbol] >= PER_SYMBOL_CAP:
+            continue
+        if len(selected) == TARGET_APPROVED:
+            break
+        selected.append(cid)
+        counts[symbol] += 1
+    return selected
+
+
 async def snapshot(db, *, now_epoch=None):
-    """Two read-only SELECTs, no DDL, persisted enrollment or order actions."""
+    """Read-only SELECTs, no DDL, persisted enrollment or order actions."""
     # SQLite stores double precision; PostgreSQL REAL can round epoch seconds
     # by ~64s. Buffer query by 512s, then apply exact JSON cutoff in _candidate.
     rows = await db._fetchall(
@@ -296,10 +318,7 @@ async def snapshot(db, *, now_epoch=None):
             continue
     # Outcome query is limited to the *canonical post-cutoff* candidates and
     # does not access another research cohort. Always parameterized.
-    ids = sorted(set(
-        str(p.get("candidate_id"))
-        for p in payloads if _candidate(p) is not None
-    ))
+    ids = _selected_approved_ids(payloads)
     out60, out240 = [], []
     if ids:
         placeholders = ",".join("?" for _ in ids)
