@@ -24,6 +24,9 @@ class SnapshotTimingProbe:
         self.cancelled_stage = "none"
         self.stage_ms = {name: 0.0 for name in STAGES}
         self.fetch_calls = 0
+        self.exec_calls = 0
+        self.db_exec_ms = 0.0
+        self.exec_cancelled = 0
         self.lock_wait_ms = 0.0
         self.db_fetch_ms = 0.0
         self.lock_not_acquired = 0
@@ -73,6 +76,17 @@ class SnapshotTimingProbe:
         else:
             self.rows_fetched += max(0, int(rows))
 
+    def record_exec(self, *, waited_ms, executed_ms, lock_acquired,
+                    cancelled):
+        # Metadata may execute DDL under the same lock as read-only SELECTs.
+        self.exec_calls += 1
+        self.lock_wait_ms += max(0.0, waited_ms)
+        self.db_exec_ms += max(0.0, executed_ms)
+        if not lock_acquired:
+            self.lock_not_acquired += 1
+        if cancelled:
+            self.exec_cancelled += 1
+
     def fields(self, *, status, timeout_s=3.0):
         if status not in ("OK", "TIMEOUT", "ERROR", "CANCELLED"):
             raise ValueError("OOS_PROBE_INVALID_STATUS")
@@ -89,6 +103,9 @@ class SnapshotTimingProbe:
             "compute_ms": round(self.stage_ms["compute"], 3),
             "lock_wait_ms": round(self.lock_wait_ms, 3),
             "db_fetch_ms": round(self.db_fetch_ms, 3),
+            "db_exec_ms": round(self.db_exec_ms, 3),
+            "exec_calls": self.exec_calls,
+            "exec_cancelled": self.exec_cancelled,
             "fetch_calls": self.fetch_calls,
             "rows_fetched": self.rows_fetched,
             "lock_not_acquired": self.lock_not_acquired,
