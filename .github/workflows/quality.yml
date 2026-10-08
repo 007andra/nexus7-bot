@@ -108,6 +108,13 @@ jobs:
       - name: Full offline test suite
         run: python -m tests.run_offline
 
+      - name: OOS frozen cohort PostgreSQL16 read-only parity proof (must not skip)
+        # Uses existing disposable postgres:16 CI service; no Railway secrets.
+        run: |
+          test -n "$TEST_POSTGRES_DSN"
+          command -v psql
+          python -m unittest -v tests.test_oos_postgres16_sql_parity
+
       - name: P0 CAS real PostgreSQL incident regression (must not skip)
         run: |
           test -n "$TEST_POSTGRES_DSN"
