@@ -233,7 +233,7 @@ class JournalRealPostgresProof(unittest.IsolatedAsyncioTestCase):
             "UPDATE key_value SET value=$2 WHERE key=$1",
             self.prov_key, json.dumps({"version": 1, "new_peak": 3}),
         )
-        with self.assertRaisesRegex(j.JournalIntegrityError, "does not match"):
+        with self.assertRaisesRegex(j.JournalIntegrityError, "invalid current provenance"):
             async with self.conn.transaction():
                 await j.anchor_current_peak_in_tx(
                     self.conn, peak_key=self.peak_key,
