@@ -30,7 +30,7 @@ class SlowHoldReporter:
     diagnostic failures are swallowed, never changing a database operation.
     """
 
-    def __init__(self, emit, *, clock=None, threshold_ms=250.0,
+    def __init__(self, emit, *, clock=None, threshold_ms=125.0,
                  max_events=8, window_s=60.0):
         self._emit = emit
         self._clock = clock or time.monotonic
