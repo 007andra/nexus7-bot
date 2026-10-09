@@ -60,8 +60,10 @@ def is_safe_holder_label(value):
 
 
 class LockHolderTracker:
-    def __init__(self):
+    def __init__(self, *, on_hold=None, clock=None):
         self.holder = None
+        self._on_hold = on_hold
+        self._clock = clock
 
     def initial_holder(self, lock: asyncio.Lock):
         """Best-effort SINGLE snapshot; NOT definitive causal attribution.
@@ -81,10 +83,35 @@ class LockHolderTracker:
                      label.startswith("fetchall:") or
                      label.startswith("serialized:"))):
             raise ValueError("INVALID_DB_LOCK_TRACE_LABEL")
-        async with lock:
-            self.holder = label
-            try:
-                yield
-            finally:
-                # Never retain a stale holder after success, error or cancel.
-                self.holder = None
+        # Optional measurements do not change the original lock, queue,
+        # connection or exception semantics. Emit only AFTER releasing it.
+        clock = self._clock or __import__("time").monotonic
+        entered = clock() if self._on_hold is not None else None
+        acquired = None
+        cancelled = False
+        try:
+            async with lock:
+                if self._on_hold is not None:
+                    acquired = clock()
+                self.holder = label
+                try:
+                    yield
+                finally:
+                    # Never retain a stale holder after success/error/cancel.
+                    self.holder = None
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if acquired is not None and self._on_hold is not None:
+                try:
+                    ended = clock()
+                    self._on_hold(
+                        label=label,
+                        held_ms=max(0.0, (ended - acquired) * 1000.0),
+                        waited_ms=max(0.0, (acquired - entered) * 1000.0),
+                        cancelled=cancelled,
+                    )
+                except Exception:
+                    # A diagnostic callback cannot change the DB outcome.
+                    pass
