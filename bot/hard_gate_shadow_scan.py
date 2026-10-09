@@ -1311,9 +1311,19 @@ async def _maybe_emit_prospective_oos_cohort(db):
     from bot.prospective_oos_snapshot_timing_v1 import (
         SnapshotTimingProbe, active_probe,
     )
+    from bot.oos_async_contention_observability_v1 import (
+        OOSLoopLagProbe, loop_lag_enabled,
+    )
     _timing = SnapshotTimingProbe()
     _token = active_probe.set(_timing)
     _timing_status = "CANCELLED"
+    # Optional local scheduling observation. No task, SQL or external I/O.
+    _lag_probe = None
+    if loop_lag_enabled():
+        try:
+            _lag_probe = OOSLoopLagProbe().start()
+        except Exception:
+            _lag_probe = None
     try:
         report = await asyncio.wait_for(
             oos.snapshot(db, timing_probe=_timing), timeout=3.0
@@ -1342,6 +1352,11 @@ async def _maybe_emit_prospective_oos_cohort(db):
         return None
     finally:
         active_probe.reset(_token)
+        if _lag_probe is not None:
+            try:
+                log.info("%s", _lag_probe.finish_line())
+            except Exception:
+                pass
         log.info("%s", _timing.log_line(status=_timing_status, timeout_s=3.0))
 
 
@@ -1719,6 +1734,8 @@ async def scan(engine, *, db=None, bbo_views=None):
             })
         _check(engine)
 
+        _risk_epoch_phase = {"phase": "NOT_STARTED"}
+        _risk_epoch_began = None
         try:
             from bot import risk_epoch_shadow
             if risk_epoch_shadow.enabled():
@@ -1730,9 +1747,11 @@ async def scan(engine, *, db=None, bbo_views=None):
                         "execution_effect": "NONE",
                     })
                 else:
+                    _risk_epoch_began = time.monotonic()
                     epoch_row = await asyncio.wait_for(
                         risk_epoch_shadow.snapshot(
-                            db, engine, start_equity=float(capital[0])
+                            db, engine, start_equity=float(capital[0]),
+                            phase_marker=_risk_epoch_phase,
                         ),
                         timeout=_RISK_EPOCH_IO_TIMEOUT_S,
                     )
@@ -1763,6 +1782,11 @@ async def scan(engine, *, db=None, bbo_views=None):
             _emit("RISK_EPOCH_SHADOW_V1", {
                 "status": "ERROR",
                 "error": type(exc).__name__,
+                "failed_phase": _risk_epoch_phase["phase"],
+                "elapsed_ms": (
+                    round((time.monotonic() - _risk_epoch_began) * 1000, 3)
+                    if _risk_epoch_began is not None else "NA"
+                ),
                 "decision_effect": "NONE",
                 "execution_effect": "NONE",
             })

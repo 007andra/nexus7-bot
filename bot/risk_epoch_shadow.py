@@ -181,12 +181,21 @@ def _candidate_flags(row: dict):
     }
 
 
-async def snapshot(db, engine, *, start_equity: float) -> dict:
+async def snapshot(db, engine, *, start_equity: float, phase_marker=None) -> dict:
+    """Optionally mark bounded read-only phase for timeout attribution (#596).
+
+    The marker is caller-owned transient memory, never logged as a value other
+    than an allowlisted fixed phase label. No additional I/O is performed.
+    """
     if not enabled():
         return {"status": "DISABLED", **EPOCH_AUTHORITY}
 
+    if isinstance(phase_marker, dict):
+        phase_marker["phase"] = "BASELINE"
     baseline = await _ensure_epoch(db, engine, float(start_equity))
     started = float(baseline["started_epoch"])
+    if isinstance(phase_marker, dict):
+        phase_marker["phase"] = "CANDIDATES"
     rows = await db._fetchall(
         "SELECT payload FROM hard_gate_shadow_candidates_v1 "
         "WHERE population=? AND captured_epoch>=? ORDER BY captured_epoch",
@@ -200,6 +209,8 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
 
     outcomes = {}
     if ids:
+        if isinstance(phase_marker, dict):
+            phase_marker["phase"] = "OUTCOMES"
         out_rows = await db._fetchall(
             "SELECT o.candidate_id,o.horizon,o.payload "
             "FROM hard_gate_shadow_outcomes_v1 o "
@@ -220,6 +231,8 @@ async def snapshot(db, engine, *, start_equity: float) -> dict:
             if row.get("outcome") == "OBSERVED":
                 outcomes.setdefault(horizon, []).append(row)
 
+    if isinstance(phase_marker, dict):
+        phase_marker["phase"] = "COMPUTE"
     all_observed60 = outcomes.get(60, [])
     all_observed240 = outcomes.get(240, [])
     traversed_ids = {
