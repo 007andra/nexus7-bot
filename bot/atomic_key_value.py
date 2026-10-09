@@ -6,11 +6,13 @@ leverage, sizing, or exchange state.
 """
 from __future__ import annotations
 
+import os
+
 from bot import database as db
 from bot.logger import log
 
 
-async def save_key_values_atomic(items, *, strict: bool = False) -> bool:
+async def save_key_values_atomic(items, *, strict: bool = False, hwm_transition=None) -> bool:
     """Persist all ``items`` or none of them.
 
     ``items`` is an iterable of ``(key, value)`` pairs. PostgreSQL uses one
@@ -25,6 +27,12 @@ async def save_key_values_atomic(items, *, strict: bool = False) -> bool:
         raise ValueError("atomic key/value keys must be non-empty")
     if len({key for key, _ in pairs}) != len(pairs):
         raise ValueError("atomic key/value keys must be unique")
+
+    journal_result = await _journal_guarded_if_enabled(
+        pairs, expected=None, hwm_transition=hwm_transition,
+    )
+    if journal_result is not None:
+        return journal_result
 
     conn = db._conn
     if not conn:
@@ -64,11 +72,38 @@ async def save_key_values_atomic(items, *, strict: bool = False) -> bool:
             return False
 
 
+
+
+async def _journal_guarded_if_enabled(pairs, *, expected, hwm_transition):
+    """Opt-in only: transactional journal+HWM+other key_value rows or no write.
+
+    This branch remains disabled by default and is NOT a production rollout.
+    """
+    if os.environ.get("HWM_JOURNAL_INTEGRATION_V1", "").lower() != "true":
+        return None
+    from bot import hwm_journal_guard_v1 as guard
+    if not guard.has_peak_change(pairs):
+        if hwm_transition is not None:
+            raise db.PersistenceError("HWM journal intent without HWM write")
+        return None
+    async with db._io_lock:
+        try:
+            return await guard.write_with_journal(
+                pairs, expected=expected, event=hwm_transition,
+            )
+        except CompareAndSwapConflict:
+            raise
+        except Exception as exc:
+            # Never downgrade a journal failure to a legacy write, including
+            # when an older caller requested strict=False.
+            raise db.PersistenceError("HWM journal transaction refused") from exc
+
+
 class CompareAndSwapConflict(db.PersistenceError):
     """A guarded key changed between the caller's read and its atomic write."""
 
 
-async def save_key_values_atomic_cas(items, *, expected, strict: bool = True) -> bool:
+async def save_key_values_atomic_cas(items, *, expected, strict: bool = True, hwm_transition=None) -> bool:
     """Atomically persist ``items`` only if every ``expected`` key is unchanged.
 
     ``expected`` maps key -> raw value the caller read (``None`` = key absent).
@@ -87,6 +122,12 @@ async def save_key_values_atomic_cas(items, *, expected, strict: bool = True) ->
     guards = {str(key): (None if value is None else str(value)) for key, value in dict(expected).items()}
     if not guards:
         raise ValueError("compare-and-swap requires at least one expected key")
+
+    journal_result = await _journal_guarded_if_enabled(
+        pairs, expected=guards, hwm_transition=hwm_transition,
+    )
+    if journal_result is not None:
+        return journal_result
 
     conn = db._conn
     if not conn:
