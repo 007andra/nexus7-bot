@@ -480,6 +480,8 @@ class TradingEngine:
             return
         self._running = True
         self._background_tasks = set()
+        # Diagnostic-only marker; does not change cancellation semantics.
+        self._liveness_cancelled_in_main_loop = False
         try:
             log.info("⚡ Engine v10 iniciando...")
             await db.init()   # inicia DB (PostgreSQL ou SQLite)
@@ -685,6 +687,8 @@ class TradingEngine:
                     await asyncio.sleep(5)
 
                 except asyncio.CancelledError:
+                    # Record silent loop cancellation before preserving BREAK behavior.
+                    self._liveness_cancelled_in_main_loop = True
                     break
                 except (NameError, AttributeError, TypeError, ImportError) as e:
                     # Erro de programação no ciclo principal: log CRITICAL com
