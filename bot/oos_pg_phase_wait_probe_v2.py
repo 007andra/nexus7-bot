@@ -1,4 +1,4 @@
-"""Standalone bounded two-phase OOS PostgreSQL diagnostic for issue #596.
+"""Standalone bounded three-phase OOS PostgreSQL diagnostic for issue #596.
 
 Runs only by explicit operator invocation. Not imported by the trading engine.
 Does not re-run the application's metadata/candidates SELECTs. Samples server
@@ -35,13 +35,15 @@ FROM (
              THEN 'metadata'
            WHEN position('select payload from hard_gate_shadow_candidates_v1 where population' in lower(query))=1
              THEN 'candidates'
+           WHEN position('select value from key_value where key' in lower(query))=1
+             THEN 'key_value_read'
            ELSE NULL
          END AS phase
   FROM pg_stat_activity
   WHERE datname=current_database() AND usename=current_user
     AND pid <> pg_backend_pid()
 ) AS active_statements
-WHERE phase IN ('metadata','candidates')
+WHERE phase IN ('metadata','candidates','key_value_read')
 GROUP BY phase
 """
 
@@ -57,21 +59,23 @@ FROM (
              THEN 'metadata'
            WHEN position('select payload from hard_gate_shadow_candidates_v1 where population' in lower(query))=1
              THEN 'candidates'
+           WHEN position('select value from key_value where key' in lower(query))=1
+             THEN 'key_value_read'
            ELSE NULL
          END AS phase
   FROM pg_stat_statements
   WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
     AND userid=(SELECT usesysid FROM pg_user WHERE usename=current_user)
 ) AS matched
-WHERE phase IN ('metadata','candidates')
+WHERE phase IN ('metadata','candidates','key_value_read')
 GROUP BY phase
 """
 SETTINGS = {
     "default_transaction_read_only": "on",
     "statement_timeout": "700",
-    "application_name": "nexus7-oos-2phase-readonly-v2",
+    "application_name": "nexus7-oos-3phase-readonly-v2",
 }
-PHASES = ("metadata", "candidates")
+PHASES = ("metadata", "candidates", "key_value_read")
 KEYS = ("active","io","lock_wait","lwlock","client","no_wait_event","other_wait")
 
 
