@@ -90,6 +90,47 @@ class FlagAndReporterTests(unittest.TestCase):
                  waited_ms=0, cancelled=False)
         self.assertEqual(len(logs), 3)
 
+    def test_priority_wait_is_logged_even_for_short_holder_after_normal_cap(self):
+        clock = FakeClock()
+        logs = []
+        reporter = diag.SlowHoldReporter(
+            lambda fmt, line: logs.append(line), clock=clock)
+        for i in range(20):
+            reporter(label="serialized:key_value_read", held_ms=150,
+                     waited_ms=0, cancelled=False)
+        self.assertEqual(len(logs), 6)  # two reserved from eight
+        self.assertTrue(all("high_wait_priority=false" in x for x in logs))
+
+        reporter(label="serialized:key_value_read", held_ms=10,
+                 waited_ms=755.176, cancelled=False)
+        reporter(label="fetchall:shadow_candidates", held_ms=20,
+                 waited_ms=1891.726, cancelled=False)
+        self.assertEqual(len(logs), 8)
+        self.assertIn("held_ms=10.000", logs[6])
+        self.assertIn("pre_acquire_wait_ms=755.176", logs[6])
+        self.assertIn("high_wait_priority=true", logs[6])
+        self.assertIn("pre_acquire_wait_ms=1891.726", logs[7])
+        reporter(label="serialized:key_value_write", held_ms=800,
+                 waited_ms=1400, cancelled=True)
+        self.assertEqual(len(logs), 8)  # never exceeds cap, even important
+        clock.now = 61.0
+        reporter(label="serialized:key_value_read", held_ms=150,
+                 waited_ms=0, cancelled=False)
+        self.assertEqual(len(logs), 9)
+
+    def test_priority_below_400ms_keeps_threshold_and_does_not_leak(self):
+        logs = []
+        reporter = diag.SlowHoldReporter(lambda fmt, line: logs.append(line))
+        reporter(label="fetchall:shadow_outcomes", held_ms=30,
+                 waited_ms=399.999, cancelled=False)
+        self.assertEqual(logs, [])
+        reporter(label="fetchall:shadow_outcomes", held_ms=30,
+                 waited_ms=400.0, cancelled=False)
+        self.assertEqual(len(logs), 1)
+        self.assertIn("high_wait_priority=true", logs[0])
+        self.assertNotIn("SQL", logs[0])
+        self.assertIn("live_allowed=false", logs[0])
+
     def test_injected_secrets_and_invalid_numbers_not_logged(self):
         logs = []
         reporter = diag.SlowHoldReporter(lambda fmt, line: logs.append(line))

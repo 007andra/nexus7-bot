@@ -24,21 +24,28 @@ def loop_lag_enabled() -> bool:
 
 
 class SlowHoldReporter:
-    """Emit at most eight slow-hold events per minute, *after* releasing the lock.
+    """Emit bounded, allowlisted lock holder and important waiter observations.
 
-    Log labels come only from bot.db_lock_owner_trace_v1's allowlist. All
-    diagnostic failures are swallowed, never changing a database operation.
+    Reserve up to two of eight events per minute for high acquisition waits,
+    including short holders. Always emit only AFTER releasing the original lock.
+    Observer failures never change database outcomes or lock ordering.
     """
 
     def __init__(self, emit, *, clock=None, threshold_ms=125.0,
-                 max_events=8, window_s=60.0):
+                 max_events=8, window_s=60.0, important_wait_ms=400.0,
+                 reserved_wait_slots=2):
         self._emit = emit
         self._clock = clock or time.monotonic
         self.threshold_ms = float(threshold_ms)
         self.max_events = int(max_events)
         self.window_s = float(window_s)
+        self.important_wait_ms = float(important_wait_ms)
+        # For small test/operator caps, preserve at least two normal slots.
+        self.reserved_wait_slots = max(0, min(
+            int(reserved_wait_slots), self.max_events - 2))
         self._window_started = None
         self._emitted = 0
+        self._normal_emitted = 0
 
     def __call__(self, *, label, held_ms, waited_ms, cancelled):
         try:
@@ -48,19 +55,26 @@ class SlowHoldReporter:
             held, waited = float(held_ms), float(waited_ms)
             if not all(math.isfinite(x) and x >= 0 for x in (held, waited)):
                 return
-            if held < self.threshold_ms:
+            important = waited >= self.important_wait_ms
+            if held < self.threshold_ms and not important:
                 return
             now = self._clock()
             if self._window_started is None or now - self._window_started >= self.window_s:
                 self._window_started = now
                 self._emitted = 0
+                self._normal_emitted = 0
             if self._emitted >= self.max_events:
                 return
+            if not important and self._normal_emitted >= self.max_events - self.reserved_wait_slots:
+                return
             self._emitted += 1
+            if not important:
+                self._normal_emitted += 1
             line = (
                 "[OOS_DB_LOCK_HOLD_V1] "
                 f"holder_class={label} held_ms={held:.3f} "
                 f"pre_acquire_wait_ms={waited:.3f} cancelled={str(bool(cancelled)).lower()} "
+                f"high_wait_priority={str(important).lower()} "
                 "observation_only=true holder_attribution=THIS_ACQUISITION "
                 "risk_unchanged=true promotion_allowed=false live_allowed=false "
                 "decision_effect=NONE execution_effect=NONE"
