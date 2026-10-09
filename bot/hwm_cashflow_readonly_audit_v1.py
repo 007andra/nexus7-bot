@@ -193,13 +193,57 @@ def review_values(values, *, peak_key, provenance_key):
     }
 
 
-async def collect_once(conn, *, peak_key, provenance_key):
-    keys = (LEDGER_KEY, CURSOR_KEY, WALLET_KEY, peak_key, provenance_key)
-    if any(not isinstance(k, str) or not k for k in keys):
+def _select_current_or_legacy(values, *, current_key, legacy_key):
+    """Mirror database.load_key_value: fall back only when CURRENT is absent.
+
+    A malformed but present current value is never replaced by legacy data.
+    Source labels are constant and cannot expose account/database identifiers.
+    """
+    if values.get(current_key) is not None:
+        return values[current_key], "CURRENT"
+    if legacy_key and values.get(legacy_key) is not None:
+        return values[legacy_key], "LEGACY"
+    return None, "MISSING"
+
+
+async def collect_once(
+    conn, *, peak_key, provenance_key,
+    legacy_peak_key=None, legacy_provenance_key=None,
+):
+    """Single parameterized, time-bounded SELECT; no persistence writes."""
+    if any(not isinstance(k, str) or not k for k in (peak_key, provenance_key)):
         raise ValueError("INVALID_READONLY_LEDGER_KEYS")
-    rows = await asyncio.wait_for(conn.fetch(SELECT_SQL, list(keys)), timeout=1.0)
+    legacy_keys = (legacy_peak_key, legacy_provenance_key)
+    if any(k is not None and (not isinstance(k, str) or not k) for k in legacy_keys):
+        raise ValueError("INVALID_READONLY_LEDGER_KEYS")
+    keys = list(dict.fromkeys(
+        k for k in (
+            LEDGER_KEY, CURSOR_KEY, WALLET_KEY, peak_key, provenance_key,
+            legacy_peak_key, legacy_provenance_key,
+        ) if k is not None
+    ))
+    rows = await asyncio.wait_for(conn.fetch(SELECT_SQL, keys), timeout=1.0)
     kv = {r["key"]: r["value"] for r in rows if r["key"] in keys}
-    return review_values(kv, peak_key=peak_key, provenance_key=provenance_key)
+    resolved_peak, peak_source = _select_current_or_legacy(
+        kv, current_key=peak_key, legacy_key=legacy_peak_key,
+    )
+    resolved_provenance, provenance_source = _select_current_or_legacy(
+        kv, current_key=provenance_key, legacy_key=legacy_provenance_key,
+    )
+    kv[peak_key] = resolved_peak
+    kv[provenance_key] = resolved_provenance
+    result = review_values(kv, peak_key=peak_key, provenance_key=provenance_key)
+    result["hwm_source"] = peak_source
+    result["provenance_source"] = provenance_source
+    # HWM and its latest provenance must be proven as one coherent generation.
+    # A mixed namespace pairing is not a structural PASS even when peaks match.
+    if (peak_source != "MISSING" and provenance_source != "MISSING"
+            and peak_source != provenance_source):
+        result["blockers"] = sorted(set(
+            result["blockers"] + ["NAMESPACE_SOURCES_MIXED_MANUAL_REVIEW"]
+        ))
+        result["status"] = "EVIDENCE_INCONSISTENT_OR_INCOMPLETE"
+    return result
 
 
 async def _main():
@@ -209,13 +253,19 @@ async def _main():
         raise ValueError("POSTGRES_CONNECTION_UNAVAILABLE")
     # Key computation only; never prints the account/database fingerprint.
     from bot import hwm_namespace
+    from bot import financial_namespace
     peak_key = hwm_namespace.equity_peak_key()
     provenance_key = hwm_namespace.provenance_key()
+    legacy_peak_key = financial_namespace.legacy_key_for(peak_key)
+    legacy_provenance_key = financial_namespace.legacy_key_for(provenance_key)
     import asyncpg
     conn = await asyncpg.connect(dsn, timeout=5.0, server_settings=SETTINGS)
     try:
-        return await collect_once(conn, peak_key=peak_key,
-                                  provenance_key=provenance_key)
+        return await collect_once(
+            conn, peak_key=peak_key, provenance_key=provenance_key,
+            legacy_peak_key=legacy_peak_key,
+            legacy_provenance_key=legacy_provenance_key,
+        )
     finally:
         await conn.close(timeout=2.0)
 
