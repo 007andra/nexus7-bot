@@ -57,7 +57,7 @@ def _provenance(raw, peak):
             and bool(p["evidence_ref"].strip())
             and p.get("execution_effect") == "NONE"
         )
-    except (TypeError, KeyError, ValueError, OverflowError):
+    except (TypeError, KeyError, ValueError, OverflowError, AttributeError):
         return False
 
 
