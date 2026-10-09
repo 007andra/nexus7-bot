@@ -312,8 +312,9 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
     _row_count = None
     _cancelled = False
     # Opt-in client-side timing; not a PostgreSQL server execution timer.
-    _diag = (_probe is not None and _is_pg and
-             os.environ.get("OOS_PG_FETCH_DIAG_V1", "false").lower() in {"1", "true", "yes", "on"})
+    _diag = (_probe is not None and _probe.active_stage == "metadata" and _is_pg and
+             os.environ.get("OOS_PG_FETCH_DIAG_V1", "false").strip().lower()
+             in {"1", "true", "yes", "on"})
     _diag_stage = _probe.active_stage if _diag else "none"
     _diag_prepare_ms = 0.0
     _diag_driver_ms = 0.0
@@ -326,7 +327,10 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
             try:
                 if _is_pg:
                     if _diag:
-                        _diag_connection_closed = _conn.is_closed()
+                        try:
+                            _diag_connection_closed = _conn.is_closed()
+                        except Exception:
+                            _diag_connection_closed = None
                         _diag_t0 = time.perf_counter()
                         _prepared_sql = _pg_sql(sql)
                         _diag_prepare_ms = (time.perf_counter() - _diag_t0) * 1000
