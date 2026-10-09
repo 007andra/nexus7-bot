@@ -86,3 +86,12 @@ rewrite it; missing September backups/historical revisions remain
 UNVERIFIABLE. The current HWM is approximately 22.79869386 USDT,
 drawdown approximately 76.68% vs 30% policy, strategy OOS EVIDENCE_FAIL.
 **LIVE remains blocked and this draft changes no execution authority.**
+
+## GitHub Actions trigger detail (PR #623)
+
+The repository's current Quality and Supply Chain workflows run on pull
+requests targeting `main` or `migration/binance-usdm` only. PR #623 has
+been retargeted from the stacked draft #622 branch to
+`migration/binance-usdm` **solely to execute exact-head CI**. The diff now
+includes the unmerged foundation (#622) and this integration proof; no
+permission to merge, deploy or enable the journal follows from retargeting.
