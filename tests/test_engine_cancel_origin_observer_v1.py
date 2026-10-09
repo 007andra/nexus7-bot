@@ -14,9 +14,9 @@ class CancellationOriginTests(unittest.TestCase):
                 return self.v
 
         expected = [
-            (0, "PROPAGATED_AWAIT_CANCEL_OR_UNATTRIBUTED", False),
-            (1, "TASK_CANCEL_REQUEST_PENDING", True),
-            (2, "TASK_CANCEL_REQUEST_PENDING", True),
+            (0, "NO_UNBALANCED_TASK_CANCEL_REQUEST", False),
+            (1, "TASK_CANCEL_REQUEST_COUNT_NONZERO", True),
+            (2, "TASK_CANCEL_REQUEST_COUNT_NONZERO", True),
             (-1, "UNKNOWN_TASK_CANCEL_API", None),
             (None, "UNKNOWN_TASK_CANCEL_API", None),
             (True, "UNKNOWN_TASK_CANCEL_API", None),
@@ -25,7 +25,7 @@ class CancellationOriginTests(unittest.TestCase):
             with self.subTest(count=count):
                 data = obs.snapshot(Task(count))
                 self.assertEqual(data["kind"], kind)
-                self.assertIs(data["pending_cancel_requests"], requested)
+                self.assertIs(data["unbalanced_cancel_requests_nonzero"], requested)
                 msg = obs.format_event(data)
                 self.assertIn("actual_cancel_initiator=UNKNOWN", msg)
                 self.assertIn("risk_unchanged=true", msg)
@@ -44,11 +44,11 @@ class CancellationOriginTests(unittest.TestCase):
         self.assertEqual(obs.snapshot(object())["kind"], "UNKNOWN_TASK_CANCEL_API")
         self.assertIn(
             "kind=CLASSIFIER_ERROR",
-            obs.format_event({"kind": "api_key=SECRETS", "pending_cancel_requests": None}),
+            obs.format_event({"kind": "api_key=SECRETS", "unbalanced_cancel_requests_nonzero": None}),
         )
         self.assertNotIn(
             "SECRETS",
-            obs.format_event({"kind": "api_key=SECRETS", "pending_cancel_requests": None}),
+            obs.format_event({"kind": "api_key=SECRETS", "unbalanced_cancel_requests_nonzero": None}),
         )
 
 
@@ -60,10 +60,34 @@ class RealAsyncioCancellationProof(unittest.IsolatedAsyncioTestCase):
             await child()
         except asyncio.CancelledError:
             data = obs.snapshot()
-            self.assertEqual(data["kind"], "PROPAGATED_AWAIT_CANCEL_OR_UNATTRIBUTED")
-            self.assertIs(data["pending_cancel_requests"], False)
+            self.assertEqual(data["kind"], "NO_UNBALANCED_TASK_CANCEL_REQUEST")
+            self.assertIs(data["unbalanced_cancel_requests_nonzero"], False)
         else:
             self.fail("Expected propagated asyncio.CancelledError")
+
+    async def test_cancel_count_does_not_prove_pending_delivery(self):
+        # After a CancelledError has already been DELIVERED and caught,
+        # cancelling() may remain nonzero until uncancel() is called.
+        observed = []
+
+        async def worker():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                observed.append(obs.snapshot())
+                observed.append(obs.snapshot())  # same balance, not a second cancel
+                return
+
+        task = asyncio.create_task(worker())
+        await asyncio.sleep(0)
+        task.cancel()
+        await task
+        self.assertEqual(len(observed), 2)
+        self.assertEqual(
+            observed[1]["kind"], "TASK_CANCEL_REQUEST_COUNT_NONZERO"
+        )
+        self.assertTrue(observed[1]["unbalanced_cancel_requests_nonzero"])
+        self.assertFalse(task.cancelled())
 
     async def test_explicit_parent_cancel_is_classified(self):
         records = []
@@ -79,8 +103,8 @@ class RealAsyncioCancellationProof(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["kind"], "TASK_CANCEL_REQUEST_PENDING")
-        self.assertIs(records[0]["pending_cancel_requests"], True)
+        self.assertEqual(records[0]["kind"], "TASK_CANCEL_REQUEST_COUNT_NONZERO")
+        self.assertIs(records[0]["unbalanced_cancel_requests_nonzero"], True)
 
 
 if __name__ == "__main__":
