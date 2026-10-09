@@ -19,6 +19,23 @@ python -m bot.hwm_cashflow_readonly_audit_v1
 
 No operator action or run executed here; do not copy DATABASE_URL or raw files into chat. Never create a new PostgreSQL public proxy or migrate volume. Its source needs code review, CI, and a separate deployment decision.
 
+## Redundant-ledger integrity hardening (2026-10-09)
+
+The draft now also fails closed on inconsistent positive/negative flow totals
+(`gross_in - gross_out != net_amount`), wrong `direction`, duplicated or
+miscounted `tran_ids`, inconsistent recorded TWR
+`trading_drawdown_after`, and malformed/duplicated pending flows.
+These are **internal structural checks** of fields already produced by
+`cash_flow_ledger.build_record`, not a Binance ledger signature.
+Five additional tamper/legitimate-drawdown regression tests accompany the code.
+
+This isolated draft was synchronized with production base
+`033de6cc0e33df1ba1309956a3bad41644bd4c90` while preserving only its
+three dedicated audit files. Its checks must run again against the *new*
+commit SHA before merge eligibility; passing checks on an earlier head
+is insufficient. The actual read-only production diagnostic is still
+**NOT EXECUTED**, and its best outcome cannot lift the drawdown hard gate.
+
 ## Release readiness
 
 - G1 remains BLOCKED at 76.68% above 30%. We cannot correct by rewriting historical HWM, reinterpreting external money, changing risk configuration or by depositing money.
