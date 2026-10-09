@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import asyncio
+import time
 
 TABLE_CLASSES = (
     ("prospective_oos_cohort_v1", "oos_metadata"),
@@ -85,7 +86,7 @@ class LockHolderTracker:
             raise ValueError("INVALID_DB_LOCK_TRACE_LABEL")
         # Optional measurements do not change the original lock, queue,
         # connection or exception semantics. Emit only AFTER releasing it.
-        clock = self._clock or __import__("time").monotonic
+        clock = self._clock or time.monotonic
         entered = clock() if self._on_hold is not None else None
         acquired = None
         cancelled = False
