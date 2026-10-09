@@ -9,6 +9,7 @@ import os, json, asyncio
 import time
 from bot.prospective_oos_snapshot_timing_v1 import active_probe as _oos_snapshot_probe
 from bot.db_lock_owner_trace_v1 import LockHolderTracker, safe_query_label, safe_serialized_label
+from bot.oos_async_contention_observability_v1 import SlowHoldReporter, lock_hold_enabled
 from datetime import datetime, timezone, date
 from functools import wraps
 from bot.logger import log
@@ -18,9 +19,16 @@ SQLITE_PATH  = "/tmp/bgx_capital.db"
 _conn        = None
 _is_pg       = False
 _io_lock     = asyncio.Lock()
-# Operator-controlled diagnostic; the original asyncio.Lock stays in use.
-_OOS_LOCK_OWNER_TRACE_ENABLED = os.environ.get("OOS_DB_LOCK_OWNER_TRACE_V1", "false").strip().lower() in {"1", "true", "yes", "on"}
-_io_lock_holder = LockHolderTracker()
+# Both diagnostics are OFF by default and preserve the SAME asyncio.Lock.
+# Holder timing implies owner-label tracking; it never adds a DB connection.
+_OOS_LOCK_HOLD_DIAG_ENABLED = lock_hold_enabled()
+_OOS_LOCK_OWNER_TRACE_ENABLED = (
+    os.environ.get("OOS_DB_LOCK_OWNER_TRACE_V1", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+) or _OOS_LOCK_HOLD_DIAG_ENABLED
+_io_lock_holder = LockHolderTracker(
+    on_hold=SlowHoldReporter(log.info) if _OOS_LOCK_HOLD_DIAG_ENABLED else None
+)
 
 
 def _io_lock_scope(label):

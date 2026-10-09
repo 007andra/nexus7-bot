@@ -1311,9 +1311,19 @@ async def _maybe_emit_prospective_oos_cohort(db):
     from bot.prospective_oos_snapshot_timing_v1 import (
         SnapshotTimingProbe, active_probe,
     )
+    from bot.oos_async_contention_observability_v1 import (
+        OOSLoopLagProbe, loop_lag_enabled,
+    )
     _timing = SnapshotTimingProbe()
     _token = active_probe.set(_timing)
     _timing_status = "CANCELLED"
+    # Optional local scheduling observation. No task, SQL or external I/O.
+    _lag_probe = None
+    if loop_lag_enabled():
+        try:
+            _lag_probe = OOSLoopLagProbe().start()
+        except Exception:
+            _lag_probe = None
     try:
         report = await asyncio.wait_for(
             oos.snapshot(db, timing_probe=_timing), timeout=3.0
@@ -1342,6 +1352,11 @@ async def _maybe_emit_prospective_oos_cohort(db):
         return None
     finally:
         active_probe.reset(_token)
+        if _lag_probe is not None:
+            try:
+                log.info("%s", _lag_probe.finish_line())
+            except Exception:
+                pass
         log.info("%s", _timing.log_line(status=_timing_status, timeout_s=3.0))
 
 
