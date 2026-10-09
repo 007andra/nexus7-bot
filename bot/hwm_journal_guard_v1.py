@@ -89,7 +89,11 @@ async def write_with_journal(pairs, *, expected=None, event=None):
     old_peak_key = financial_namespace.legacy_key_for(peak_key)
     old_prov_key = financial_namespace.legacy_key_for(prov_key)
     guard = dict(expected or {})
-    guard_keys = sorted(set(guard) | set(mapping) | {old_peak_key, old_prov_key})
+    legacy_keys = sorted({
+        key for key in (old_peak_key, old_prov_key)
+        if isinstance(key, str) and key and key not in (peak_key, prov_key)
+    })
+    guard_keys = sorted(set(guard) | set(mapping) | set(legacy_keys))
     import asyncpg
     conn = await asyncpg.connect(db.DATABASE_URL, timeout=10)
     try:
@@ -106,9 +110,11 @@ async def write_with_journal(pairs, *, expected=None, event=None):
                     raise CompareAndSwapConflict("journal CAS conflict")
             # A future release needs an explicitly reviewed physical namespace
             # migration first. Never anchor the current key from legacy in code.
-            legacy_values = await conn.fetch(
-                "SELECT key FROM key_value WHERE key=ANY($1::text[])",
-                [old_peak_key, old_prov_key],
+            legacy_values = (
+                await conn.fetch(
+                    "SELECT key FROM key_value WHERE key=ANY($1::text[])",
+                    legacy_keys,
+                ) if legacy_keys else []
             )
             if legacy_values:
                 raise journal.JournalIntegrityError(
