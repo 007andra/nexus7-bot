@@ -311,6 +311,13 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
     _acquired = None
     _row_count = None
     _cancelled = False
+    # Opt-in client-side timing; not a PostgreSQL server execution timer.
+    _diag = (_probe is not None and _is_pg and
+             os.environ.get("OOS_PG_FETCH_DIAG_V1", "false").lower() in {"1", "true", "yes", "on"})
+    _diag_stage = _probe.active_stage if _diag else "none"
+    _diag_prepare_ms = 0.0
+    _diag_driver_ms = 0.0
+    _diag_connection_closed = None
     label = safe_query_label("fetchall", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
     try:
         async with _io_lock_scope(label):
@@ -318,7 +325,18 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
                 _acquired = time.perf_counter()
             try:
                 if _is_pg:
-                    _rows = await _conn.fetch(_pg_sql(sql), *params)
+                    if _diag:
+                        _diag_connection_closed = _conn.is_closed()
+                        _diag_t0 = time.perf_counter()
+                        _prepared_sql = _pg_sql(sql)
+                        _diag_prepare_ms = (time.perf_counter() - _diag_t0) * 1000
+                        _diag_t0 = time.perf_counter()
+                        try:
+                            _rows = await _conn.fetch(_prepared_sql, *params)
+                        finally:
+                            _diag_driver_ms = (time.perf_counter() - _diag_t0) * 1000
+                    else:
+                        _rows = await _conn.fetch(_pg_sql(sql), *params)
                 else:
                     async with _conn.execute(sql, params) as cur:
                         _rows = await cur.fetchall()
@@ -343,6 +361,20 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
                 cancelled=_cancelled,
                 owner_at_wait_start=_owner_at_start,
             )
+            if _diag and _diag_stage == "metadata" and _diag_driver_ms >= 500:
+                # Best effort; no SQL, parameters, identifiers or payloads.
+                try:
+                    log.info(
+                        "[OOS_PG_FETCH_DIAG_V1] stage=metadata "
+                        "client_prepare_ms=%.3f client_driver_await_ms=%.3f "
+                        "lock_wait_ms=%.3f connection_closed_at_start=%s "
+                        "cancelled=%s rows=%s server_time_ms=UNMEASURED",
+                        _diag_prepare_ms, _diag_driver_ms,
+                        ((_acquired if _acquired is not None else _finished) - _enter) * 1000,
+                        _diag_connection_closed, _cancelled, _row_count,
+                    )
+                except Exception:
+                    pass
 
 
 @_serialized_io
