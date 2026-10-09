@@ -50,6 +50,7 @@ from bot import liquidation as liq
 from bot import durable_execution as durable
 # ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
 from bot import nexus_ai
+from bot import kronos_shadow
 from bot.nexus_types import NexusDecision, decision_validation_error
 _NEXUS_ENABLED = os.environ.get("NEXUS_AI_ENABLED", "true").lower() == "true"
 _NEXUS_TIMEOUT_S = 10.0
@@ -2845,6 +2846,19 @@ class TradingEngine:
                 entry=sig.entry, sl=sig.sl, tp=sig.tp,
                 ticker=ticker, funding=funding, oi=oi, oi_delta=oi_delta,
                 news_score=news_score,
+            )
+
+            # Kronos is deliberately observation-only here. schedule_observation()
+            # returns immediately and cannot mutate this decision, risk sizing,
+            # durable-state gates, ownership/fencing, or exchange dispatch.
+            kronos_shadow.schedule_observation(
+                symbol=sig.symbol,
+                side=sig.direction,
+                k15=k15,
+                entry=sig.entry,
+                sl=sig.sl,
+                tp=sig.tp,
+                nexus_decision=decision,
             )
 
             # nexus_ai.decide executes in a worker thread. Telegram scheduling
