@@ -687,7 +687,21 @@ class TradingEngine:
                     await asyncio.sleep(5)
 
                 except asyncio.CancelledError:
-                    # Record silent loop cancellation before preserving BREAK behavior.
+                    # Observe cancellation ownership without changing exit behavior.
+                    # Child await cancellation and direct task.cancel() can both
+                    # surface here; the logged category never claims initiator.
+                    try:
+                        from bot import engine_cancel_origin_observer_v1 as cancel_origin
+                        log.warning(
+                            "%s", cancel_origin.format_event(cancel_origin.snapshot())
+                        )
+                    except Exception:
+                        log.warning(
+                            "[ENGINE_CANCEL_ORIGIN_OBSERVER_V1] kind=OBSERVER_ERROR "
+                            "actual_cancel_initiator=UNKNOWN observer_only=true "
+                            "risk_unchanged=true backup_gate_effect=NONE "
+                            "decision_effect=NONE execution_effect=NONE"
+                        )
                     self._liveness_cancelled_in_main_loop = True
                     break
                 except (NameError, AttributeError, TypeError, ImportError) as e:
