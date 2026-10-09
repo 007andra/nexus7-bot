@@ -17,11 +17,12 @@ def fixture():
     record = {
         "reconciliation_id": "PRIVATE_INTERNAL_ID",
         "identities": ["PRIVATE_ID_1", "PRIVATE_ID_2"],
-        "tran_ids": ["EXCHANGE_TX_PRIVATE"],
+        "tran_ids": ["EXCHANGE_TX_PRIVATE_A", "EXCHANGE_TX_PRIVATE_B"],
         "net_amount": 2,
+        "gross_in": 2, "gross_out": 0, "direction": "DEPOSIT",
         "pre_flow_equity": 10, "post_flow_equity": 12,
         "previous_hwm": 9, "adjusted_hwm": 12,
-        "equity_at_reconciliation": 12,
+        "equity_at_reconciliation": 12, "trading_drawdown_after": 0.0,
     }
     return {
         audit.LEDGER_KEY: json.dumps({"version": 1, "pending": [],
@@ -78,6 +79,66 @@ class HwmReviewTests(unittest.TestCase):
         obj["applied"][0]["adjusted_hwm"] = 99
         data[audit.LEDGER_KEY] = json.dumps(obj)
         self.assertIn("TWR_REBASE_MISMATCH", self.review(data)["blockers"])
+
+    def test_recorded_gross_in_out_must_balance_signed_net(self):
+        data = fixture()
+        doc = json.loads(data[audit.LEDGER_KEY])
+        doc["applied"][0]["gross_in"] = 100
+        data[audit.LEDGER_KEY] = json.dumps(doc)
+        row = self.review(data)
+        self.assertIn("GROSS_FLOW_TOTALS_MISMATCH", row["blockers"])
+        self.assertFalse(row["live_allowed"])
+        self.assertNotIn("EXCHANGE_TX_PRIVATE_A", json.dumps(row))
+
+    def test_direction_and_transaction_id_integrity(self):
+        data = fixture()
+        doc = json.loads(data[audit.LEDGER_KEY])
+        doc["applied"][0]["direction"] = "WITHDRAWAL"
+        doc["applied"][0]["tran_ids"] = ["EXCHANGE_TX_PRIVATE_A"] * 2
+        data[audit.LEDGER_KEY] = json.dumps(doc)
+        blockers = self.review(data)["blockers"]
+        self.assertIn("FLOW_DIRECTION_MISMATCH", blockers)
+        self.assertIn("FLOW_TRANSACTION_IDS_INVALID", blockers)
+
+    def test_recorded_drawdown_cannot_disagree_with_twr_hwm(self):
+        data = fixture()
+        doc = json.loads(data[audit.LEDGER_KEY])
+        doc["applied"][0]["trading_drawdown_after"] = 0.75
+        data[audit.LEDGER_KEY] = json.dumps(doc)
+        self.assertIn("FLOW_DRAWDOWN_RECORD_MISMATCH",
+                      self.review(data)["blockers"])
+
+    def test_pending_duplicate_and_invalid_amount_fail_closed(self):
+        data = fixture()
+        doc = json.loads(data[audit.LEDGER_KEY])
+        doc["pending"] = [
+            {"identity": "PRIVATE_PENDING", "amount": 2},
+            {"identity": "PRIVATE_PENDING", "amount": 0},
+        ]
+        data[audit.LEDGER_KEY] = json.dumps(doc)
+        blockers = self.review(data)["blockers"]
+        self.assertIn("PENDING_DUPLICATE_FLOW", blockers)
+        self.assertIn("PENDING_AMOUNT_INVALID", blockers)
+
+    def test_positive_existing_drawdown_reconciles_correctly(self):
+        data = fixture()
+        doc = json.loads(data[audit.LEDGER_KEY])
+        doc["applied"][0].update({
+            "previous_hwm": 20,
+            "adjusted_hwm": 24,
+            "trading_drawdown_after": 0.5,
+        })
+        data[audit.LEDGER_KEY] = json.dumps(doc)
+        data[PEAK_KEY] = "24"
+        prov = json.loads(data[PROV_KEY])
+        prov["new_peak"] = 24
+        data[PROV_KEY] = json.dumps(prov)
+        row = self.review(data)
+        self.assertEqual(
+            row["status"],
+            "STRUCTURAL_CHECKS_PASSED_INDEPENDENT_EXCHANGE_AUDIT_PENDING",
+        )
+        self.assertFalse(row["exchange_income_verified"])
 
     def test_pending_overlaps_applied_blocks(self):
         data = fixture()
