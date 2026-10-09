@@ -93,12 +93,12 @@ def _frontier_class(raw):
 def _aggregate_frontier(counter):
     """Stable, allowlisted aggregate; no symbol, ID, free-text or raw SQL."""
     return ",".join(f"{key}:{counter[key]}" for key in FRONTIER_CLASSES
-                    if counter[key]) or "NONE"
+                    if counter.get(key, 0)) or "NONE"
 
 
 def _aggregate_segment(counter):
     return ",".join(f"{key}:{counter[key]}" for key in FUNNEL_SEGMENTS
-                    if counter[key]) or "NONE"
+                    if counter.get(key, 0)) or "NONE"
 
 
 def _candidate(raw):
