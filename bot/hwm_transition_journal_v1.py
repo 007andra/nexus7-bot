@@ -347,7 +347,8 @@ async def commit_transition_in_tx(
                     or validated["reason"] != reason
                     or validated["evidence_ref"] != evidence_ref
                     or validated["execution_effect"] != "NONE"
-                    or _number(validated["new_peak"]) != _number(new_peak)):
+                    or abs(_decimal(validated["new_peak"]) - _decimal(new_peak))
+                       > Decimal("0.0000000001")):
                 raise JournalIntegrityError("new provenance does not match transition")
         except (TypeError, KeyError, ValueError) as exc:
             raise JournalIntegrityError("invalid new provenance") from exc
