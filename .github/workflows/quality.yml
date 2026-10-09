@@ -22,7 +22,8 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        # Official PostgreSQL image through Public ECR avoids Docker Hub throttling.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: postgres
@@ -115,6 +116,11 @@ jobs:
             tests.test_p0_cas_transaction_isolation_pg \
             tests.test_cash_flow_cas_postgres \
             tests.test_risk_epoch_postgres
+
+      - name: Encrypted PostgreSQL backup preparation safety tests (NO LIVE)
+        run: |
+          python -m unittest -v tests.test_pg_encrypted_backup_preparation_625_v1
+          python -m tools.backup.pg_encrypted_backup_v1 plan
 
       - name: Final pre-release proof pack
         run: python -m bot.release_proof
