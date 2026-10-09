@@ -16,23 +16,25 @@ def snapshot(task=None):
     try:
         current = asyncio.current_task() if task is None else task
         if current is None:
-            return {"kind": "UNATTRIBUTED_NO_TASK", "pending_cancel_requests": None}
+            return {"kind": "UNATTRIBUTED_NO_TASK", "unbalanced_cancel_requests_nonzero": None}
         fn = getattr(current, "cancelling", None)
         if not callable(fn):
-            return {"kind": "UNKNOWN_TASK_CANCEL_API", "pending_cancel_requests": None}
+            return {"kind": "UNKNOWN_TASK_CANCEL_API", "unbalanced_cancel_requests_nonzero": None}
         requests = fn()
+        # cancelling() measures cancel() calls minus uncancel() calls,
+        # not pending delivery, and cannot identify a caller.
         if type(requests) is not int or requests < 0:
-            return {"kind": "UNKNOWN_TASK_CANCEL_API", "pending_cancel_requests": None}
+            return {"kind": "UNKNOWN_TASK_CANCEL_API", "unbalanced_cancel_requests_nonzero": None}
         return {
             "kind": (
-                "TASK_CANCEL_REQUEST_PENDING" if requests > 0
-                else "PROPAGATED_AWAIT_CANCEL_OR_UNATTRIBUTED"
+                "TASK_CANCEL_REQUEST_COUNT_NONZERO" if requests > 0
+                else "NO_UNBALANCED_TASK_CANCEL_REQUEST"
             ),
             # Only a boolean is logged: no task repr, cancel caller or secrets.
-            "pending_cancel_requests": bool(requests),
+            "unbalanced_cancel_requests_nonzero": bool(requests),
         }
     except BaseException:
-        return {"kind": "CLASSIFIER_ERROR", "pending_cancel_requests": None}
+        return {"kind": "CLASSIFIER_ERROR", "unbalanced_cancel_requests_nonzero": None}
 
 
 def format_event(state):
@@ -40,16 +42,16 @@ def format_event(state):
     allowed = {
         "UNATTRIBUTED_NO_TASK",
         "UNKNOWN_TASK_CANCEL_API",
-        "TASK_CANCEL_REQUEST_PENDING",
-        "PROPAGATED_AWAIT_CANCEL_OR_UNATTRIBUTED",
+        "TASK_CANCEL_REQUEST_COUNT_NONZERO",
+        "NO_UNBALANCED_TASK_CANCEL_REQUEST",
         "CLASSIFIER_ERROR",
     }
     if kind not in allowed:
         kind = "CLASSIFIER_ERROR"
-    pending = state.get("pending_cancel_requests")
-    requested = "unknown" if pending is None else ("true" if pending is True else "false")
+    pending = state.get("unbalanced_cancel_requests_nonzero")
+    count_indicator = "unknown" if pending is None else ("true" if pending is True else "false")
     return (
-        f"[{TAG}] kind={kind} own_task_cancel_requested={requested} "
+        f"[{TAG}] kind={kind} own_task_cancel_request_count_nonzero={count_indicator} "
         "actual_cancel_initiator=UNKNOWN observer_only=true "
         "risk_unchanged=true hwm_unchanged=true backup_gate_effect=NONE "
         "decision_effect=NONE execution_effect=NONE"
