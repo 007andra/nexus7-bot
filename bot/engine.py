@@ -496,7 +496,7 @@ class TradingEngine:
             ownership = await wait_for_live_execution_ownership(self)
             if ownership is None:
                 return
-            self._start_background(execution_ownership_heartbeat(self))
+            self._ownership_heartbeat_task = self._start_background(execution_ownership_heartbeat(self))
 
             self._start_background(scoring.update_macro_cache())        # Fear&Greed
             self._start_background(scoring.news_reader_loop())           # news 24/7
@@ -518,6 +518,8 @@ class TradingEngine:
             while self._running:
                 try:
                     _ciclos += 1
+                    # Monotonic in-memory diagnostic only; never gates or schedules trades.
+                    self._liveness_cycle_started_monotonic = time.monotonic()
                     # Prova de vida: sem isso, um loop travado era
                     # indistinguível de "mercado sem setup".
                     if _ciclos == 1 or _ciclos % 60 == 0:

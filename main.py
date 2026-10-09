@@ -302,6 +302,12 @@ async def lifespan(app: FastAPI):
 
         app.state.blocked = False
         app.state.engine_task = asyncio.create_task(engine.run())
+        # Optional, local-only diagnostic: never calls DB, exchange or trading guards.
+        from bot import engine_internal_liveness_v1 as internal_liveness
+        if internal_liveness.enabled():
+            app.state.liveness_watch_task = asyncio.create_task(
+                internal_liveness.run(engine, app.state.engine_task)
+            )
         log.info("✅ BGX Capital online (%s %s)", EXCHANGE_NAME, EXCHANGE_PRODUCT)
 
         # Mensagem de startup deriva do estado operacional real. Em especial,
@@ -337,11 +343,11 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
     app.state.engine = None
     engine.stop()
-    for t in ("bootstrap_task", "engine_task"):
+    for t in ("bootstrap_task", "engine_task", "liveness_watch_task"):
         task=getattr(app.state,t,None)
         if task and not task.done():
             task.cancel()
-    tasks = [getattr(app.state, name, None) for name in ('bootstrap_task', 'engine_task')]
+    tasks = [getattr(app.state, name, None) for name in ('bootstrap_task', 'engine_task', 'liveness_watch_task')]
     await asyncio.gather(*(t for t in tasks if t is not None), return_exceptions=True)
     try:
         await client.close()
