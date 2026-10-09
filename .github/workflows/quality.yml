@@ -22,7 +22,8 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        # Official PostgreSQL image through Public ECR avoids Docker Hub throttling.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: postgres
@@ -115,6 +116,11 @@ jobs:
             tests.test_p0_cas_transaction_isolation_pg \
             tests.test_cash_flow_cas_postgres \
             tests.test_risk_epoch_postgres
+
+      - name: Encrypted PostgreSQL backup preparation safety tests (NO LIVE)
+        run: |
+          python -m unittest -v tests.test_pg_encrypted_backup_preparation_625_v1
+          python -m tools.backup.pg_encrypted_backup_v1 plan
 
       - name: Final pre-release proof pack
         run: python -m bot.release_proof
@@ -222,3 +228,54 @@ jobs:
               sys.exit(1)
           print("Todos os módulos importam corretamente")
           EOF
+
+
+  synthetic_pg18_age_roundtrip:
+    name: Synthetic PG18 age encrypted backup/restore (NO LIVE)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      synthetic_postgres18:
+        image: public.ecr.aws/docker/library/postgres:18
+        env:
+          POSTGRES_USER: proof
+          POSTGRES_PASSWORD: synthetic_pg18_ci_password
+          POSTGRES_DB: nexus_synthetic_source
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U proof -d nexus_synthetic_source"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NEXUS_SYNTHETIC_PG18_LAB: I_CONFIRM_NO_PRODUCTION
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: proof
+      PGPASSWORD: synthetic_pg18_ci_password
+    steps:
+      - name: Checkout exact candidate SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Set up disposable Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install disposable age cryptography tool (synthetic data only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq age
+          age --version
+
+      - name: Verify PostgreSQL 18 and age real end-to-end synthetic roundtrip
+        run: bash tests/pg18_age_synthetic_roundtrip_625_v1.sh
+
+      - name: No archived backup artifact is published
+        if: always()
+        run: |
+          test ! -e backup.pgdump
+          test ! -e backup.pgdump.age
+          echo "synthetic lab private temp data cleaned by script trap; no Actions upload"
