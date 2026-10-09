@@ -219,5 +219,130 @@ class HwmReviewTests(unittest.TestCase):
         self.assertNotIn("conn.execute(", source)
 
 
+
+LEGACY_PEAK_KEY = "private:legacy:peak:DO_NOT_DISCLOSE"
+LEGACY_PROV_KEY = "private:legacy:provenance:DO_NOT_DISCLOSE"
+
+
+class LegacyNamespaceReviewTests(unittest.TestCase):
+    class Conn:
+        def __init__(self, values):
+            self.values = values
+            self.calls = []
+
+        async def fetch(self, sql, keys):
+            self.calls.append((sql, list(keys)))
+            return [
+                {"key": k, "value": self.values[k]}
+                for k in keys if k in self.values
+            ]
+
+    def collect(self, data, *, use_legacy=True):
+        conn = self.Conn(data)
+        result = asyncio.run(audit.collect_once(
+            conn, peak_key=PEAK_KEY, provenance_key=PROV_KEY,
+            legacy_peak_key=LEGACY_PEAK_KEY if use_legacy else None,
+            legacy_provenance_key=LEGACY_PROV_KEY if use_legacy else None,
+        ))
+        return result, conn
+
+    @staticmethod
+    def legacy_only():
+        data = fixture()
+        data[LEGACY_PEAK_KEY] = data.pop(PEAK_KEY)
+        data[LEGACY_PROV_KEY] = data.pop(PROV_KEY)
+        return data
+
+    def test_legacy_only_matches_authenticated_production_probe_shape(self):
+        data = self.legacy_only()
+        result, conn = self.collect(data)
+        self.assertEqual(
+            result["status"],
+            "STRUCTURAL_CHECKS_PASSED_INDEPENDENT_EXCHANGE_AUDIT_PENDING",
+        )
+        self.assertEqual(result["hwm_source"], "LEGACY")
+        self.assertEqual(result["provenance_source"], "LEGACY")
+        self.assertEqual(result["durable_hwm_usdt"], 12)
+        self.assertFalse(result["exchange_income_verified"])
+        self.assertFalse(result["full_hwm_history_verified"])
+        self.assertFalse(result["live_allowed"])
+        self.assertEqual(len(conn.calls), 1)
+        self.assertEqual(conn.calls[0][0], audit.SELECT_SQL)
+        self.assertEqual(len(conn.calls[0][1]), 7)
+        for secret in (LEGACY_PEAK_KEY, LEGACY_PROV_KEY, "PRIVATE_ID_1",
+                       "SECRET_LEDGER_IDENTITY", "EXCHANGE_TX_PRIVATE_A"):
+            self.assertNotIn(secret, json.dumps(result))
+
+    def test_current_pair_precedes_stale_legacy_pair(self):
+        data = fixture()
+        data[LEGACY_PEAK_KEY] = "999999999"
+        data[LEGACY_PROV_KEY] = json.dumps({"version": 1, "new_peak": 999999999})
+        result, _ = self.collect(data)
+        self.assertEqual(result["hwm_source"], "CURRENT")
+        self.assertEqual(result["provenance_source"], "CURRENT")
+        self.assertEqual(result["durable_hwm_usdt"], 12)
+        self.assertEqual(
+            result["status"],
+            "STRUCTURAL_CHECKS_PASSED_INDEPENDENT_EXCHANGE_AUDIT_PENDING",
+        )
+
+    def test_invalid_current_value_must_not_be_overwritten_by_legacy(self):
+        data = fixture()
+        data[PEAK_KEY] = "corrupt-HWM"
+        data[LEGACY_PEAK_KEY] = "12"
+        data[LEGACY_PROV_KEY] = data[PROV_KEY]
+        result, _ = self.collect(data)
+        self.assertEqual(result["hwm_source"], "CURRENT")
+        self.assertIn("HWM_MISSING_OR_INVALID", result["blockers"])
+        self.assertEqual(result["status"], "EVIDENCE_INCONSISTENT_OR_INCOMPLETE")
+        self.assertIsNone(result["durable_hwm_usdt"])
+
+    def test_legacy_provenance_corruption_fails_closed(self):
+        data = self.legacy_only()
+        prov = json.loads(data[LEGACY_PROV_KEY])
+        prov["new_peak"] = 23
+        data[LEGACY_PROV_KEY] = json.dumps(prov)
+        result, _ = self.collect(data)
+        self.assertIn("HWM_PROVENANCE_PEAK_MISMATCH", result["blockers"])
+        self.assertEqual(result["status"], "EVIDENCE_INCONSISTENT_OR_INCOMPLETE")
+
+    def test_legacy_provenance_missing_stays_incomplete(self):
+        data = self.legacy_only()
+        del data[LEGACY_PROV_KEY]
+        result, _ = self.collect(data)
+        self.assertEqual(result["hwm_source"], "LEGACY")
+        self.assertEqual(result["provenance_source"], "MISSING")
+        self.assertIn("PROVENANCE_MISSING_OR_INVALID", result["blockers"])
+        self.assertFalse(result["promotion_allowed"])
+
+    def test_mixed_namespace_pair_requires_manual_review(self):
+        data = self.legacy_only()
+        data[PEAK_KEY] = data[LEGACY_PEAK_KEY]
+        result, _ = self.collect(data)
+        self.assertEqual(result["hwm_source"], "CURRENT")
+        self.assertEqual(result["provenance_source"], "LEGACY")
+        self.assertIn("NAMESPACE_SOURCES_MIXED_MANUAL_REVIEW", result["blockers"])
+        self.assertEqual(result["status"], "EVIDENCE_INCONSISTENT_OR_INCOMPLETE")
+        self.assertFalse(result["live_allowed"])
+
+    def test_no_fallback_only_when_explicitly_disabled(self):
+        data = self.legacy_only()
+        result, conn = self.collect(data, use_legacy=False)
+        self.assertEqual(result["hwm_source"], "MISSING")
+        self.assertEqual(result["provenance_source"], "MISSING")
+        self.assertIn("HWM_MISSING_OR_INVALID", result["blockers"])
+        self.assertEqual(len(conn.calls[0][1]), 5)
+
+    def test_untrusted_legacy_key_fails_before_database_query(self):
+        conn = self.Conn(fixture())
+        with self.assertRaisesRegex(ValueError, "INVALID_READONLY_LEDGER_KEYS"):
+            asyncio.run(audit.collect_once(
+                conn, peak_key=PEAK_KEY, provenance_key=PROV_KEY,
+                legacy_peak_key="",
+            ))
+        self.assertEqual(conn.calls, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
