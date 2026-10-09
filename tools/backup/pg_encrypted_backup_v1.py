@@ -29,8 +29,10 @@ FMT = "PG_DUMP_CUSTOM_AGE_V1"
 RESTORE_SUFFIX = "_restore_test"
 PLAN_STATUS = "PLAN_ONLY_NO_CONNECT_NO_WRITE"
 SQL_EMPTY = (
-    "SELECT count(*) FROM information_schema.tables "
-    "WHERE table_schema NOT IN ('pg_catalog','information_schema')"
+    "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON "
+    "c.relnamespace=n.oid WHERE c.relkind IN ('r','p','v','m','S','f') "
+    "AND n.nspname NOT IN ('pg_catalog','information_schema') "
+    "AND n.nspname NOT LIKE 'pg_toast%'"
 )
 PUBLIC_KEY = re.compile(r"^age1[023456789acdefghjklmnpqrstuvwxyz]{35,100}$")
 
@@ -111,6 +113,8 @@ def _private_dir(path: Path):
         raise UnsafeOperation("PRIVATE_DIRECTORY_REQUIRED")
     if stat.S_IMODE(path.stat().st_mode) & 0o077:
         raise UnsafeOperation("DIRECTORY_PERMISSIONS_NOT_PRIVATE")
+    if path.stat().st_uid != os.getuid():
+        raise UnsafeOperation("PRIVATE_DIRECTORY_NOT_OWNED")
 
 
 def _sha256(p: Path):
@@ -153,7 +157,10 @@ def _run_pipe(args_left, args_right, out, *, timeout: int = 3600):
 def _backup(a):
     _require_execute(a, "NEXUS_APPROVE_BACKUP_EXPORT")
     env = _client_env()
-    parent = Path(_env("NEXUS_BACKUP_PRIVATE_DIR")).resolve(strict=True)
+    source_parent = Path(_env("NEXUS_BACKUP_PRIVATE_DIR"))
+    if source_parent.is_symlink():
+        raise UnsafeOperation("PRIVATE_DIRECTORY_REQUIRED")
+    parent = source_parent.resolve(strict=True)
     _private_dir(parent)
     recipient = _env("NEXUS_BACKUP_AGE_RECIPIENT")
     if not PUBLIC_KEY.fullmatch(recipient):
@@ -179,6 +186,7 @@ def _backup(a):
             raise UnsafeOperation("ENCRYPTED_ARTIFACT_EMPTY")
         target = created / ARCHIVE
         os.replace(tmp, target)
+        os.chmod(target, 0o600)
         manifest = {
             "format": FMT,
             "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -208,7 +216,10 @@ def _backup(a):
 
 
 def _load_archive():
-    d = Path(_env("NEXUS_BACKUP_RESTORE_SOURCE_DIR")).resolve(strict=True)
+    source = Path(_env("NEXUS_BACKUP_RESTORE_SOURCE_DIR"))
+    if source.is_symlink():
+        raise UnsafeOperation("PRIVATE_DIRECTORY_REQUIRED")
+    d = source.resolve(strict=True)
     _private_dir(d)
     encrypted = d / ARCHIVE
     man = d / MANIFEST
@@ -240,8 +251,11 @@ def _restore(a):
         raise UnsafeOperation("RESTORE_DESTINATION_NAME_INVALID")
     if os.environ["PGDATABASE"] == RESTORE_SUFFIX:
         raise UnsafeOperation("RESTORE_DESTINATION_NAME_INVALID")
-    identity = Path(_env("NEXUS_BACKUP_AGE_IDENTITY_FILE")).resolve(strict=True)
-    if not identity.is_file() or identity.is_symlink():
+    identity_source = Path(_env("NEXUS_BACKUP_AGE_IDENTITY_FILE"))
+    if identity_source.is_symlink():
+        raise UnsafeOperation("DECRYPTION_IDENTITY_UNAVAILABLE")
+    identity = identity_source.resolve(strict=True)
+    if not identity.is_file():
         raise UnsafeOperation("DECRYPTION_IDENTITY_UNAVAILABLE")
     if stat.S_IMODE(identity.stat().st_mode) & 0o077:
         raise UnsafeOperation("DECRYPTION_IDENTITY_NOT_PRIVATE")
@@ -322,8 +336,8 @@ def main(argv=None):
         elif a.action == "restore":
             _restore(a)
     except UnsafeOperation as exc:
-        report(status="REFUSED", reason=str(exc), no_database_mutation_claimed=False,
-               live_allowed=False)
+        report(status="REFUSED", reason=str(exc), restore_pass=False,
+               offsite_verified=False, live_allowed=False)
         return 2
     except Exception:
         # Never log native subprocess error, DSN or the raw decrypted stream.
