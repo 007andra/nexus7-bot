@@ -27,6 +27,21 @@ def _task_status(task):
     return "DONE" if task.done() else "RUNNING"
 
 
+def _task_terminal_kind(task):
+    """Classify only completion form; never log task exceptions or repr."""
+    if task is None:
+        return "NOT_STARTED"
+    if not task.done():
+        return "RUNNING"
+    try:
+        if task.cancelled():
+            return "CANCELLED"
+        return "EXCEPTION" if task.exception() is not None else "RETURNED"
+    except BaseException:
+        # The observer must never propagate a task-inspection failure.
+        return "UNKNOWN"
+
+
 def snapshot(engine, task, *, monotonic=None, now_utc=None):
     """Read local state only. No async, I/O, guard bypass, or secret fields."""
     monotonic = time.monotonic() if monotonic is None else float(monotonic)
@@ -35,7 +50,8 @@ def snapshot(engine, task, *, monotonic=None, now_utc=None):
     cycle_age = None
     if isinstance(cycle_started, (int, float)) and math.isfinite(cycle_started):
         cycle_age = max(0.0, monotonic - cycle_started)
-    heartbeat_status = _task_status(getattr(engine, "_ownership_heartbeat_task", None))
+    heartbeat_task = getattr(engine, "_ownership_heartbeat_task", None)
+    heartbeat_status = _task_status(heartbeat_task)
     engine_status = _task_status(task)
     expires = getattr(engine, "_execution_ownership_expires_at", None)
     lease_remaining = None
@@ -57,6 +73,11 @@ def snapshot(engine, task, *, monotonic=None, now_utc=None):
         "status": state,
         "engine_task": engine_status,
         "heartbeat_task": heartbeat_status,
+        "engine_exit_kind": _task_terminal_kind(task),
+        "heartbeat_exit_kind": _task_terminal_kind(heartbeat_task),
+        "main_loop_caught_cancel": bool(
+            getattr(engine, "_liveness_cancelled_in_main_loop", False)
+        ),
         "cycle_age_s": round(cycle_age, 1) if cycle_age is not None else None,
         "local_lease_remaining_s": round(lease_remaining, 1) if lease_remaining is not None else None,
         "observation_only": True,
@@ -76,6 +97,9 @@ def format_event(result):
         f"status={result['status']} "
         f"engine_task={result['engine_task']} "
         f"heartbeat_task={result['heartbeat_task']} "
+        f"engine_exit_kind={result['engine_exit_kind']} "
+        f"heartbeat_exit_kind={result['heartbeat_exit_kind']} "
+        f"main_loop_caught_cancel={str(result['main_loop_caught_cancel']).lower()} "
         f"cycle_age_s={number(result['cycle_age_s'])} "
         f"local_lease_remaining_s={number(result['local_lease_remaining_s'])} "
         "observation_only=true db_reads=0 decision_effect=NONE "
