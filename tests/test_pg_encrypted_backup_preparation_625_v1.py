@@ -166,7 +166,7 @@ class BackupPreparationTests(unittest.TestCase):
         dirs = list(self.root.iterdir())
         self.assertEqual(len(dirs), 1)
         directory = dirs[0]
-        self.assertEqual([x.name for x in directory.iterdir()], [b.ARCHIVE, b.MANIFEST])
+        self.assertEqual({x.name for x in directory.iterdir()}, {b.ARCHIVE, b.MANIFEST})
         self.assertEqual(stat.S_IMODE((directory / b.ARCHIVE).stat().st_mode), 0o600)
         data = json.loads((directory / b.MANIFEST).read_text())
         self.assertEqual(data["pg_dump_major"], 18)
