@@ -24,6 +24,13 @@ MIN_EXCLUDED = 20
 MIN_RETAINED = 30
 HORIZONS = (60, 240)
 TARGET_SEGMENT = ("SHORT", "TRENDING_DOWN", "MOMENTUM")
+# These are fixed labels only, never user/SQL text. Descriptive, not veto rules.
+FUNNEL_SEGMENTS = ("SHORT_DOWN_MOMENTUM", "SHORT_DOWN_BOS_BREAK", "OTHER")
+FRONTIER_CLASSES = (
+    "PULLBACK", "FUNNEL", "CAPITAL", "MIN_ORDER", "NEXUS",
+    "NEXUS_RR", "NEXUS_EV", "NEXUS_SCORE", "NEXUS_DATA",
+    "NEXUS_OTHER", "SHADOW_APPROVED", "UNKNOWN",
+)
 AUTHORITY = {
     "research_only": True,
     "read_only_evaluation": True,
@@ -64,6 +71,36 @@ def _mean(values):
     return sum(values) / len(values) if values else None
 
 
+def _funnel_segment(raw):
+    """Fixed grouping for research diagnostics; cannot alter a decision."""
+    side = str(raw.get("side") or "").upper()
+    regime = str(raw.get("regime") or "").upper()
+    setup = str(raw.get("setup") or "").upper()
+    if side == "SHORT" and regime == "TRENDING_DOWN":
+        if setup == "MOMENTUM":
+            return "SHORT_DOWN_MOMENTUM"
+        if setup == "BOS_BREAK":
+            return "SHORT_DOWN_BOS_BREAK"
+    return "OTHER"
+
+
+def _frontier_class(raw):
+    """Only code-owned names reach the log; unknown inputs are grouped."""
+    value = raw.get("frontier_stage")
+    return value if type(value) is str and value in FRONTIER_CLASSES else "UNKNOWN"
+
+
+def _aggregate_frontier(counter):
+    """Stable, allowlisted aggregate; no symbol, ID, free-text or raw SQL."""
+    return ",".join(f"{key}:{counter[key]}" for key in FRONTIER_CLASSES
+                    if counter[key]) or "NONE"
+
+
+def _aggregate_segment(counter):
+    return ",".join(f"{key}:{counter[key]}" for key in FUNNEL_SEGMENTS
+                    if counter[key]) or "NONE"
+
+
 def _candidate(raw):
     """Only canonical, future, immutable shadow decisions qualify.
 
@@ -101,6 +138,8 @@ def _candidate(raw):
         "regime": regime,
         "setup": setup,
         "champion_approved": raw["nexus_allowed"],
+        # Diagnostic label only; never used in enrollment, eligibility or veto.
+        "frontier_stage_diagnostic": _frontier_class(raw),
     }
 
 
@@ -139,6 +178,9 @@ def evaluate(payloads, outcomes60=(), outcomes240=(), *, now_epoch):
     candidates = []
     invalid_future = 0
     noncanonical_future = 0
+    pre_nexus_segments, pre_nexus_frontier = Counter(), Counter()
+    rejected_segments, rejected_frontier = Counter(), Counter()
+    approved_segments = Counter()
     for raw in payloads:
         if not isinstance(raw, dict):
             continue
@@ -149,6 +191,11 @@ def evaluate(payloads, outcomes60=(), outcomes240=(), *, now_epoch):
         # This is normal, not malformed evidence or an audit failure.
         if raw.get("nexus_called") is not True:
             noncanonical_future += 1
+            # Existing noncanonical count is record-level, not unique identities.
+            # These counts remain descriptive and cannot create new approvals.
+            if raw.get("population") == POPULATION and raw.get("shadow_only") is True:
+                pre_nexus_segments[_funnel_segment(raw)] += 1
+                pre_nexus_frontier[_frontier_class(raw)] += 1
             continue
         row = _candidate(raw)
         if row is None:
@@ -169,7 +216,10 @@ def evaluate(payloads, outcomes60=(), outcomes240=(), *, now_epoch):
         seen.add(cid)
         if not row["champion_approved"]:
             rejected += 1
+            rejected_segments[_funnel_segment(row)] += 1
+            rejected_frontier[row["frontier_stage_diagnostic"]] += 1
             continue
+        approved_segments[_funnel_segment(row)] += 1
         if counts[row["symbol"]] >= PER_SYMBOL_CAP:
             cap_skipped += 1
             continue
@@ -264,6 +314,12 @@ def evaluate(payloads, outcomes60=(), outcomes240=(), *, now_epoch):
         "per_symbol_cap_skipped": cap_skipped,
         "invalid_future_records": invalid_future,
         "noncanonical_future_excluded": noncanonical_future,
+        # Diagnosis of the 0/100 enrollment bottleneck; not market-policy stats.
+        "pre_nexus_funnel_segments": dict(pre_nexus_segments),
+        "pre_nexus_frontier": dict(pre_nexus_frontier),
+        "canonical_rejected_funnel_segments": dict(rejected_segments),
+        "canonical_rejected_frontier": dict(rejected_frontier),
+        "canonical_approved_funnel_segments": dict(approved_segments),
         "duplicate_candidate_ids": duplicate_ids,
         "distinct_symbols": len(counts),
         "max_symbol_share": max(counts.values()) / len(approved) if approved else 0.0,
@@ -366,6 +422,11 @@ def format_log(report):
         f"symbols={report['distinct_symbols']} concentration={_fmt(report['max_symbol_share'])} "
         f"cap_skipped={report['per_symbol_cap_skipped']} "
         f"noncanonical_excluded={report['noncanonical_future_excluded']} "
+        f"funnel_pre={_aggregate_segment(report['pre_nexus_funnel_segments'])} "
+        f"funnel_pre_stage={_aggregate_frontier(report['pre_nexus_frontier'])} "
+        f"funnel_rejected={_aggregate_segment(report['canonical_rejected_funnel_segments'])} "
+        f"funnel_rejected_stage={_aggregate_frontier(report['canonical_rejected_frontier'])} "
+        f"funnel_approved={_aggregate_segment(report['canonical_approved_funnel_segments'])} "
         f"invalid={report['invalid_future_records']} "
         f"observed60={report['observed_60m']} observed240={report['observed_240m']} "
         f"excluded_gross60={_fmt(report['excluded_gross_avg_60m'])} "
