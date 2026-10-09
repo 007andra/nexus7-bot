@@ -105,6 +105,23 @@ def review_values(values, *, peak_key, provenance_key):
             continue
         if abs(pre + net - post) > 1e-6 * max(1.0, post):
             errors.append("FLOW_PRE_POST_MISMATCH")
+        # Cross-check *redundant* persisted income aggregates rather than
+        # trusting net_amount by itself as authentic exchange evidence.
+        gross_in = _number(record.get("gross_in"))
+        gross_out = _number(record.get("gross_out"))
+        if (gross_in is None or gross_out is None or
+                gross_in < 0 or gross_out < 0):
+            errors.append("GROSS_FLOW_TOTALS_MISSING_OR_INVALID")
+        elif abs((gross_in - gross_out) - net) > 1e-6 * max(1.0, abs(net)):
+            errors.append("GROSS_FLOW_TOTALS_MISMATCH")
+        tran_ids = record.get("tran_ids")
+        if (not isinstance(tran_ids, list) or len(tran_ids) != len(ids)
+                or any(not isinstance(i, str) or not i for i in tran_ids)
+                or len(set(tran_ids)) != len(tran_ids)):
+            errors.append("FLOW_TRANSACTION_IDS_INVALID")
+        direction = "DEPOSIT" if net > 0 else "WITHDRAWAL" if net < 0 else "NET_ZERO"
+        if record.get("direction") != direction:
+            errors.append("FLOW_DIRECTION_MISMATCH")
         expected = max(prior, pre) * (post / pre)
         # One-way reconstruction mirrors the canonical cash_flow_ledger rule:
         # adjusted HWM >= both TWR rebased HWM and equity at reconciliation.
@@ -115,11 +132,26 @@ def review_values(values, *, peak_key, provenance_key):
             expected = max(expected, equity_at)
         if adjusted is not None and abs(expected - adjusted) > 1e-6 * max(1, adjusted):
             errors.append("TWR_REBASE_MISMATCH")
+        recorded_dd = _number(record.get("trading_drawdown_after"))
+        if equity_at is not None and adjusted is not None:
+            expected_dd = max(0.0, 1.0 - equity_at / adjusted)
+            if (recorded_dd is None or
+                    abs(recorded_dd - expected_dd) > 1e-6):
+                errors.append("FLOW_DRAWDOWN_RECORD_MISMATCH")
         total_net += net
+    pending_ids = set()
     for item in pending:
-        if not isinstance(item, dict) or not item.get("identity"):
+        if not isinstance(item, dict) or not isinstance(item.get("identity"), str) or not item["identity"]:
             errors.append("PENDING_FLOW_MALFORMED")
-        elif item["identity"] in reconciled_flow_ids:
+            continue
+        identity = item["identity"]
+        amount = _number(item.get("amount"))
+        if amount is None or amount == 0:
+            errors.append("PENDING_AMOUNT_INVALID")
+        if identity in pending_ids:
+            errors.append("PENDING_DUPLICATE_FLOW")
+        pending_ids.add(identity)
+        if identity in reconciled_flow_ids:
             errors.append("PENDING_ALREADY_APPLIED")
     if baseline is not None and (
             _number(baseline.get("wallet"), positive=True) is None
