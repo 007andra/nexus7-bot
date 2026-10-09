@@ -532,7 +532,20 @@ async def commit_record(
                 evidence_ref=f"cash_flow_ledger:{record['method']}:{record['reconciliation_id']}"[:160],
             ),
         ))
-    ok = await save_key_values_atomic_cas(items, expected=expected, strict=strict)
+    journal_intent = None
+    if adjusted is not None:
+        journal_intent = {
+            "old_peak": record["previous_hwm"],
+            "account_equity": record["equity_at_reconciliation"],
+            "reason": "external_capital_flow_rebase",
+            "evidence_ref": (
+                f"cash_flow_ledger:{record['method']}:{record['reconciliation_id']}"
+            )[:160],
+        }
+    ok = await save_key_values_atomic_cas(
+        items, expected=expected, strict=strict,
+        hwm_transition=journal_intent,
+    )
     if strict and not ok:
         raise db.PersistenceError("cash-flow reconciliation write not confirmed")
     if risk is not None and adjusted is not None:

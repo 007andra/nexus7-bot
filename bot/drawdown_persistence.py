@@ -112,6 +112,10 @@ async def _write_peak_with_provenance(*, old_peak, new_peak, equity, reason, evi
             (hwm_namespace.provenance_key(), provenance),
         ),
         strict=strict,
+        hwm_transition={
+            "old_peak": old_peak, "account_equity": equity,
+            "reason": reason, "evidence_ref": evidence_ref,
+        },
     )
     if strict and not ok:
         raise db.PersistenceError("atomic HWM/provenance write not confirmed")
@@ -314,6 +318,12 @@ async def rebase_real_account_peak_for_external_performance(
         # even if the HWM later returns to its original value (the ABA case).
         expected={DURABLE_EQUITY_PEAK_KEY: raw_peak, repair_marker_key: None},
         strict=strict,
+        hwm_transition={
+            "old_peak": old_peak,
+            "account_equity": current_equity,
+            "reason": "external_position_performance_rebase",
+            "evidence_ref": evidence_ref,
+        },
     )
     if not ok:
         raise db.PersistenceError("external performance HWM rebase write not confirmed")
