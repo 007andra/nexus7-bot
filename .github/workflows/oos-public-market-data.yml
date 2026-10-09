@@ -1,0 +1,37 @@
+name: Research public Binance 15m archive
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/oos-public-market-data.yml'
+      - 'research/oos_rca_v1/ci_public_archive.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-market-data:
+    name: Public only - USD-M 15m candles
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch strictly public market data, no credentials
+        run: python research/oos_rca_v1/ci_public_archive.py
+      - name: Upload public market data and provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: binance-usdm-public-15m-20261005-08
+          path: |
+            public_market_archive/
+            research/oos_rca_v1/binance_path_replay.py
+            research/oos_rca_v1/join_candles.py
+            research/oos_rca_v1/fetch_public_binance_klines.py
+          # Source files here are public research code, never private user telemetry.
+          retention-days: 7
+          if-no-files-found: error

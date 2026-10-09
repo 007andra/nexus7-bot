@@ -1,0 +1,52 @@
+name: OOS frozen SQL parity PG16
+
+on:
+  pull_request:
+    branches: [migration/binance-usdm]
+    paths:
+      - ".github/workflows/oos-postgres16-parity.yml"
+      - "research/oos_rca_v1/**"
+      - "tests/test_oos_postgres16_sql_parity.py"
+      - "tests/test_oos_postgres_csv_integrity.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pg16-parity:
+    name: Exact SQL to canonical Python parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: proof
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nexus_release_proof
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U proof -d nexus_release_proof"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI: "true"
+      TEST_POSTGRES_DSN: postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof
+    steps:
+      - name: Checkout exact PR candidate commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Assert PostgreSQL client available
+        run: command -v psql
+      - name: Verify readonly exact SQL and canonical proof in PostgreSQL16
+        run: python -m unittest -v tests.test_oos_postgres16_sql_parity tests.test_oos_postgres_csv_integrity

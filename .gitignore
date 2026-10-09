@@ -6,3 +6,6 @@ __pycache__/
 logs/
 models/
 .DS_Store
+
+# Private operator-only research exports; never commit trading/account telemetry
+private_oos_evidence/
