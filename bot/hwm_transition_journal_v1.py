@@ -287,7 +287,7 @@ async def anchor_current_peak_in_tx(
 async def commit_transition_in_tx(
     conn, *, peak_key, provenance_key, expected_peak_raw,
     expected_provenance_raw, new_peak, account_equity,
-    reason, evidence_ref, event_id
+    reason, evidence_ref, event_id, new_provenance_raw=None
 ):
     """Atomic future HWM+provenance+journal write INSIDE caller transaction.
 
@@ -336,10 +336,27 @@ async def commit_transition_in_tx(
     )
     # Authenticated account/evidence validity is STILL the responsibility of
     # existing caller risk controls; this helper creates no new authority.
-    provenance = hwm_provenance.build_hwm_provenance(
-        reason=reason, old_peak=float(peak), new_peak=float(_decimal(new_peak)),
-        account_equity=float(_decimal(account_equity)), evidence_ref=evidence_ref,
-    )
+    if new_provenance_raw is not None:
+        # Preserve the already-validated exact snapshot prepared by the
+        # existing risk/ledger writer, including its recorded_at timestamp.
+        if not isinstance(new_provenance_raw, str):
+            raise JournalIntegrityError("invalid new provenance type")
+        try:
+            validated = json.loads(new_provenance_raw)
+            if (validated["version"] != 1
+                    or validated["reason"] != reason
+                    or validated["evidence_ref"] != evidence_ref
+                    or validated["execution_effect"] != "NONE"
+                    or _number(validated["new_peak"]) != _number(new_peak)):
+                raise JournalIntegrityError("new provenance does not match transition")
+        except (TypeError, KeyError, ValueError) as exc:
+            raise JournalIntegrityError("invalid new provenance") from exc
+        provenance = new_provenance_raw
+    else:
+        provenance = hwm_provenance.build_hwm_provenance(
+            reason=reason, old_peak=float(peak), new_peak=float(_decimal(new_peak)),
+            account_equity=float(_decimal(account_equity)), evidence_ref=evidence_ref,
+        )
     await _insert(conn, scope, int(previous["seq"]) + 1, payload, previous["digest"])
     ts = await conn.fetchval("SELECT clock_timestamp()")
     for key, value in (
