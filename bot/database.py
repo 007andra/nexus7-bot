@@ -744,6 +744,22 @@ async def get_recent_decisions(limit: int = 60) -> list:
 
 @_serialized_io
 async def save_key_value(key: str, value: str, *, strict: bool = False):
+    # Future-only journal enforcement: no standalone HWM or provenance
+    # mutation can bypass the atomic transaction, including incident scripts.
+    # This does not affect production while the opt-in feature is disabled.
+    if os.environ.get("HWM_JOURNAL_INTEGRATION_V1", "").lower() == "true":
+        from bot import hwm_namespace, financial_namespace
+        critical = {
+            hwm_namespace.equity_peak_key(), hwm_namespace.provenance_key(),
+        }
+        critical.update(
+            alias for canonical in tuple(critical)
+            if (alias := financial_namespace.legacy_key_for(canonical))
+        )
+        if key in critical:
+            raise PersistenceError(
+                "un-journaled direct HWM/provenance write forbidden"
+            )
     if not _conn:
         if strict:
             raise PersistenceError(f"save_key_value {key}: database unavailable")
