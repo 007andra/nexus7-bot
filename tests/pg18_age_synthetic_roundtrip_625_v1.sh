@@ -23,7 +23,7 @@ for cmd in pg_dump pg_restore psql; do
   cat > "$temp/bin/$cmd" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec docker run --rm -i --network host -e PGPASSWORD -e PGSSLMODE --entrypoint $cmd $image "\$@"
+exec docker run --rm -i --network host -e PGHOST -e PGPORT -e PGUSER -e PGDATABASE -e PGPASSWORD -e PGSSLMODE --entrypoint $cmd $image "\$@"
 EOF
   chmod 700 "$temp/bin/$cmd"
 done
