@@ -95,3 +95,23 @@ been retargeted from the stacked draft #622 branch to
 `migration/binance-usdm` **solely to execute exact-head CI**. The diff now
 includes the unmerged foundation (#622) and this integration proof; no
 permission to merge, deploy or enable the journal follows from retargeting.
+
+## Additional discovered writer — mandatory quarantine
+
+Current code contains a **fourth** direct HWM write path:
+`bot/operational_incident_recovery.py::maybe_rebase` calls
+`db.save_key_value(drawdown.DURABLE_EQUITY_PEAK_KEY, ...)`
+and writes the marker later, outside a combined HWM/provenance transaction.
+That legacy implementation is **not safely journal-integrated**. We
+therefore added an opt-in guard in `db.save_key_value`: when the future
+journal flag is active, any direct write to a canonical **or legacy**
+physical HWM/provenance key raises `PersistenceError` before mutation,
+even with `strict=False`. The default-off behavior is unchanged.
+
+This is **quarantine, not a migration of that incident workflow**.
+Before any production journal activation, a separate migration must
+either retire the one-shot incident code with a proved operator-signed
+closure or move its HWM+provenance+marker to the same guarded CAS journal
+transaction with direct independent approval. Under no circumstances may
+that path revert to an unpaired overwrite. The real-PostgreSQL suite
+tests canonical, provenance and legacy direct-write refusal.
