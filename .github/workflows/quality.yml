@@ -122,6 +122,11 @@ jobs:
           test "$TEST_POSTGRES_DSN" = "postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof"
           python -m unittest -v tests.test_hwm_transition_journal_v1
 
+      - name: All HWM writers journal atomicity and legacy fail-closed real PostgreSQL proof
+        run: |
+          test "$TEST_POSTGRES_DSN" = "postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof"
+          python -m unittest -v tests.test_hwm_all_writers_journal_integration_v1
+
       - name: Final pre-release proof pack
         run: python -m bot.release_proof
 
