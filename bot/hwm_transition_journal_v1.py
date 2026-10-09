@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import uuid
 from decimal import Decimal, InvalidOperation
 
@@ -123,9 +122,9 @@ def _payload(*, kind, scope, event_id, old_peak, new_peak, equity,
         raise JournalIntegrityError("invalid evidence reference")
     old_value = None if old_peak is None else _number(old_peak)
     new_value = _number(new_peak)
-    eq_value = _number(equity)
-    if kind == "ANCHOR" and (old_value != new_value or eq_value != new_value):
-        # An anchor may only observe already persisted HWM, not make an entry.
+    eq_value = None if kind == "ANCHOR" else _number(equity)
+    if kind == "ANCHOR" and old_value != new_value:
+        # An anchor observes only the persisted HWM, not equity or prior PnL.
         raise JournalIntegrityError("anchor cannot rebase historical peak")
     if kind == "TRANSITION" and old_value is None and reason != "bootstrap":
         raise JournalIntegrityError("old peak required")
@@ -192,7 +191,11 @@ def verify_chain_rows(rows, *, peak_key):
             if payload.get("old_peak") != previous_peak:
                 raise JournalIntegrityError("peak continuity mismatch")
         _decimal(payload.get("new_peak"))
-        _decimal(payload.get("account_equity"))
+        if kind == "ANCHOR":
+            if payload.get("account_equity") is not None:
+                raise JournalIntegrityError("anchor cannot attest unknown equity")
+        else:
+            _decimal(payload.get("account_equity"))
         if not isinstance(payload.get("evidence_sha256"), str) or len(payload["evidence_sha256"]) != 64:
             raise JournalIntegrityError("missing evidence commitment")
         previous_digest = str(row["digest"])
@@ -273,7 +276,7 @@ async def anchor_current_peak_in_tx(
         raise JournalIntegrityError("invalid current provenance") from exc
     payload = _payload(
         kind="ANCHOR", scope=scope, event_id=event_id, old_peak=peak,
-        new_peak=peak, equity=peak, reason="first_observed_peak",
+        new_peak=peak, equity=None, reason="first_observed_peak",
         evidence_ref=evidence_ref,
     )
     await _insert(conn, scope, 1, payload, ZERO_DIGEST)
@@ -343,10 +346,12 @@ async def commit_transition_in_tx(
         (peak_key, _number(new_peak)),
         (provenance_key, provenance),
     ):
-        await conn.execute(
+        affected = await conn.execute(
             "UPDATE key_value SET value=$2, updated_at=$3 WHERE key=$1",
             key, value, ts.isoformat(),
         )
+        if affected != "UPDATE 1":
+            raise JournalIntegrityError("HWM/provenance update not exactly one row")
     return {"status": "TRANSITION_COMMITTED_IN_CALLER_TX",
             "seq": int(previous["seq"]) + 1, "live_allowed": False}
 
