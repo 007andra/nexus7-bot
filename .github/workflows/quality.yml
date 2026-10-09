@@ -22,7 +22,10 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        # Same Docker Official Image, fetched from AWS Public ECR to avoid
+        # Docker Hub anonymous-pull limits before the real-PG CAS test gate.
+        # Do not remove the PostgreSQL service or skip the real-DB tests.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: postgres
