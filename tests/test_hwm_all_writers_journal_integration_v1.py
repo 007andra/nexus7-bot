@@ -227,6 +227,24 @@ class AllWriterJournalAtomicityPG(unittest.IsolatedAsyncioTestCase):
             (await journal.verify_scope_from_pg(self.admin,peak_key=self.peak_key))["count"], 2
         )
 
+    async def test_legacy_incident_direct_peak_write_cannot_bypass_journal(self):
+        await self.anchor()
+        for key in (self.peak_key, self.prov_key):
+            with self.subTest(key_kind="hwm" if key == self.peak_key else "provenance"):
+                with self.assertRaisesRegex(db.PersistenceError, "un-journaled"):
+                    await db.save_key_value(key, "99", strict=False)
+        with patch.object(financial_namespace, "legacy_key_for",
+                          return_value=self.legacy_key):
+            with self.assertRaisesRegex(db.PersistenceError, "un-journaled"):
+                await db.save_key_value(self.legacy_key, "99", strict=True)
+        self.assertEqual(await self.val(self.peak_key), self.prior)
+        self.assertIsNone(await self.val(self.legacy_key))
+        self.assertEqual(
+            (await journal.verify_scope_from_pg(
+                self.admin, peak_key=self.peak_key,
+            ))["count"], 1
+        )
+
     async def test_opt_out_behavior_does_not_write_journal(self):
         pairs, event = self.new_event()
         with patch.dict(os.environ, {"HWM_JOURNAL_INTEGRATION_V1": "false"}):
