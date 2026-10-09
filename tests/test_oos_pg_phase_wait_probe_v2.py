@@ -1,4 +1,4 @@
-"""#596: two-phase read-only PostgreSQL sampler; no production DB connections."""
+"""#596: three-phase read-only PostgreSQL sampler; no production DB connections."""
 from __future__ import annotations
 
 import asyncio
@@ -50,6 +50,7 @@ class Conn:
             return [
                 {"phase": "metadata", "calls": 10+n, "total_exec_ms": 100+n*11, "max_exec_ms": 140},
                 {"phase": "candidates", "calls": 20+n*2, "total_exec_ms": 300+n*37, "max_exec_ms": 150},
+                {"phase": "key_value_read", "calls": 70+n*3, "total_exec_ms": 500+n*43, "max_exec_ms": 170},
             ]
         return [
             {"phase": "metadata", "matching": 1, "active": 1, "io": 0,
@@ -60,6 +61,10 @@ class Conn:
              "lock_wait": 0, "lwlock": 0, "client": 0,
              "no_wait_event": 0, "other_wait": 0,
              "query": "DO_NOT_RETURN_CANDIDATES_SQL", "pid": 6666},
+            {"phase": "key_value_read", "matching": 3, "active": 1, "io": 0,
+             "lock_wait": 1, "lwlock": 0, "client": 0,
+             "no_wait_event": 0, "other_wait": 0,
+             "query": "DO_NOT_RETURN_KEY_VALUE_SQL", "pid": 7777},
         ]
 
     async def close(self, timeout=None):
@@ -74,6 +79,8 @@ class TwoPhaseProbeTests(unittest.TestCase):
         self.assertEqual(result["samples"], 10)
         self.assertEqual(result["phases"]["metadata"]["matching_session_observations"], 10)
         self.assertEqual(result["phases"]["candidates"]["matching_session_observations"], 20)
+        self.assertEqual(result["phases"]["key_value_read"]["matching_session_observations"], 30)
+        self.assertEqual(result["phases"]["key_value_read"]["active_wait_type_sample_counts"]["lock_wait"], 10)
         self.assertEqual(result["phases"]["metadata"]["active_wait_type_sample_counts"]["client"], 10)
         self.assertEqual(result["phases"]["candidates"]["active_wait_type_sample_counts"]["io"], 10)
         self.assertFalse(result["live_allowed"])
@@ -85,9 +92,11 @@ class TwoPhaseProbeTests(unittest.TestCase):
             self.assertNotIn("PG_TERMINATE_BACKEND", sql.upper())
         self.assertIn("hard_gate_shadow_candidates_v1", probe.ACTIVITY_SQL)
         self.assertIn("prospective_oos_cohort_v1", probe.ACTIVITY_SQL)
+        self.assertIn("select value from key_value where key", probe.ACTIVITY_SQL)
         payload = json.dumps(result)
         for secret in ("DO_NOT_RETURN_METADATA_SQL", "DO_NOT_RETURN_CANDIDATES_SQL",
-                       "5555", "6666", "hard_gate_shadow_candidates_v1"):
+                       "DO_NOT_RETURN_KEY_VALUE_SQL", "5555", "6666", "7777",
+                       "hard_gate_shadow_candidates_v1"):
             self.assertNotIn(secret, payload)
 
     def test_optional_pgss_phase_deltas(self):
@@ -96,8 +105,10 @@ class TwoPhaseProbeTests(unittest.TestCase):
             conn, seconds=5, interval_ms=1000, clock=clock, sleep=clock.sleep))
         self.assertEqual(out["phases"]["metadata"]["pg_stat_statements"]["new_calls"], 1)
         self.assertEqual(out["phases"]["candidates"]["pg_stat_statements"]["new_calls"], 2)
+        self.assertEqual(out["phases"]["key_value_read"]["pg_stat_statements"]["new_calls"], 3)
         self.assertEqual(out["phases"]["metadata"]["pg_stat_statements"]["new_total_exec_ms"], 11)
         self.assertEqual(out["phases"]["candidates"]["pg_stat_statements"]["new_total_exec_ms"], 37)
+        self.assertEqual(out["phases"]["key_value_read"]["pg_stat_statements"]["new_total_exec_ms"], 43)
         self.assertTrue(out["phases"]["candidates"]["pg_stat_statements"]["historical_max_not_window_specific"])
 
     def test_missing_extension_or_permissions_do_not_leak(self):
