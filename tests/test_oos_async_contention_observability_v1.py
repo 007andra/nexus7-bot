@@ -72,16 +72,16 @@ class FlagAndReporterTests(unittest.TestCase):
         logs = []
         reporter = diag.SlowHoldReporter(
             lambda fmt, line: logs.append(line), clock=clock, max_events=2)
-        reporter(label="fetchall:shadow_candidates", held_ms=249,
+        reporter(label="fetchall:shadow_candidates", held_ms=124,
                  waited_ms=2, cancelled=False)
-        reporter(label="fetchall:shadow_candidates", held_ms=280,
+        reporter(label="fetchall:shadow_candidates", held_ms=150,
                  waited_ms=4, cancelled=False)
         reporter(label="serialized:key_value_write", held_ms=700,
                  waited_ms=3, cancelled=True)
         reporter(label="fetchall:shadow_outcomes", held_ms=900,
                  waited_ms=5, cancelled=False)
         self.assertEqual(len(logs), 2)
-        self.assertIn("held_ms=280.000", logs[0])
+        self.assertIn("held_ms=150.000", logs[0])
         self.assertIn("cancelled=true", logs[1])
         self.assertIn("live_allowed=false", logs[0])
         self.assertNotIn("candidate_id", "\n".join(logs))
