@@ -21,6 +21,8 @@ async def collect_fills_windows(*, client, symbol: str, start_ms: int,
             and 0 < start_ms < end_ms and 0 < window_ms <= MAX_WINDOW_MS
             and max_windows > 0):
         return missing
+    if end_ms - start_ms + 1 > max_windows * window_ms:
+        return missing
     # Inclusive timestamps: adjacent intervals share no milliseconds.
     cursor = start_ms
     records = []
