@@ -25,8 +25,10 @@ async def collect_symbol_fills(*, client, symbol: str, start_ms: int,
             if cursor is None:
                 params.update({"startTime": start_ms, "endTime": end_ms})
             else:
-                # Binance fromId is inclusive: request next id.
-                params["fromId"] = cursor
+                # fromId is inclusive. Do not claim bounded window coverage
+                # unless the server-side time constraints remain explicit.
+                params.update({"fromId": cursor, "startTime": start_ms,
+                               "endTime": end_ms})
             page = await client._get("/fapi/v1/userTrades", params, auth=True)
             if not isinstance(page, list) or len(page) > limit:
                 return missing
