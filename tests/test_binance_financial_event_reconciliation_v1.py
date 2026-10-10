@@ -6,9 +6,9 @@ COVERAGE = dict(window_start_ms=1000, window_end_ms=2000,
                 trades_complete=True, income_complete=True, internal_complete=True)
 INTERNAL = dict(fill_count=1, fees_usdt="0.02", funding_usdt="-0.01",
                 transfers_usdt="2.5")
-TRADES = [dict(time=1500, commission="0.02")]
-INCOME = [dict(time=1600, incomeType="FUNDING_FEE", income="-0.01"),
-          dict(time=1700, incomeType="TRANSFER", income="2.5")]
+TRADES = [dict(time=1500, symbol="BTCUSDT", id=123, commission="0.02", commissionAsset="USDT")]
+INCOME = [dict(time=1600, tranId=1, asset="USDT", incomeType="FUNDING_FEE", income="-0.01"),
+          dict(time=1700, tranId=2, asset="USDT", incomeType="TRANSFER", income="2.5")]
 
 
 def run(**overrides):
@@ -32,15 +32,30 @@ class FinancialEventReconciliationTests(unittest.TestCase):
         self.assertIn("FEES_USDT_MISMATCH", result["discrepancies"])
 
     def test_unknown_income_type_fails_closed(self):
-        result = run(income=[{"time": 1600, "incomeType": "UNRECOGNIZED", "income": "1"}])
+        result = run(income=[{"time": 1600, "tranId": 9, "asset": "USDT", "incomeType": "UNRECOGNIZED", "income": "1"}])
         self.assertEqual(result["status"], "PROOF_MISSING")
 
     def test_outside_window_fails_closed(self):
-        self.assertEqual(run(trades=[{"time": 3000, "commission": "0.02"}])["status"],
+        self.assertEqual(run(trades=[{**TRADES[0], "time": 3000}])["status"],
                          "PROOF_MISSING")
 
     def test_nonfinite_fee_fails_closed(self):
-        self.assertEqual(run(trades=[{"time": 1500, "commission": "NaN"}])["status"],
+        self.assertEqual(run(trades=[{**TRADES[0], "commission": "NaN"}])["status"],
+                         "PROOF_MISSING")
+
+
+    def test_duplicate_fill_fails_closed(self):
+        self.assertEqual(run(trades=TRADES + TRADES)["status"], "PROOF_MISSING")
+
+    def test_duplicate_income_fails_closed(self):
+        self.assertEqual(run(income=INCOME + INCOME[:1])["status"], "PROOF_MISSING")
+
+    def test_non_usdt_fee_fails_closed(self):
+        self.assertEqual(run(trades=[{**TRADES[0], "commissionAsset": "BNB"}])["status"],
+                         "PROOF_MISSING")
+
+    def test_non_usdt_income_fails_closed(self):
+        self.assertEqual(run(income=[{**INCOME[0], "asset": "BNB"}])["status"],
                          "PROOF_MISSING")
 
 
