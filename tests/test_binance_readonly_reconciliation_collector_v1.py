@@ -31,6 +31,7 @@ class ReadonlyCollectorTests(unittest.TestCase):
         ))
         self.assertEqual(report["status"], "BASIC_SNAPSHOT_MATCH")
         self.assertEqual(len(client.calls), 4)
+        self.assertIn(("/fapi/v1/openAlgoOrders", True), client.calls)
         self.assertTrue(all(auth for _, auth in client.calls))
         self.assertFalse(report["live_allowed"])
 
