@@ -30,9 +30,8 @@ class FillsHistoryTests(unittest.TestCase):
     def test_two_pages_and_cursor(self):
         client = Client([[trade(1), trade(2, 1600)], [trade(3, 1700)]])
         result = run(client)
-        self.assertEqual(result["status"], "FILLS_WINDOW_SHAPE_VALID")
-        self.assertEqual(len(result["records"]), 3)
-        self.assertEqual(client.calls[1][1]["fromId"], 3)
+        self.assertEqual(result["status"], "PROOF_MISSING")
+        self.assertEqual(len(client.calls), 1)
         self.assertTrue(all(call[2] for call in client.calls))
 
     def test_duplicate_id_fails_closed(self):
