@@ -480,6 +480,8 @@ class TradingEngine:
             return
         self._running = True
         self._background_tasks = set()
+        # Diagnostic-only marker; does not change cancellation semantics.
+        self._liveness_cancelled_in_main_loop = False
         try:
             log.info("⚡ Engine v10 iniciando...")
             await db.init()   # inicia DB (PostgreSQL ou SQLite)
@@ -496,7 +498,7 @@ class TradingEngine:
             ownership = await wait_for_live_execution_ownership(self)
             if ownership is None:
                 return
-            self._start_background(execution_ownership_heartbeat(self))
+            self._ownership_heartbeat_task = self._start_background(execution_ownership_heartbeat(self))
 
             self._start_background(scoring.update_macro_cache())        # Fear&Greed
             self._start_background(scoring.news_reader_loop())           # news 24/7
@@ -518,6 +520,8 @@ class TradingEngine:
             while self._running:
                 try:
                     _ciclos += 1
+                    # Monotonic in-memory diagnostic only; never gates or schedules trades.
+                    self._liveness_cycle_started_monotonic = time.monotonic()
                     # Prova de vida: sem isso, um loop travado era
                     # indistinguível de "mercado sem setup".
                     if _ciclos == 1 or _ciclos % 60 == 0:
@@ -683,6 +687,27 @@ class TradingEngine:
                     await asyncio.sleep(5)
 
                 except asyncio.CancelledError:
+                    # Observe cancellation ownership without changing exit behavior.
+                    # Child await cancellation and direct task.cancel() can both
+                    # surface here; the logged category never claims initiator.
+                    try:
+                        from bot import engine_cancel_origin_observer_v1 as cancel_origin
+                        log.warning(
+                            "%s", cancel_origin.format_event(cancel_origin.snapshot())
+                        )
+                    except Exception:
+                        # A second logger failure must never prevent the
+                        # original cancellation exit and ownership cleanup.
+                        try:
+                            log.warning(
+                                "[ENGINE_CANCEL_ORIGIN_OBSERVER_V1] kind=OBSERVER_ERROR "
+                                "actual_cancel_initiator=UNKNOWN observer_only=true "
+                                "risk_unchanged=true backup_gate_effect=NONE "
+                                "decision_effect=NONE execution_effect=NONE"
+                            )
+                        except Exception:
+                            pass
+                    self._liveness_cancelled_in_main_loop = True
                     break
                 except (NameError, AttributeError, TypeError, ImportError) as e:
                     # Erro de programação no ciclo principal: log CRITICAL com
