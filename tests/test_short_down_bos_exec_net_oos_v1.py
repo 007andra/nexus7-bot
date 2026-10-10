@@ -94,6 +94,16 @@ class RegistrationTests(unittest.TestCase):
             row[key] = val
             self.assertEqual(study.freeze_future_candidates([row])[0], [], key)
 
+    def test_canonical_approval_flags_require_actual_booleans(self):
+        for key, numeric in (
+            ("nexus_called", 1), ("nexus_allowed", 1),
+            ("shadow_only", 1), ("live_eligible", 0),
+        ):
+            row = candidate(2)
+            row[key] = numeric
+            with self.subTest(key=key):
+                self.assertEqual(study.freeze_future_candidates([row])[0], [])
+
     def test_freeze_is_chronological_bounded_and_independent_of_outcomes(self):
         src = [candidate(i) for i in range(72)]
         order = list(reversed(src))
