@@ -25,9 +25,11 @@ def candidate(i, *, symbol=None, epoch=None):
 
 def evidence(row, horizon=60, *, stop=False, missing=None, gap=False,
              cost_observed_epoch=None):
-    start = math.ceil(row["captured_epoch"] / 900) * 900
+    captured = row["captured_epoch"]
+    start = math.ceil(captured / 900) * 900
+    unaligned = start > captured
     bars = []
-    for i in range(horizon // 15):
+    for i in range(horizon // 15 - (1 if unaligned else 0)):
         high, low, close = (104.0, 93.0, 99.0) if stop else (100.0, 93.0, 94.0)
         bars.append({
             "ts": start + i * 900 + (900 if gap and i == 1 else 0),
@@ -48,6 +50,16 @@ def evidence(row, horizon=60, *, stop=False, missing=None, gap=False,
         "entry_slippage_fraction": .0005, "exit_slippage_fraction": .0005,
         "funding_cost_usdt": 0.01, "bars": bars,
     }
+    if unaligned:
+        row_evidence["entry_partial_window"] = {
+            "start_epoch": captured, "end_epoch": start,
+            "o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0,
+        }
+        row_evidence["exit_partial_window"] = {
+            "start_epoch": start + len(bars) * 900,
+            "end_epoch": captured + horizon * 60,
+            "o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0,
+        }
     if missing:
         row_evidence.pop(missing)
     return row_evidence
@@ -163,6 +175,48 @@ class ExecutionProofTests(unittest.TestCase):
                 self.assertIsNone(study.net_proof(self.row, z, horizon=60,
                                                   now_epoch=self.now))
 
+    def test_stop_market_without_verified_trigger_is_not_a_trade(self):
+        z = evidence(self.row)
+        z["entry_type"] = "STOP_MARKET"
+        self.assertIsNone(study.net_proof(
+            self.row, z, horizon=60, now_epoch=self.now,
+        ))
+
+    def test_entry_partial_window_is_required_and_captures_adverse_moves(self):
+        clean = evidence(self.row)
+        self.assertIsNotNone(study.net_proof(
+            self.row, clean, horizon=60, now_epoch=self.now,
+        ))
+        without = copy.deepcopy(clean)
+        without.pop("entry_partial_window")
+        self.assertIsNone(study.net_proof(
+            self.row, without, horizon=60, now_epoch=self.now,
+        ))
+        adverse = copy.deepcopy(clean)
+        adverse["entry_partial_window"]["h"] = 104.0
+        result = study.net_proof(
+            self.row, adverse, horizon=60, now_epoch=self.now,
+        )
+        self.assertEqual(result["exit_type"], "STOP_FIRST")
+        self.assertLess(result["net_usdt"], 0)
+
+    def test_exact_horizon_exit_window_required_without_future_leak(self):
+        z = evidence(self.row, 60)
+        z.pop("exit_partial_window")
+        self.assertIsNone(study.net_proof(
+            self.row, z, horizon=60, now_epoch=self.now,
+        ))
+        z = evidence(self.row, 60)
+        z["exit_partial_window"]["end_epoch"] += 900
+        self.assertIsNone(study.net_proof(
+            self.row, z, horizon=60, now_epoch=self.now,
+        ))
+        z = evidence(self.row, 60)
+        z["entry_partial_window"]["start_epoch"] -= 60
+        self.assertIsNone(study.net_proof(
+            self.row, z, horizon=60, now_epoch=self.now,
+        ))
+
     def test_exact_identity_and_horizon_required(self):
         z = evidence(self.row)
         z["candidate_id"] = "FORGED_OTHER_ID"
@@ -207,6 +261,29 @@ class StudyAssemblyTests(unittest.TestCase):
         self.assertIn("DURABLE_MEMBER_FREEZE_AND_INDEPENDENT_SOURCE_REVIEW_REQUIRED",
                       out["blockers"])
         self.assertFalse(out["promotion_allowed"])
+
+    def test_one_failing_horizon_cannot_be_reported_as_manual_audit(self):
+        rows = [candidate(i) for i in range(60)]
+        ev = {
+            (r["candidate_id"], h): evidence(r, h, stop=(h == 60))
+            for r in rows for h in (60, 240)
+        }
+        result = study.evaluate(rows, ev, now_epoch=CUTOFF + 500_000)
+        self.assertIn("NET_60_CRITERIA_FAIL", result["blockers"])
+        self.assertEqual(result["status"], "NET_EVIDENCE_INCOMPLETE_OR_FAILED")
+        self.assertFalse(result["live_allowed"])
+
+    def test_single_source_truncation_blocker_cannot_be_manual_audit(self):
+        rows = [candidate(i) for i in range(60)]
+        ev = {
+            (r["candidate_id"], h): evidence(r, h)
+            for r in rows for h in (60, 240)
+        }
+        result = study.evaluate(
+            rows, ev, now_epoch=CUTOFF + 500_000, source_truncated=True,
+        )
+        self.assertEqual(result["status"], "NET_EVIDENCE_INCOMPLETE_OR_FAILED")
+        self.assertIn("SOURCE_SCAN_TRUNCATED", result["blockers"])
 
     def test_outcome_proof_cannot_change_enrollment(self):
         rows = [candidate(i) for i in range(60)]
