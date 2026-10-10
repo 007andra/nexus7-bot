@@ -25,10 +25,10 @@ async def collect_symbol_fills(*, client, symbol: str, start_ms: int,
             if cursor is None:
                 params.update({"startTime": start_ms, "endTime": end_ms})
             else:
-                # fromId is inclusive. Do not claim bounded window coverage
-                # unless the server-side time constraints remain explicit.
-                params.update({"fromId": cursor, "startTime": start_ms,
-                               "endTime": end_ms})
+                # fromId continuation may not support combined time bounds.
+                # Until endpoint compatibility is verified, fail closed
+                # instead of asserting complete multi-page coverage.
+                return missing
             page = await client._get("/fapi/v1/userTrades", params, auth=True)
             if not isinstance(page, list) or len(page) > limit:
                 return missing
