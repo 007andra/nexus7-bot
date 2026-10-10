@@ -10,7 +10,6 @@ Passing this study can only make evidence READY_FOR_MANUAL_REVIEW. It never
 authorizes LIVE execution or modifies risk, sizing, thresholds, HWM/drawdown,
 recovery, override, dispatch, or exchange state.
 """
-from bot.oos_readonly_connection_v1 import OOSReadOnlyConnection
 from __future__ import annotations
 
 from collections import defaultdict
@@ -18,6 +17,8 @@ import json
 import math
 import os
 import time
+
+from bot.oos_readonly_connection_v1 import OOSReadOnlyConnection
 
 FLAG = "PROSPECTIVE_OOS_COHORT_V1"
 POPULATION = "HARD_GATE_SHADOW"
@@ -323,7 +324,9 @@ async def snapshot(db, *, timing_probe=None):
     if timing_probe is not None:
         # The label describes the selected mode, not a claim of server speed.
         timing_probe.metadata_read_mode = (
-            "IMMUTABLE_READ_FIRST"
+            "DEDICATED_READONLY_CONNECTION"
+            if isinstance(db, OOSReadOnlyConnection)
+            else "IMMUTABLE_READ_FIRST"
             if metadata_fast_path_enabled()
             else "LEGACY_DDL_GUARDED"
         )
