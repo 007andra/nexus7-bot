@@ -69,12 +69,17 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "reconcile_external_capital_flows",
             AsyncMock(return_value={"applied": 0, "bootstrap": False}),
         ) as reconcile, patch.object(
+            live.hwm_incident_repair,
+            "repair_if_needed",
+            AsyncMock(return_value={"status": "NOT_MATCHED"}),
+        ) as repair, patch.object(
             live, "restore_update_real_account_peak", AsyncMock(return_value=None)
         ):
             out = await live._refresh_account(engine, _Log())
 
         self.assertIs(out, state)
         reconcile.assert_awaited_once_with(engine.client, engine.risk, 100.0, strict=True)
+        repair.assert_awaited_once_with(engine.risk, 100.0, strict=True)
         self.assertEqual(engine.risk.balance, 100.0)
         self.assertEqual(engine._pilot_account_equity, 100.0)
         self.assertEqual(engine._pilot_available_balance, 25.0)
@@ -82,6 +87,61 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             engine.client._last_account_overview_snapshot["availableMargin"], "25"
         )
         self.assertIn("_observed_at", engine.client._last_account_overview_snapshot)
+
+    async def test_zero_equity_keeps_readonly_runtime_alive_but_capital_unconfirmed(self):
+        engine = SimpleNamespace(
+            client=SimpleNamespace(),
+            risk=_Risk(),
+        )
+        engine.risk.init(7.4078)
+        state = {
+            "equity": 0.0,
+            "available": 0.0,
+            "available_source": "availableBalance",
+            "accountEquity": "0",
+            "availableBalance": "0",
+        }
+
+        async def preserve_zero(risk, strict=True):
+            self.assertTrue(strict)
+            risk.balance = 0.0
+            risk.peak_balance = 8.8015
+            risk.drawdown = 1.0
+            risk.balance_confirmed = False
+            return 8.8015
+
+        with patch.object(
+            live.account_semantics,
+            "read_account_state",
+            AsyncMock(return_value=state),
+        ), patch.object(
+            live,
+            "restore_zero_equity_peak_fail_closed",
+            AsyncMock(side_effect=preserve_zero),
+        ) as preserve, patch.object(
+            live.capital_flows,
+            "reconcile_external_capital_flows",
+            AsyncMock(),
+        ) as reconcile, patch.object(
+            live.external_performance,
+            "evaluate",
+            AsyncMock(),
+        ) as external:
+            out = await live._refresh_account(engine, _Log())
+
+        self.assertIs(out, state)
+        preserve.assert_awaited_once_with(engine.risk, strict=True)
+        reconcile.assert_not_awaited()
+        external.assert_not_awaited()
+        self.assertEqual(engine._pilot_account_equity, 0.0)
+        self.assertEqual(engine._pilot_available_balance, 0.0)
+        self.assertEqual(engine.risk.drawdown, 1.0)
+        self.assertFalse(engine.risk.balance_confirmed)
+        self.assertTrue(
+            engine.client._last_account_overview_snapshot[
+                "_zero_equity_fail_closed"
+            ]
+        )
 
     async def test_preflight_block_prevents_original_open(self):
         class Engine:
@@ -239,7 +299,10 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             ok = await engine._refresh_entry_balance()
 
-        self.assertTrue(ok)
+        # The fixture's durable drawdown is 66.3% (>= MAX_DRAWDOWN), so the
+        # pre-dispatch hard gate added by audit P0-7 blocks the entry. The
+        # equity/available semantics under test are unchanged.
+        self.assertFalse(ok)
         self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
         self.assertAlmostEqual(engine._pilot_available_balance, 11.9815151411)
         validate_financial_state(
@@ -365,6 +428,10 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             live.capital_flows,
             "reconcile_external_capital_flows",
             AsyncMock(return_value={"applied": 0, "bootstrap": False}),
+        ), patch.object(
+            live.hwm_incident_repair,
+            "repair_if_needed",
+            AsyncMock(return_value={"status": "NOT_MATCHED"}),
         ), patch.object(
             live, "restore_update_real_account_peak", AsyncMock(side_effect=restore_hwm)
         ), patch.object(

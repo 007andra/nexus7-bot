@@ -11,7 +11,9 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # migration/binance-usdm is the Binance USD-M production branch; PRs into it
+    # must run the same gates as PRs into main.
+    branches: [main, migration/binance-usdm]
 
 jobs:
   check:
@@ -20,7 +22,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: postgres
@@ -105,6 +107,18 @@ jobs:
 
       - name: Full offline test suite
         run: python -m tests.run_offline
+
+      - name: P0 CAS real PostgreSQL incident regression (must not skip)
+        run: |
+          test -n "$TEST_POSTGRES_DSN"
+          python -m unittest -v \
+            tests.test_p0_cas_transaction_isolation_pg \
+            tests.test_cash_flow_cas_postgres \
+            tests.test_risk_epoch_postgres
+
+      - name: Engine cancellation origin classifier (no risk or order effects)
+        run: |
+          python -m unittest -v tests.test_engine_cancel_origin_observer_v1
 
       - name: Final pre-release proof pack
         run: python -m bot.release_proof

@@ -121,7 +121,12 @@ def calc_sl_tp(direction: str, entry: float, levels: dict, atr_v: float) -> dict
     }
 
 
-TAKER_FEE   = float(os.environ.get('TAKER_FEE', '0.0006'))   # KuCoin (era 0.00055 Bybit)
+# Signal pre-filter cost assumption (purpose: reject setups whose target move
+# cannot cover costs). Deliberately separate from the per-candidate execution
+# cost authority (bot.execution_cost) used by NEXUS EV/R:R, sizing and loss
+# ceilings; values unchanged pending OOS evidence. Default 6 bps is the
+# exchange-agnostic conservative taker fee, not a KuCoin-specific rate.
+TAKER_FEE   = float(os.environ.get('TAKER_FEE', '0.0006'))
 SLIPPAGE    = 0.00020
 FUNDING_FEE = 0.00010
 TOTAL_COST  = (TAKER_FEE + SLIPPAGE) * 2 + FUNDING_FEE
@@ -290,6 +295,9 @@ _SCORE_LOG_MAX = 300
 
 def record_score(symbol: str, combined: int, s4h: int, s1h: int, s15: int):
     """Registra um score avaliado no buffer de diagnóstico."""
+    from bot.hard_gate_shadow_context import active
+    if active():
+        return
     global _SCORE_LOG
     _SCORE_LOG.append({
         "symbol": symbol, "score": combined,

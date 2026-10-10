@@ -237,6 +237,21 @@ def install(Analyzer, log) -> None:
 
     def analyze_mtf_confirmed_pullback(self, symbol, k15, k1h, k4h, *args, **kwargs):
         signal = original(self, symbol, k15, k1h, k4h, *args, **kwargs)
+        from bot.hard_gate_shadow_context import observation, mark
+        research = observation()
+        if research is not None:
+            if signal is not None:
+                mark(signal)
+                research.signal = signal
+                if str(getattr(signal, "entry_type", "")).upper() == "PULLBACK":
+                    metrics = _pullback_metrics(k15, signal.direction)
+                    passed = bool(metrics.get("ok"))
+                    if not passed and metrics.get("reason") == "insufficient_reversal_votes":
+                        passed = bool(_intrabar_fast_metrics(k15, signal.direction).get("ok"))
+                    research.pullback = "PASS" if passed else "BLOCKED"
+                    # Retain blocked candidates only in the contextual observer.
+                    return signal if passed else None
+            return signal
         setup_id = _emit_strategy_stop_geometry(signal, log)
         if signal is None or str(getattr(signal, "entry_type", "")).upper() != "PULLBACK":
             return signal

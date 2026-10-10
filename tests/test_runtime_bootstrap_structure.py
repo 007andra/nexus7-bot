@@ -17,7 +17,10 @@ def test_runtime_bootstrap_preserves_safety_installers():
     for marker in (
         "_validation_safety_lock.install(_log)",
         "_prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)",
-        "_pilot_external_position_guard.install(TradingEngine, _log)",
+        "_binance_protection_failclosed.install(TradingEngine, _log)",
+        "_pilot_external_position_guard.install(",
+        'exchange_name="kucoin"',
+        'exchange_name="binance"',
         "_instrument_readiness_guard.install(_log)",
         "_news_context_hardening.install(_log)",
         "_stagnation_time_hardening.install(TradingEngine, _log)",

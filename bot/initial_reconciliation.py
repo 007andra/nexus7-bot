@@ -164,6 +164,22 @@ async def finalize_initial_reconciliation(engine, *, orders_reconciled: bool) ->
         )
         return False
 
+    # PAPER orders and positions are intentionally isolated from the exchange.
+    # Once durable PAPER order state is reconciled, there is no legitimate
+    # authenticated exchange-order authority to query.
+    if getattr(engine, "paper_trade", False):
+        evidence["active_orders_reconciled"] = True
+        evidence["ownership_attribution_classified"] = True
+        engine._initial_reconciliation_evidence = dict(evidence)
+        complete = all(evidence.values())
+        log.info(
+            "[INITIAL_RECONCILIATION] complete=%s mode=PAPER "
+            "exchange_active_orders_required=false durable_state_ready=%s",
+            str(complete).lower(),
+            str(bool(getattr(engine, "_durable_state_ok", False))).lower(),
+        )
+        return complete
+
     registry = _registry_snapshot(engine)
     if registry is None:
         log.critical(
@@ -172,9 +188,13 @@ async def finalize_initial_reconciliation(engine, *, orders_reconciled: bool) ->
         return False
 
     try:
-        payload = await engine.client._get(
-            "/api/v1/orders", {"status": "active"}, auth=True
-        )
+        get_open_orders = getattr(engine.client, "get_open_orders", None)
+        if callable(get_open_orders):
+            payload = await get_open_orders()
+        else:
+            payload = await engine.client._get(
+                "/api/v1/orders", {"status": "active"}, auth=True
+            )
     except Exception as exc:
         log.critical(
             "[INITIAL_RECONCILIATION] complete=false stage=active_orders_read error=%s",

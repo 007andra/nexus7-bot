@@ -1,7 +1,7 @@
 """Read-only private/account readiness observability for SHADOW LIVE.
 
 This module never submits/cancels orders, changes leverage/stops, or grants
-execution permission. It performs authenticated read-only KuCoin checks for
+execution permission. It performs authenticated read-only exchange checks for
 private WS subscription, live positions, active orders, and existing protective
 stops, then stores only diagnostic state on the client instance.
 
@@ -15,7 +15,7 @@ import asyncio
 
 
 def _first(order, *keys, default=""):
-    """Return the first non-empty value across KuCoin field-name variants."""
+    """Return the first non-empty value across exchange field-name variants."""
     for key in keys:
         value = order.get(key)
         if value not in (None, ""):
@@ -35,7 +35,7 @@ def _log_active_order_forensics(orders, log):
         log.warning(
             "[PRELIVE_ACTIVE_ORDER] index=%s symbol=%s side=%s type=%s status=%s "
             "price=%s size=%s filled=%s orderId=%s clientOid=%s createdAt=%s "
-            "source=KuCoin read_only=true execution_effect=NONE",
+            "source=exchange read_only=true execution_effect=NONE",
             idx,
             _first(order, "symbol", "contract", default="?"),
             _first(order, "side", default="?"),
@@ -51,7 +51,7 @@ def _log_active_order_forensics(orders, log):
 
 
 async def refresh_account_exposure(client, log) -> bool:
-    """Refresh SHADOW pre-live exposure from current KuCoin read-only state.
+    """Refresh SHADOW pre-live exposure from current exchange read-only state.
 
     This is intentionally safe to call again after startup. It allows a manual
     stop added later to be recognized, and it also fails closed again if a
@@ -71,9 +71,13 @@ async def refresh_account_exposure(client, log) -> bool:
             if active:
                 positions.append(p)
 
-        orders_raw = await client._get(
-            "/api/v1/orders", {"status": "active"}, auth=True
-        )
+        open_orders = getattr(client, "get_open_orders", None)
+        if callable(open_orders):
+            orders_raw = await open_orders()
+        else:
+            orders_raw = await client._get(
+                "/api/v1/orders", {"status": "active"}, auth=True
+            )
         orders = _active_orders(orders_raw)
 
         protected = []
@@ -156,8 +160,9 @@ async def run(client, instruments, log) -> bool:
 
     setattr(client, "_prelive_private_ws_probe_ok", ws_ok)
     log.info(
-        "[PRIVATE_WS_READONLY_PROBE] result=%s symbol=%s authenticated=true "
-        "subscription_ack=%s execution_effect=NONE",
+        "[PRIVATE_WS_READONLY_PROBE] result=%s symbol=%s transport_probe=%s "
+        "scope=handshake_and_ping_only event_delivery_authority=private_stream_health "
+        "execution_effect=NONE",
         "PASS" if ws_ok else "FAIL",
         symbol,
         str(ws_ok).lower(),

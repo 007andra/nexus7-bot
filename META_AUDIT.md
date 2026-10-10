@@ -1,3 +1,5 @@
+> **HISTORICAL** — kept as a record. It does not describe the current Binance USD-M runtime; see `README.md` and `docs/audit/`.
+
 # Auditoria de Meta-Processo — Confiabilidade das Alegações
 
 Este documento audita **como as afirmações sobre o bot foram feitas**,

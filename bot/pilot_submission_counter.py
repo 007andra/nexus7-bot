@@ -303,7 +303,15 @@ def install(KuCoinClient, log_obj=log) -> None:
 
     @asynccontextmanager
     async def fenced_entry_post_with_provenance(self, endpoint, body, url, **kwargs):
-        is_new_risk = endpoint in ("/api/v1/orders", "/api/v1/st-orders") and body.get("reduceOnly") is not True and body.get("closeOrder") is not True
+        detector = getattr(self, "_is_new_risk_request", None)
+        if callable(detector):
+            is_new_risk = bool(detector(endpoint, body))
+        else:
+            is_new_risk = (
+                endpoint in ("/api/v1/orders", "/api/v1/st-orders")
+                and body.get("reduceOnly") is not True
+                and body.get("closeOrder") is not True
+            )
         if not is_new_risk:
             async with original_fenced_entry_post(self, endpoint, body, url, **kwargs) as response:
                 yield response
@@ -313,10 +321,10 @@ def install(KuCoinClient, log_obj=log) -> None:
         ownership = getattr(self, "_execution_ownership", None)
         if ownership is None: raise RuntimeError("OPEN_NEW_RISK missing execution ownership at transport boundary")
         await validate_execution_ownership(ownership)
-        oid = str(body.get("clientOid") or ""); order = _managed_order_by_oid(self, oid)
+        oid = str(body.get("clientOid") or body.get("newClientOrderId") or ""); order = _managed_order_by_oid(self, oid)
         context = getattr(self, "_bgx_pilot_boundary_context", {}).get(oid)
         if context is None:
-            symbol = str(body.get("symbol") or getattr(order, "symbol", "")); side = str(body.get("side") or ""); qty = body.get("size"); idem = oid
+            symbol = str(body.get("symbol") or getattr(order, "symbol", "")); side = str(body.get("side") or ""); qty = body.get("size", body.get("quantity")); idem = oid
         else:
             symbol, side, qty, idem = context
         try:
@@ -344,6 +352,52 @@ def install(KuCoinClient, log_obj=log) -> None:
             await _fail_order_predispatch(self, order, "PRE_DISPATCH_PILOT_BUDGET_DENIED")
             log_obj.critical("[PILOT_DURABLE_COUNTER] symbol=%s result=BLOCK reserved=%s/%s exchange_dispatch=NONE", symbol, count, MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION)
             raise RuntimeError("durable PILOT submission budget exhausted")
+
+        # Final manual one-shot boundary. When configured, the exact episode is
+        # durably consumed before HTTP POST and is intentionally never rolled
+        # back: an ambiguous transport attempt cannot silently become attempt 2.
+        from bot import controlled_live_reentry_v1 as controlled_reentry
+        controlled_policy = controlled_reentry.policy_from_env()
+        if controlled_policy.enabled:
+            try:
+                controlled_allowed, controlled_reason = (
+                    await controlled_reentry.consume_dispatch_once(
+                        engine, symbol=symbol, client_oid=oid
+                    )
+                )
+            except Exception as exc:
+                if session_committed and pilot is not None:
+                    pilot.rollback_submission(oid)
+                await _fail_order_predispatch(
+                    self, order, "PRE_DISPATCH_CONTROLLED_REENTRY_ERROR"
+                )
+                log_obj.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=HTTP_POST_BOUNDARY "
+                    "symbol=%s result=BLOCK reason=%s exchange_dispatch=NONE",
+                    symbol, type(exc).__name__,
+                )
+                raise
+            if not controlled_allowed:
+                if session_committed and pilot is not None:
+                    pilot.rollback_submission(oid)
+                await _fail_order_predispatch(
+                    self, order, "PRE_DISPATCH_CONTROLLED_REENTRY_DENIED"
+                )
+                log_obj.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=HTTP_POST_BOUNDARY "
+                    "symbol=%s result=BLOCK reason=%s exchange_dispatch=NONE",
+                    symbol, controlled_reason,
+                )
+                raise RuntimeError(
+                    f"controlled LIVE re-entry denied: {controlled_reason}"
+                )
+            log_obj.critical(
+                "[CONTROLLED_LIVE_REENTRY_V1] stage=HTTP_POST_BOUNDARY "
+                "symbol=%s result=PASS reason=%s episode=%s one_shot_consumed=true "
+                "next_action=EXCHANGE_HTTP_POST",
+                symbol, controlled_reason, controlled_policy.episode_id,
+            )
+
         # No intentional authorization gate is permitted below this line.
         await _mark_dispatch_attempted(self, body)
         async with post_context as response:

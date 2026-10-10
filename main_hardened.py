@@ -51,7 +51,7 @@ import sitecustomize  # noqa: E402, F401
 
 # Import only after the threshold contract has been validated.
 from main import app  # noqa: E402
-from bot.kucoin import PAPER_TRADE, TRADING_MODE_REASON  # noqa: E402
+from bot.exchange import PAPER_TRADE, TRADING_MODE_REASON  # noqa: E402
 from bot import runtime_mode_observability as runtime_mode  # noqa: E402
 from bot.logger import log  # noqa: E402
 from bot.service_readiness import evaluate_service_readiness, engine_task_healthy  # noqa: E402

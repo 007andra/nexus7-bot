@@ -1,5 +1,13 @@
 # Railway production promotion contract
 
+> **Divergence observed 2026-09-26 (read-only check of the production service config):**
+> source branch `migration/binance-usdm`, `checkSuites=false`, builder `RAILPACK`, and no
+> pre-deploy command. So the procedure below (main + attestation + `bot.ci_deploy_gate`
+> pre-deploy + Dockerfile) is **not** what production currently enforces. Deploys from
+> `migration/binance-usdm` do not wait for CI. Operator action is required to restore the
+> gate; nothing in the repository can change it.
+
+
 ## Invariant
 
 Normal pushes and merges to `main` MUST NOT trigger a `nexus7-bot`

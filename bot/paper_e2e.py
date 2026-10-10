@@ -13,7 +13,7 @@ from __future__ import annotations
 def install(log):
     from bot.risk import RiskManager
     from bot.config import cfg
-    from bot.kucoin import PAPER_TRADE, TAKER_FEE
+    from bot.exchange import PAPER_TRADE, TAKER_FEE
 
     if getattr(RiskManager, "_paper_e2e_size_patched", False):
         return

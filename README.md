@@ -1,79 +1,47 @@
-# 🤖 BGX Capital — Trading Bot
+# NEXUS-7 / BGX Capital — trading bot
 
-Bot de trading automatizado para futuros Bybit com análise multi-timeframe, gestão de risco avançada e alertas em tempo real.
+Automated trading for **Binance USD-M perpetual futures** (the production venue).
+KuCoin Futures remains selectable (`EXCHANGE=kucoin`) for compatibility.
 
-## ⚡ Funcionalidades
+> Earlier versions of this README described Bybit. That text was obsolete and
+> has been replaced. For the migration history see `KUCOIN_MIGRATION.md` (historical).
 
-- **Análise Multi-Timeframe** — 4H → 1H → 15M com score 0-100
-- **12 indicadores** — ADX, EMA, RSI, MACD, VWAP, Bollinger, Choppiness, SMC, CVD, OI, Funding Rate, Fear & Greed
-- **Gestão de risco automática** — Meta diária, Stop diário, Drawdown máximo, Trailing Stop
-- **Paper Trading** — Teste sem risco real (`PAPER_TRADE=true`)
-- **Alertas Telegram** — Sinal, ordem aberta, trade fechado, relatório diário
-- **Dashboard ao vivo** — Gráfico PnL, Scan Log, posições, métricas
-- **Backtest semanal** — Win Rate, Sharpe, Sortino, Profit Factor
+## Runtime in one paragraph
 
-## 🚀 Deploy
+`main_hardened:app` (FastAPI) boots through `sitecustomize` → `bot.runtime_bootstrap`,
+which installs the hardening stack and ends with `bot.runtime_contract_guard` (startup
+is refused if the execution chain drifts).
 
-Hospedado no [Railway](https://railway.app). A cada push na `main`, o Railway faz redeploy automático.
+The trading loop scans the configured universe (`cfg.SYMBOLS`, 25 symbols). Each
+symbol goes through these steps:
+1. `strategy.Analyzer` (4H/1H/15M confluence score, closed candles only).
+2. Pullback confirmation.
+3. **NEXUS**, a rule-based heuristic ensemble with EV and net R:R gates. It is
+   *not* a trained ML model.
+4. RiskManagerV3 stop-risk sizing capped by the operator margin policy.
+5. Pre-dispatch gates: drawdown, liquidation/cross stress, microstructure and pilot.
+6. Fenced, idempotent Binance order dispatch.
+7. Mandatory SL/TP protection and durable reconciliation.
 
-## ⚙️ Variáveis de Ambiente (Railway)
+## Where the truth lives
 
-| Variável | Descrição | Exemplo |
-|---|---|---|
-| `BYBIT_API_KEY` | Chave API Bybit | `abc123...` |
-| `BYBIT_API_SECRET` | Secret API Bybit | `xyz789...` |
-| `TELEGRAM_TOKEN` | Token do bot Telegram | `123456:ABC...` |
-| `TELEGRAM_CHAT` | ID do chat/grupo | `5059768630` |
-| `LEVERAGE` | Alavancagem (padrão: 50) | `50` |
-| `MAX_POSITIONS` | Posições simultâneas (padrão: 4) | `4` |
-| `MIN_ENTRY_SCORE` | Score mínimo para entrar (padrão: 60) | `60` |
-| `DAILY_TARGET` | Meta diária em USDT (padrão: 100) | `100` |
-| `DAILY_STOP_LOSS` | Stop diário em USDT (padrão: 50) | `50` |
-| `PAPER_TRADE` | Simula sem ordens reais | `true` |
+- `docs/audit/CANONICAL_AUTHORITIES.md`: one owner per concept (equity, drawdown, sizing, costs, release, ...).
+- `docs/audit/FULL_CODEBASE_AUDIT_2026-09-26.md`: latest full audit, with findings and their status.
+- `docs/audit/FULL_CODEBASE_INVENTORY_2026-09-26.md`: every versioned file with its role and reachability.
 
-## 📱 Comandos Telegram
+## Safety model (summary)
 
-| Comando | Descrição |
-|---|---|
-| `/status` | Status completo do bot |
-| `/balance` | Saldo e poder de compra |
-| `/positions` | Posições abertas |
-| `/pnl` | Lucro/prejuízo da sessão |
-| `/pause` | Pausar o bot |
-| `/resume` | Retomar o bot |
-| `/help` | Lista de comandos |
+- LIVE requires the explicit operator tokens checked by `bot/pilot_release_control.py`, plus `BINANCE_LIVE_MIGRATION_READY=true`. Anything missing keeps the validation lock (read-only SHADOW).
+- New entries fail closed on any missing or unreadable input. Reduce-only/closePosition exits stay available.
+- Leverage, risk %, drawdown, daily stop, score and R:R thresholds come from environment variables. `bot/config.py` holds the conservative defaults.
 
-## 📊 Dashboard
-
-Acesse: `https://nexus7-bot-production.up.railway.app/dashboard`
-
-## 🛡️ Gestão de Risco
-
-- **Score mínimo**: 60/100 para entrar (88/100 após meta diária)
-- **R:R mínimo**: 2:1
-- **Max posições**: 4 simultâneas
-- **Trailing Stop**: ativa ao atingir 50% do alvo
-- **Stop diário**: para tudo ao perder $50/dia
-- **Drawdown máximo**: 80%
-
-## 📁 Estrutura
+## Development
 
 ```
-├── main.py              # FastAPI + endpoints REST
-├── bot/
-│   ├── engine.py        # Motor principal de trading
-│   ├── strategy.py      # Análise técnica MTF
-│   ├── score.py         # Sistema de score pré-trade
-│   ├── bybit.py         # Cliente Bybit (REST + WebSocket)
-│   ├── notifier.py      # Alertas Telegram
-│   ├── database.py      # PostgreSQL / SQLite
-│   ├── indicators.py    # Indicadores técnicos
-│   ├── market_data.py   # CVD, Macro, Heatmap
-│   ├── backtest.py      # Backtesting engine
-│   └── config.py        # Configurações
-└── dashboard/
-    └── index.html       # Dashboard web
+pip install -r requirements.txt
+python -m tests.run_offline        # full offline suite (no network)
+python -m bot.selfcheck
+python -m bot.release_proof
 ```
 
----
-*BGX Capital — Automated Trading System*
+CI (`.github/workflows/quality.yml`) runs the same gates on PRs into `main` and `migration/binance-usdm`.

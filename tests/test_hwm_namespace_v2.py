@@ -15,11 +15,14 @@ class HwmNamespaceV2Tests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             ns = hwm_namespace.hwm_namespace()
             key = hwm_namespace.equity_peak_key()
-        self.assertIn("environment=production", ns)
+            legacy = hwm_namespace.legacy_hwm_namespace()
+        # NOVO-03 (v3): no Railway identity in the financial namespace.
+        self.assertNotIn("environment=", ns)
         self.assertIn("exchange=kucoin", ns)
         self.assertNotIn("secret-account-identifier", ns)
         self.assertNotIn("password", ns)
-        self.assertTrue(key.startswith("risk:account_equity_peak:v2:"))
+        self.assertTrue(key.startswith("risk:account_equity_peak:v3:"))
+        self.assertIn("environment=production", legacy, "legacy v2 kept only as read source")
 
     def test_different_accounts_have_different_keys(self):
         base = {
@@ -32,16 +35,27 @@ class HwmNamespaceV2Tests(unittest.TestCase):
             b = hwm_namespace.equity_peak_key()
         self.assertNotEqual(a, b)
 
-    def test_different_environments_have_different_keys(self):
+    def test_railway_environment_change_keeps_the_same_key(self):
+        # NOVO-03 inverted the v2 contract: a Railway environment/project move
+        # must not make the HWM peak (drawdown gate) disappear.
         base = {
             "DATABASE_URL": "postgresql://u:p@db.internal:5432/nexus",
             "KUCOIN_API_KEY": "account-a",
         }
         with patch.dict(os.environ, {**base, "RAILWAY_ENVIRONMENT_NAME": "production"}, clear=True):
             prod = hwm_namespace.equity_peak_key()
-        with patch.dict(os.environ, {**base, "RAILWAY_ENVIRONMENT_NAME": "staging"}, clear=True):
-            stage = hwm_namespace.equity_peak_key()
-        self.assertNotEqual(prod, stage)
+        with patch.dict(os.environ, {**base, "RAILWAY_ENVIRONMENT_NAME": "renamed"}, clear=True):
+            moved = hwm_namespace.equity_peak_key()
+        self.assertEqual(prod, moved)
+
+    def test_binance_binds_the_binance_account(self):
+        base = {"DATABASE_URL": "postgresql://u:p@db.internal:5432/nexus", "EXCHANGE": "binance"}
+        with patch.dict(os.environ, {**base, "BINANCE_API_KEY": "acct-1"}, clear=True):
+            a = hwm_namespace.hwm_namespace()
+        with patch.dict(os.environ, {**base, "BINANCE_API_KEY": "acct-2"}, clear=True):
+            b = hwm_namespace.hwm_namespace()
+        self.assertIn("exchange=binance", a)
+        self.assertNotEqual(a, b, "two Binance accounts on one database never share HWM")
 
     def test_missing_account_identity_is_explicit(self):
         with patch.dict(os.environ, {

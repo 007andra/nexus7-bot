@@ -72,12 +72,25 @@ _LIVE_TOKEN = "I_UNDERSTAND_THE_RISK"
 
 # Motivo legível do modo escolhido — exposto em /health e /api/status
 # para que "por que não abre ordens?" seja respondível em 5 segundos.
+# bot.kucoin is imported unconditionally by the runtime bootstrap for
+# compatibility wrappers. Only claim KuCoin as the order venue when it is the
+# active EXCHANGE; bot.exchange emits the venue-correct LIVE banner.
+_ACTIVE_EXCHANGE = os.environ.get("EXCHANGE", "kucoin").strip().lower().replace("-", "_")
+_KUCOIN_IS_ACTIVE = _ACTIVE_EXCHANGE in {"kucoin", "kucoin_futures"}
+
 if _paper_env == "false" and _live_ack == _LIVE_TOKEN:
     PAPER_TRADE = False
     TRADING_MODE_REASON = "OPERAÇÃO REAL — confirmada por PAPER_TRADE=false + LIVE_TRADING_CONFIRMED"
-    log.critical("=" * 62)
-    log.critical("🔴 OPERAÇÃO REAL ATIVA — ordens serão enviadas à KuCoin")
-    log.critical("=" * 62)
+    if _KUCOIN_IS_ACTIVE:
+        log.critical("=" * 62)
+        log.critical("🔴 OPERAÇÃO REAL ATIVA — ordens serão enviadas à KuCoin")
+        log.critical("=" * 62)
+    else:
+        log.info(
+            "[KUCOIN_MODULE] loaded_for_compatibility=true active_exchange=%s "
+            "kucoin_orders=false execution_effect=NONE",
+            _ACTIVE_EXCHANGE,
+        )
 
 elif _paper_env == "false":
     PAPER_TRADE = True

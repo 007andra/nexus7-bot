@@ -46,6 +46,9 @@ def install(Analyzer, integrity, log):
     original = Analyzer.analyze_mtf
 
     def analyze_with_volume_diag(self, symbol, k15, k1h, k4h, *args, **kwargs):
+        from bot.hard_gate_shadow_context import active
+        if active():
+            return original(self, symbol, k15, k1h, k4h, *args, **kwargs)
         try:
             result = _closed_ratio(k15, integrity)
             if result is not None:

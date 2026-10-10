@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import time
 
-from bot.kucoin import TAKER_FEE
+from bot.exchange import TAKER_FEE
 from bot.stagnation_time_hardening import bars_since_open, STAGNATION_BARS, STAGNATION_MULT
 
 

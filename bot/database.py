@@ -6,6 +6,10 @@ Persiste: trades, signals, risk_events, news_events,
 Fault-tolerant: se DB cair, bot continua operando.
 """
 import os, json, asyncio
+import time
+from bot.prospective_oos_snapshot_timing_v1 import active_probe as _oos_snapshot_probe
+from bot.db_lock_owner_trace_v1 import LockHolderTracker, safe_query_label, safe_serialized_label
+from bot.oos_async_contention_observability_v1 import SlowHoldReporter, lock_hold_enabled
 from datetime import datetime, timezone, date
 from functools import wraps
 from bot.logger import log
@@ -15,6 +19,27 @@ SQLITE_PATH  = "/tmp/bgx_capital.db"
 _conn        = None
 _is_pg       = False
 _io_lock     = asyncio.Lock()
+# Both diagnostics are OFF by default and preserve the SAME asyncio.Lock.
+# Holder timing implies owner-label tracking; it never adds a DB connection.
+_OOS_LOCK_HOLD_DIAG_ENABLED = lock_hold_enabled()
+_OOS_LOCK_OWNER_TRACE_ENABLED = (
+    os.environ.get("OOS_DB_LOCK_OWNER_TRACE_V1", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+) or _OOS_LOCK_HOLD_DIAG_ENABLED
+_io_lock_holder = LockHolderTracker(
+    on_hold=SlowHoldReporter(log.info) if _OOS_LOCK_HOLD_DIAG_ENABLED else None
+)
+
+
+def _io_lock_scope(label):
+    return (_io_lock_holder.hold(_io_lock, label)
+            if _OOS_LOCK_OWNER_TRACE_ENABLED else _io_lock)
+
+
+def _io_lock_initial_owner(probe):
+    return (_io_lock_holder.initial_holder(_io_lock)
+            if probe is not None and _OOS_LOCK_OWNER_TRACE_ENABLED
+            else "NOT_SAMPLED")
 
 
 class PersistenceError(RuntimeError):
@@ -24,7 +49,8 @@ class PersistenceError(RuntimeError):
 def _serialized_io(func):
     @wraps(func)
     async def wrapped(*args, **kwargs):
-        async with _io_lock:
+        label = safe_serialized_label(func.__name__) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
+        async with _io_lock_scope(label):
             return await func(*args, **kwargs)
     return wrapped
 
@@ -216,27 +242,50 @@ async def _exec(sql: str, params: tuple = (), *, strict: bool = False):
         if strict:
             raise PersistenceError("database unavailable")
         return False
-    async with _io_lock:
-        try:
-            if _is_pg:
-                await _conn.execute(_pg_sql(sql), *params)
-            else:
-                await _conn.execute(sql, params)
-                await _conn.commit()
-            return True
-        except Exception as e:
-            log.error(f"DB exec: {e}")
-            if strict:
-                raise PersistenceError("database write failed") from e
-            return False
-
+    # Attribute metadata DDL/insert lock wait, without changing DB semantics.
+    # For non-OOS tasks this ContextVar is None and timing is not sampled.
+    _probe = _oos_snapshot_probe.get()
+    _enter = time.perf_counter() if _probe is not None else None
+    _owner_at_start = _io_lock_initial_owner(_probe)
+    _acquired = None
+    _cancelled = False
+    label = safe_query_label("exec", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
+    try:
+        async with _io_lock_scope(label):
+            if _probe is not None:
+                _acquired = time.perf_counter()
+            try:
+                if _is_pg:
+                    await _conn.execute(_pg_sql(sql), *params)
+                else:
+                    await _conn.execute(sql, params)
+                    await _conn.commit()
+                return True
+            except Exception as e:
+                log.error(f"DB exec: {e}")
+                if strict:
+                    raise PersistenceError("database write failed") from e
+                return False
+    except asyncio.CancelledError:
+        _cancelled = True
+        raise
+    finally:
+        if _probe is not None:
+            _finished = time.perf_counter()
+            _probe.record_exec(
+                waited_ms=((_acquired if _acquired is not None else _finished) - _enter) * 1000,
+                executed_ms=(_finished - _acquired) * 1000 if _acquired is not None else 0,
+                lock_acquired=_acquired is not None, cancelled=_cancelled,
+                owner_at_wait_start=_owner_at_start,
+            )
 
 async def _fetchone(sql: str, params: tuple = (), *, strict: bool = False):
     if not _conn:
         if strict:
             raise PersistenceError("database unavailable")
         return None
-    async with _io_lock:
+    label = safe_query_label("fetchone", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
+    async with _io_lock_scope(label):
         try:
             if _is_pg:
                 return await _conn.fetchrow(_pg_sql(sql), *params)
@@ -254,17 +303,82 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
         if strict:
             raise PersistenceError("database unavailable")
         return []
-    async with _io_lock:
-        try:
-            if _is_pg:
-                return await _conn.fetch(_pg_sql(sql), *params)
-            async with _conn.execute(sql, params) as cur:
-                return await cur.fetchall()
-        except Exception as exc:
-            log.warning("DB fetchall failed: %s", exc)
-            if strict:
-                raise PersistenceError("database read failed") from exc
-            return []
+    # ContextVar only activates for PROSPECTIVE_OOS_COHORT_V1 snapshot.
+    # Default callers have identical DB queries, lock and exception semantics.
+    _probe = _oos_snapshot_probe.get()
+    _enter = time.perf_counter() if _probe is not None else None
+    _owner_at_start = _io_lock_initial_owner(_probe)
+    _acquired = None
+    _row_count = None
+    _cancelled = False
+    # Opt-in client-side timing; not a PostgreSQL server execution timer.
+    _diag = (_probe is not None and _probe.active_stage == "metadata" and _is_pg and
+             os.environ.get("OOS_PG_FETCH_DIAG_V1", "false").strip().lower()
+             in {"1", "true", "yes", "on"})
+    _diag_stage = _probe.active_stage if _diag else "none"
+    _diag_prepare_ms = 0.0
+    _diag_driver_ms = 0.0
+    _diag_connection_closed = None
+    label = safe_query_label("fetchall", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
+    try:
+        async with _io_lock_scope(label):
+            if _probe is not None:
+                _acquired = time.perf_counter()
+            try:
+                if _is_pg:
+                    if _diag:
+                        try:
+                            _diag_connection_closed = _conn.is_closed()
+                        except Exception:
+                            _diag_connection_closed = None
+                        _diag_t0 = time.perf_counter()
+                        _prepared_sql = _pg_sql(sql)
+                        _diag_prepare_ms = (time.perf_counter() - _diag_t0) * 1000
+                        _diag_t0 = time.perf_counter()
+                        try:
+                            _rows = await _conn.fetch(_prepared_sql, *params)
+                        finally:
+                            _diag_driver_ms = (time.perf_counter() - _diag_t0) * 1000
+                    else:
+                        _rows = await _conn.fetch(_pg_sql(sql), *params)
+                else:
+                    async with _conn.execute(sql, params) as cur:
+                        _rows = await cur.fetchall()
+                if _probe is not None:
+                    _row_count = len(_rows)
+                return _rows
+            except Exception as exc:
+                log.warning("DB fetchall failed: %s", exc)
+                if strict:
+                    raise PersistenceError("database read failed") from exc
+                return []
+    except asyncio.CancelledError:
+        _cancelled = True
+        raise
+    finally:
+        if _probe is not None:
+            _finished = time.perf_counter()
+            _probe.record_fetch(
+                waited_ms=((_acquired if _acquired is not None else _finished) - _enter) * 1000,
+                fetched_ms=(_finished - _acquired) * 1000 if _acquired is not None else 0,
+                rows=_row_count, lock_acquired=_acquired is not None,
+                cancelled=_cancelled,
+                owner_at_wait_start=_owner_at_start,
+            )
+            if _diag and _diag_stage == "metadata" and _diag_driver_ms >= 500:
+                # Best effort; no SQL, parameters, identifiers or payloads.
+                try:
+                    log.info(
+                        "[OOS_PG_FETCH_DIAG_V1] stage=metadata "
+                        "client_prepare_ms=%.3f client_driver_await_ms=%.3f "
+                        "lock_wait_ms=%.3f connection_closed_at_start=%s "
+                        "cancelled=%s rows=%s server_time_ms=UNMEASURED",
+                        _diag_prepare_ms, _diag_driver_ms,
+                        ((_acquired if _acquired is not None else _finished) - _enter) * 1000,
+                        _diag_connection_closed, _cancelled, _row_count,
+                    )
+                except Exception:
+                    pass
 
 
 @_serialized_io
@@ -656,8 +770,32 @@ async def save_key_value(key: str, value: str, *, strict: bool = False):
         return False
 
 
-@_serialized_io
 async def load_key_value(key: str, *, strict: bool = False) -> str:
+    """Load a durable value; NOVO-03: fall back to the previous release's key.
+
+    Financial state moved from Railway-ID scopes to a stable financial scope.
+    When the stable key is absent, the legacy key (same state, previous
+    namespace) is read so an upgrade or a Railway project/environment change
+    never makes a daily stop, HWM peak or exit idempotency disappear."""
+    value = await _load_key_value_raw(key, strict=strict)
+    if value is not None:
+        return value
+    try:
+        from bot.financial_namespace import legacy_key_for
+        legacy = legacy_key_for(key)
+    except Exception:
+        legacy = None
+    if not legacy:
+        return value
+    value = await _load_key_value_raw(legacy, strict=strict)
+    if value is not None:
+        log.warning("[FINANCIAL_NAMESPACE] key_family=%s source=LEGACY_SCOPE migrated_on_next_write=true",
+                    str(key).split(":", 1)[0])
+    return value
+
+
+@_serialized_io
+async def _load_key_value_raw(key: str, *, strict: bool = False) -> str:
     if not _conn:
         if strict:
             raise PersistenceError(f"load_key_value {key}: database unavailable")

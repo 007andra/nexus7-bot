@@ -65,10 +65,13 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
 
     from bot.risk import RiskManager
     from bot.risk_manager_v3 import RiskManagerV3
-    from bot.kucoin import KuCoinClient
     from bot import durable_execution
+    from bot import exchange as exchange_runtime
 
-    items = (
+    ExchangeClient = exchange_runtime.ExchangeClient
+    exchange_label = exchange_runtime.EXCHANGE_NAME
+
+    items = [
         ContractItem("TradingEngine.run", TradingEngine.run, "operator_runtime_policy.py"),
         ContractItem(
             "TradingEngine._update_balance",
@@ -93,29 +96,33 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
             "nexus_regime_transition_consistency.py",
         ),
         ContractItem(
-            "KuCoinClient.place_order",
-            KuCoinClient.place_order,
+            f"{exchange_label}.place_order",
+            ExchangeClient.place_order,
             "live_execution_fence.py",
         ),
         ContractItem(
-            "KuCoinClient._post",
-            KuCoinClient._post,
+            f"{exchange_label}._post",
+            ExchangeClient._post,
             "partial_tp_execution_hardening.py",
         ),
         ContractItem(
-            "KuCoinClient.wait_for_fill",
-            KuCoinClient.wait_for_fill,
+            f"{exchange_label}.wait_for_fill",
+            ExchangeClient.wait_for_fill,
             "order_visibility_race_hardening.py",
         ),
         ContractItem(
-            "KuCoinClient.get_order_status",
-            KuCoinClient.get_order_status,
-            "kucoin.py",
+            f"{exchange_label}.get_order_status",
+            ExchangeClient.get_order_status,
+            "kucoin.py" if exchange_runtime.is_kucoin() else "binance.py",
         ),
         ContractItem(
-            "KuCoinClient.set_position_stops",
-            KuCoinClient.set_position_stops,
-            "prelive_protection_failclosed.py",
+            f"{exchange_label}.set_position_stops",
+            ExchangeClient.set_position_stops,
+            (
+                "prelive_protection_failclosed.py"
+                if exchange_runtime.is_kucoin()
+                else "binance.py"
+            ),
         ),
         ContractItem(
             "TradingEngine._manage_partial_tp",
@@ -127,32 +134,24 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
             durable_execution.reconcile_orders,
             "durable_reconcile_hardening.py",
         ),
-    )
+    ]
 
-    markers = (
+    markers = [
         MarkerItem(
             "engine.final_sizing_invariants",
             getattr(engine_module, "_final_sizing_invariants_installed", False),
         ),
         MarkerItem(
-            "KuCoinClient.native_tpsl",
-            getattr(KuCoinClient, "_native_tpsl_entry_installed", False),
+            f"{exchange_label}.durable_submission_counter",
+            getattr(ExchangeClient, "_pilot_durable_submission_counter_installed", False),
         ),
         MarkerItem(
-            "KuCoinClient.fill_normalization",
-            getattr(KuCoinClient, "_fill_normalization_installed", False),
+            f"{exchange_label}.live_execution_fence",
+            getattr(ExchangeClient, "_live_execution_fence_installed", False),
         ),
         MarkerItem(
-            "KuCoinClient.durable_submission_counter",
-            getattr(KuCoinClient, "_pilot_durable_submission_counter_installed", False),
-        ),
-        MarkerItem(
-            "KuCoinClient.live_execution_fence",
-            getattr(KuCoinClient, "_live_execution_fence_installed", False),
-        ),
-        MarkerItem(
-            "KuCoinClient.order_visibility_race",
-            getattr(KuCoinClient, "_order_visibility_race_hardening_installed", False),
+            f"{exchange_label}.order_visibility_race",
+            getattr(ExchangeClient, "_order_visibility_race_hardening_installed", False),
         ),
         MarkerItem(
             "TradingEngine.partial_tp_execution",
@@ -162,7 +161,96 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
             "durable_execution.startup_reconcile",
             getattr(durable_execution, "_startup_reconcile_hardening_installed", False),
         ),
-    )
+    ]
+
+    if exchange_runtime.is_kucoin():
+        markers.extend([
+            MarkerItem(
+                "kucoin.native_tpsl",
+                getattr(ExchangeClient, "_native_tpsl_entry_installed", False),
+            ),
+            MarkerItem(
+                "kucoin.fill_normalization",
+                getattr(ExchangeClient, "_fill_normalization_installed", False),
+            ),
+        ])
+    else:
+        items.append(
+            ContractItem(
+                "TradingEngine._refresh_entry_balance",
+                TradingEngine._refresh_entry_balance,
+                "binance_cross_portfolio_stress.py",
+            )
+        )
+        markers.append(
+            MarkerItem(
+                "TradingEngine.binance_cross_portfolio_stress",
+                getattr(TradingEngine, "_binance_cross_portfolio_stress_installed", False),
+            )
+        )
+        # Binance PAPER parity deliberately has no claimed LIVE accounting/MMR
+        # authority yet. The client-level migration gate remains fail-closed.
+        markers.append(
+            MarkerItem(
+                "binance.paper_parity_client",
+                getattr(ExchangeClient, "exchange_name", "") == "binance",
+            )
+        )
+        # PilotGuard gate 11 reads BinanceClient.market_data_health, written
+        # only by the native public WS handler on the routed /market stream.
+        # Any late wrapper/overlay of that handler (a second writer) or an
+        # unrouted stream URL (silent socket) is startup drift.
+        from bot import binance as binance_runtime
+
+        items.append(
+            ContractItem(
+                "binance._handle_ws_message",
+                ExchangeClient._handle_ws_message,
+                "binance.py",
+            )
+        )
+        markers.append(
+            MarkerItem(
+                "binance.public_market_data_route",
+                binance_runtime.WS_MARKET_BASE.endswith("/market"),
+            )
+        )
+        # The private user-data stream must run on the routed /private path
+        # and its native handler must not be replaced by a late overlay.
+        items.append(
+            ContractItem(
+                "binance._handle_private_order_event",
+                ExchangeClient._handle_private_order_event,
+                "binance.py",
+            )
+        )
+        markers.append(
+            MarkerItem(
+                "binance.private_user_data_route",
+                binance_runtime.WS_PRIVATE_BASE.endswith("/private"),
+            )
+        )
+        # Ambiguous-submit recovery (F-01) must protect adopted BGX exposure
+        # through the canonical Binance enforcement authority: identity is
+        # proven by code origin (file) and function name, not mere callability.
+        enforce = getattr(TradingEngine, "_bgx_enforce_owned_protection", None)
+        items.append(
+            ContractItem(
+                "TradingEngine._bgx_enforce_owned_protection",
+                enforce,
+                "binance_protection_failclosed.py",
+            )
+        )
+        markers.append(
+            MarkerItem(
+                "TradingEngine.ambiguous_entry_protection_authority",
+                callable(enforce)
+                and getattr(getattr(enforce, "__code__", None), "co_name", "") == "_enforce",
+            )
+        )
+
+    items = tuple(items)
+    markers = tuple(markers)
 
     callable_ok, callable_errors = verify(items)
     marker_ok, marker_errors = verify_markers(markers)
@@ -184,9 +272,9 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
     }
     log.critical(
         "[RUNTIME_CONTRACT] status=PASS protected_callables=%d required_markers=%d "
-        "execution_chain=idempotency>distributed_fence>dispatch>fill>tpsl>reconcile "
+        "exchange=%s execution_chain=idempotency>distributed_fence>dispatch>fill>protection>reconcile "
         "late_wrapper_drift=false leverage_unchanged=true "
-        "sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap "
+        "risk_authority=RiskManagerV3 final_quantity_policy=min(stop_risk_qty,operator_margin_cap_qty) "
         "drawdown_policy_unchanged=true entry_authorization_unchanged=true",
-        len(items), len(markers),
+        len(items), len(markers), exchange_label,
     )

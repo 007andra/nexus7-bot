@@ -116,7 +116,8 @@ def install(TradingEngine, log) -> None:
 
         log.warning(
             "[PILOT_RISK_CAP] symbol=%s target_qty=%.12g risk_qty=%.12g "
-            "final_qty=%.12g authority=RiskManagerV3 target_policy=50pct_available_notional",
+            "final_qty=%.12g authority=RiskManagerV3 target_policy=legacy_50pct_available_notional "
+            "superseded_by=final_sizing_invariants",
             symbol,
             target_qty,
             risk_qty,
@@ -182,9 +183,9 @@ def install(TradingEngine, log) -> None:
         drift_class = str(getattr(result, "drift_classification", "UNKNOWN") or "UNKNOWN")
         # A beyond-threshold favorable drift is not a free pass. Revalidate the
         # fixed protective geometry at the fresh executable price and ensure
-        # the already-quantized quantity still fits the operator's 50%-of-
-        # available initial-margin ceiling. Any missing/inconsistent context
-        # remains fail-closed.
+        # the already-quantized quantity still fits the same operator margin
+        # fraction enforced by final_sizing_invariants. Any missing or
+        # inconsistent context remains fail-closed.
         if drift_class == "FAVORABLE_IMPROVEMENT" and abs(signed_drift) > float(
             __import__("bot.pre_dispatch_guard", fromlist=["limits_from_env"]).limits_from_env().max_signal_drift_bps
         ):
@@ -199,7 +200,12 @@ def install(TradingEngine, log) -> None:
                      or (direction == "SHORT" and tp < executable < sl))
             )
             margin = (qty_f * executable / leverage) if leverage > 0 else float("inf")
-            margin_ceiling = available * 0.50
+            try:
+                from bot.final_sizing_invariants import operator_margin_fraction
+                margin_fraction = float(operator_margin_fraction())
+            except (ImportError, TypeError, ValueError, ArithmeticError):
+                margin_fraction = 0.0
+            margin_ceiling = available * margin_fraction
             collateral_ok = (
                 available > 0 and math.isfinite(margin)
                 and margin > 0 and margin <= margin_ceiling + 1e-9
@@ -217,8 +223,8 @@ def install(TradingEngine, log) -> None:
             log.info(
                 "[LIVE_PREDISPATCH_FAVORABLE_REVALIDATION] symbol=%s result=PASS "
                 "executable=%.8f sl=%.8f tp=%.8f margin=%.8f margin_ceiling=%.8f "
-                "geometry_improved=true collateral_within_target=true",
-                symbol, executable, sl, tp, margin, margin_ceiling,
+                "margin_fraction=%.6f geometry_improved=true collateral_within_target=true",
+                symbol, executable, sl, tp, margin, margin_ceiling, margin_fraction,
             )
 
         if not result.allowed:
@@ -239,31 +245,76 @@ def install(TradingEngine, log) -> None:
         executable_price = metrics.get("executable_price")
         cost_fraction = float("nan")
         setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
+        from bot.final_loss_budget import diagnose, emit_telemetry
+        from bot.execution_cost import stress_cost_fraction
+        from bot.config import cfg
+
         try:
-            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
-            from bot.config import cfg
-            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
-            validate(
-                qty_f, executable_price, sig.sl, direction,
-                cfg.LEVERAGE, cost_fraction,
+            cost_fraction, _cost_ref = stress_cost_fraction(sig, symbol)
+            result_name, specific_reason, _loss_metrics = diagnose(
+                qty_f,
+                executable_price,
+                getattr(sig, "sl", float("nan")),
+                direction,
+                cfg.LEVERAGE,
+                cost_fraction,
             )
-        except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
-            emit_telemetry(
-                log, symbol=symbol, setup_id=setup_id,
-                stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
-                entry=executable_price, stop=getattr(sig, "sl", float("nan")),
-                direction=direction, leverage=cfg.LEVERAGE,
-                cost_fraction=cost_fraction, result="BLOCK",
-                specific_reason=reason_from_exception(exc),
-            )
-            return False
+        except Exception as exc:  # noqa: BLE001 - diagnostic must not affect dispatch
+            result_name = "UNAVAILABLE"
+            specific_reason = f"diagnostic_{type(exc).__name__}"
         emit_telemetry(
             log, symbol=symbol, setup_id=setup_id,
             stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
-            entry=executable_price, stop=sig.sl, direction=direction,
-            leverage=cfg.LEVERAGE, cost_fraction=cost_fraction, result="PASS",
-            specific_reason="within_50pct_entry_margin",
+            entry=executable_price, stop=getattr(sig, "sl", float("nan")),
+            direction=direction, leverage=cfg.LEVERAGE,
+            cost_fraction=cost_fraction, result=result_name,
+            specific_reason=specific_reason,
+        )
+
+        risk_recheck = getattr(
+            getattr(self, "risk", None),
+            "validate_fresh_executable_risk",
+            None,
+        )
+        if not callable(risk_recheck):
+            log.critical(
+                "[FINAL_RISK_BUDGET_INVARIANT] symbol=%s setup_id=%s "
+                "stage=FRESH_PREDISPATCH_RECHECK result=BLOCK "
+                "reason=risk_authority_unavailable execution_effect=BLOCK_NEW_ENTRY",
+                symbol, setup_id,
+            )
+            return False
+        try:
+            risk_allowed, risk_metrics = risk_recheck(
+                symbol, float(executable_price), qty_f
+            )
+        except Exception as exc:
+            log.critical(
+                "[FINAL_RISK_BUDGET_INVARIANT] symbol=%s setup_id=%s "
+                "stage=FRESH_PREDISPATCH_RECHECK result=BLOCK "
+                "reason=check_%s execution_effect=BLOCK_NEW_ENTRY",
+                symbol, setup_id, type(exc).__name__,
+            )
+            return False
+
+        risk_budget = float(risk_metrics.get("risk_budget", float("nan")))
+        projected_loss = float(risk_metrics.get("projected_loss", float("nan")))
+        headroom = float(risk_metrics.get("headroom_usdt", float("nan")))
+        if not risk_allowed:
+            log.critical(
+                "[FINAL_RISK_BUDGET_INVARIANT] symbol=%s setup_id=%s "
+                "stage=FRESH_PREDISPATCH_RECHECK result=BLOCK "
+                "projected_loss=%.12g risk_budget=%.12g headroom_usdt=%.12g "
+                "risk_authority=RiskManagerV3 execution_effect=BLOCK_NEW_ENTRY",
+                symbol, setup_id, projected_loss, risk_budget, headroom,
+            )
+            return False
+        log.info(
+            "[FINAL_RISK_BUDGET_INVARIANT] symbol=%s setup_id=%s "
+            "stage=FRESH_PREDISPATCH_RECHECK result=PASS "
+            "projected_loss=%.12g risk_budget=%.12g headroom_usdt=%.12g "
+            "risk_authority=RiskManagerV3 execution_effect=NONE",
+            symbol, setup_id, projected_loss, risk_budget, headroom,
         )
 
         log.info(
@@ -286,8 +337,8 @@ def install(TradingEngine, log) -> None:
     TradingEngine._pilot_risk_cap_hardening_installed = True
 
     log.critical(
-        "[PILOT_RISK_CAP] installed: 50pct available balance remains the position-"
-        "notional target; RiskManagerV3 is the maximum quantity authority; "
+        "[PILOT_RISK_CAP] installed: final sizing is owned by final_sizing_invariants "
+        "(final_qty=min(stop_risk_qty,operator_margin_cap_qty), risk_authority=RiskManagerV3); "
         "LIVE spread/depth/signal-drift rechecked fail-closed only after final sizing; "
         "directional_drift_telemetry=true authorization_unchanged=true"
     )

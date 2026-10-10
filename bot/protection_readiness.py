@@ -203,8 +203,21 @@ async def refresh_protection_readiness(engine) -> bool:
     ]
 
     reconciled_now = 0
+    from bot.ambiguous_entry_recovery import _unresolved_entry_intents
+    local_symbols = {
+        _canon(symbol) for symbol in (getattr(engine, "positions", {}) or {}).keys()
+    }
+    ambiguous_symbols = {
+        _canon(order.symbol) for order in _unresolved_entry_intents(engine)
+    }
     for order in entry_unresolved:
-        if live_qty.get(_canon(getattr(order, "symbol", "")), 0.0) > 0:
+        canon = _canon(getattr(order, "symbol", ""))
+        # A never-materialized BGX entry (ambiguous submit) is absorbed only by
+        # a local Position, so ambiguous_entry_recovery can still prove lineage
+        # and protect it; live exposure alone must not retire that intent.
+        if canon in ambiguous_symbols and canon not in local_symbols:
+            continue
+        if live_qty.get(canon, 0.0) > 0:
             reconciled_now += mark_reconciled(order.symbol)
     for order in reduce_unresolved:
         previous = getattr(order, "previous_position_qty", None)
@@ -247,28 +260,44 @@ async def refresh_protection_readiness(engine) -> bool:
             )
             return False
 
-        raw_get = getattr(client, "_get", None)
-        if not callable(raw_get):
-            engine._protection_readiness_evidence["reason"] = "flat_active_orders_unconfirmed"
-            return False
-        try:
-            payload = await raw_get("/api/v1/orders", {"status": "active"}, auth=True)
-        except Exception as exc:
-            engine._protection_readiness_evidence["reason"] = "flat_active_orders_read_failed"
-            log.critical(
-                "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
-                "reason=active_orders_read_failed error=%s",
-                type(exc).__name__,
-            )
-            return False
-        if isinstance(payload, dict):
-            active = payload.get("items")
-            if active is None and isinstance(payload.get("data"), list):
-                active = payload.get("data")
-        elif isinstance(payload, list):
-            active = payload
+        if getattr(engine, "paper_trade", False):
+            # PAPER orders are durable simulator state and never exist on the
+            # exchange. Private active-order reads would incorrectly make
+            # credentials a prerequisite for PAPER readiness.
+            active = []
         else:
-            active = None
+            open_orders = getattr(client, "get_open_orders", None)
+            try:
+                if callable(open_orders):
+                    payload = await open_orders()
+                else:
+                    raw_get = getattr(client, "_get", None)
+                    if not callable(raw_get):
+                        engine._protection_readiness_evidence["reason"] = (
+                            "flat_active_orders_unconfirmed"
+                        )
+                        return False
+                    payload = await raw_get(
+                        "/api/v1/orders", {"status": "active"}, auth=True
+                    )
+            except Exception as exc:
+                engine._protection_readiness_evidence["reason"] = (
+                    "flat_active_orders_read_failed"
+                )
+                log.critical(
+                    "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
+                    "reason=active_orders_read_failed error=%s",
+                    type(exc).__name__,
+                )
+                return False
+            if isinstance(payload, dict):
+                active = payload.get("items")
+                if active is None and isinstance(payload.get("data"), list):
+                    active = payload.get("data")
+            elif isinstance(payload, list):
+                active = payload
+            else:
+                active = None
         if not isinstance(active, list):
             engine._protection_readiness_evidence["reason"] = "flat_active_orders_payload_malformed"
             return False
@@ -286,18 +315,53 @@ async def refresh_protection_readiness(engine) -> bool:
         }
 
         close_reconciled = 0
-        for order in list(unresolved_reader() or []):
+        flat_unresolved = list(unresolved_reader() or [])
+        for order in flat_unresolved:
             canon = _canon(getattr(order, "symbol", ""))
             if str(getattr(order, "exposure_intent", "INCREASE")) != "REDUCE":
                 continue
             previous = getattr(order, "previous_position_qty", None)
             filled = max(0.0, float(getattr(order, "filled_qty", 0.0) or 0.0))
-            if (
+            requested = max(0.0, float(getattr(order, "qty", 0.0) or 0.0))
+            known_full_close = (
                 previous is not None
                 and filled + 1e-9 >= float(previous)
+            )
+
+            # Compatibility repair for Binance REDUCE records written before
+            # reduce lineage captured previous_position_qty.  This does not
+            # infer a position from the order itself.  It is permitted only
+            # under stronger exchange truth: the whole account is already
+            # confirmed flat (this branch), this is the sole unresolved fill
+            # for the symbol, the REDUCE order itself is fully FILLED, and no
+            # durable/local/active-entry exposure remains.
+            same_symbol_unresolved = [
+                candidate
+                for candidate in flat_unresolved
+                if _canon(getattr(candidate, "symbol", "")) == canon
+            ]
+            legacy_flat_repair = (
+                previous is None
+                and requested > 0
+                and filled + 1e-9 >= requested
+                and len(same_symbol_unresolved) == 1
+            )
+            if (
+                (known_full_close or legacy_flat_repair)
                 and canon not in pending_symbols
                 and canon not in active_entry_symbols
+                and canon not in local_position_symbols
             ):
+                if legacy_flat_repair:
+                    log.warning(
+                        "[PROTECTION_STATE_RECONCILIATION] symbol=%s "
+                        "decision=REPAIR_LEGACY_REDUCE_LINEAGE "
+                        "exchange_global_flat=true filled_qty=%s requested_qty=%s "
+                        "previous_position_qty=UNKNOWN execution_effect=NONE",
+                        order.symbol,
+                        filled,
+                        requested,
+                    )
                 close_reconciled += mark_reconciled(order.symbol)
         if close_reconciled:
             from bot import durable_execution as durable

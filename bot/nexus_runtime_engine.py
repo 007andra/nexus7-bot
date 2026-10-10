@@ -9,13 +9,22 @@ No exchange mutation, release state, or execution permission is changed here.
 """
 from __future__ import annotations
 
+import math
+import time
+
 from bot import account_balance_semantics
+from bot import capital_flow_reconciliation as capital_flows
+from bot import binance_hwm_incident_repair as hwm_incident_repair
 from bot import missed_opportunity_audit
 from bot.account_capital_reader import read_account_capital
 from bot.config import cfg
-from bot.drawdown_persistence import restore_update_real_account_peak
+from bot.drawdown_persistence import (
+    restore_update_real_account_peak,
+    restore_zero_equity_peak_fail_closed,
+)
 from bot.engine import TradingEngine as CoreTradingEngine
 from bot.kucoin_position_units import KuCoinPositionUnitAdapter
+from bot.exchange import EXCHANGE_NAME
 from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
 from bot.notifier import notify
@@ -29,11 +38,13 @@ class TradingEngine(CoreTradingEngine):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # KuCoin currentQty is native contracts while every engine/risk/Position
-        # quantity is base asset. Normalize all engine-facing position reads at
-        # one explicit runtime boundary. The underlying exchange client and all
-        # order-dispatch methods remain untouched/delegated.
-        if not isinstance(self.client, KuCoinPositionUnitAdapter):
+        # KuCoin exposes native contract counts and therefore needs an inbound
+        # normalization proxy. Binance USD-M already exposes base-asset
+        # quantities, so wrapping it in the KuCoin multiplier adapter would
+        # convert the quantity a second time.
+        if EXCHANGE_NAME == "kucoin" and not isinstance(
+            self.client, KuCoinPositionUnitAdapter
+        ):
             self.client = KuCoinPositionUnitAdapter(self.client)
         if not isinstance(self.risk, ProfessionalRiskAdapter):
             self.risk = ProfessionalRiskAdapter(self.risk)
@@ -51,9 +62,9 @@ class TradingEngine(CoreTradingEngine):
         This override is intentionally limited to the composed runtime. The
         unwrapped legacy core keeps its original contracts-to-base conversion.
         """
-        if isinstance(self.client, KuCoinPositionUnitAdapter):
+        if isinstance(self.client, KuCoinPositionUnitAdapter) or EXCHANGE_NAME == "binance":
             value = float(quantity)
-            if value != value or value < 0:
+            if not math.isfinite(value) or value < 0:
                 raise ValueError(
                     f"_contracts_to_base_qty({symbol}): invalid normalized base quantity"
                 )
@@ -84,8 +95,41 @@ class TradingEngine(CoreTradingEngine):
                 return
 
             state = await account_balance_semantics.read_account_state(self.client)
+
+            # Publish the exact authenticated read already performed by this
+            # runtime loop for cache-only research/observability consumers.
+            # This adds no exchange I/O and grants no execution authority.
+            snapshot = dict(state)
+            snapshot["_observed_at"] = time.time()
+            try:
+                self.client._last_account_overview_snapshot = snapshot
+            except (AttributeError, TypeError):
+                pass
+
             equity = float(state["equity"])
             self.risk.update(equity)
+
+            if equity <= 0.0:
+                await restore_zero_equity_peak_fail_closed(self.risk, strict=True)
+                self.risk.balance_confirmed = False
+                self.risk.invalidate_capital()
+                self._drawdown_hard_gate_active = True
+                log.critical(
+                    "[LIVE_CAPITAL_ORDER] stage=balance_refresh equity=0 "
+                    "cashflow_reconcile=SKIPPED hwm_promotion=BLOCKED "
+                    "execution_effect=BLOCK_NEW_ENTRIES"
+                )
+                return
+
+            # External cash flows are accounting events, not performance. This
+            # reconciliation MUST complete before any positive equity is allowed
+            # to promote the durable HWM.
+            await capital_flows.reconcile_external_capital_flows(
+                self.client, self.risk, equity, strict=True
+            )
+            await hwm_incident_repair.repair_if_needed(
+                self.risk, equity, strict=True
+            )
             await restore_update_real_account_peak(self.risk, equity, strict=True)
 
             if equity > 0:
@@ -136,15 +180,18 @@ class TradingEngine(CoreTradingEngine):
         if getattr(decision, "execution_allowed", None) is not True:
             return
 
-        risk_pct = float(self._effective_risk_pct())
-        self.risk.set_plan(
-            symbol=sig.symbol,
-            entry=float(sig.entry),
-            stop=float(sig.sl),
-            risk_pct=risk_pct,
-        )
+        from bot.execution_cost import reusable_snapshot
+
+        base_risk_pct = float(self._effective_risk_pct())
 
         if getattr(self, "paper_trade", False):
+            self.risk.set_plan(
+                symbol=sig.symbol,
+                entry=float(sig.entry),
+                stop=float(sig.sl),
+                risk_pct=base_risk_pct,
+                cost_snapshot=reusable_snapshot(sig),
+            )
             balance = float(getattr(self.risk, "balance", 0.0) or 0.0)
             if balance <= 0:
                 self.risk.invalidate_capital()
@@ -156,14 +203,78 @@ class TradingEngine(CoreTradingEngine):
             return
 
         try:
+            # LIVE risk percentage is bound to this fresh authenticated equity
+            # read. The controlled one-shot path therefore cannot size from a
+            # stale pre-NEXUS account snapshot.
             snapshot = await read_account_capital(self.client)
+            equity = float(snapshot.capital.equity)
+            if equity <= 0.0:
+                await restore_zero_equity_peak_fail_closed(self.risk, strict=True)
+                self.risk.invalidate_capital()
+                raise RuntimeError("LIVE capital unavailable for RiskManagerV3")
+
+            risk_pct = base_risk_pct
+            try:
+                from bot import controlled_live_reentry_v1 as controlled_reentry
+                risk_pct = float(
+                    controlled_reentry.candidate_risk_pct(self, equity)
+                )
+                policy = controlled_reentry.policy_from_env()
+                log.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=NEXUS_RISK_PLAN symbol=%s "
+                    "result=PASS equity=%.8f effective_risk_pct=%.8f "
+                    "absolute_loss_budget_usdt=%.8f episode=%s",
+                    sig.symbol,
+                    equity,
+                    risk_pct,
+                    float(policy.loss_budget_usdt),
+                    policy.episode_id,
+                )
+            except Exception:
+                # Not configured/armed means the canonical risk percentage is
+                # unchanged. This is not an execution bypass.
+                risk_pct = base_risk_pct
+
+            self.risk.set_plan(
+                symbol=sig.symbol,
+                entry=float(sig.entry),
+                stop=float(sig.sl),
+                risk_pct=risk_pct,
+                cost_snapshot=reusable_snapshot(sig),
+            )
             self.risk.update_capital(snapshot.capital)
+
+            # Candidate-level capital refresh must obey the same ordering as the
+            # controlled LIVE balance path: reconcile exchange cash flows first,
+            # then allow authenticated equity to update the performance HWM.
+            await capital_flows.reconcile_external_capital_flows(
+                self.client, self.risk, equity, strict=True
+            )
+            await hwm_incident_repair.repair_if_needed(
+                self.risk, equity, strict=True
+            )
             await restore_update_real_account_peak(
-                self.risk, snapshot.capital.equity, strict=True
+                self.risk, equity, strict=True
             )
             if not self.risk._v3.can_open(len(self.positions)):
-                self.risk.invalidate_capital()
-                raise RuntimeError("durable drawdown/capital gate blocked V3 sizing")
+                # RiskManagerV3's generic can_open() includes MAX_DRAWDOWN.
+                # The controlled one-shot pilot may bridge only that condition;
+                # capital confirmation, positive collateral and position cap
+                # are re-proven by controlled_reentry.readiness().
+                try:
+                    from bot import controlled_live_reentry_v1 as controlled_reentry
+                    bridge_ok, bridge_reason = controlled_reentry.drawdown_bridge_allowed(self)
+                except Exception as exc:
+                    bridge_ok, bridge_reason = False, f"controlled_reentry_{type(exc).__name__}"
+                if not bridge_ok:
+                    self.risk.invalidate_capital()
+                    raise RuntimeError("durable drawdown/capital gate blocked V3 sizing")
+                log.critical(
+                    "[CONTROLLED_LIVE_REENTRY_V1] stage=RISKMANAGER_V3_CAN_OPEN "
+                    "symbol=%s result=PASS bridge=%s scope=DRAWDOWN_ONLY",
+                    sig.symbol,
+                    bridge_reason,
+                )
         except Exception:
             self.risk.invalidate_capital()
             raise

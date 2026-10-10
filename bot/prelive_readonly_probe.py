@@ -2,14 +2,15 @@
 
 Never submits/cancels orders, changes leverage/stops, or alters Railway state.
 It authenticates read-only REST, checks real positions/open orders, and proves
-private WebSocket authentication by obtaining bullet-private and an ack.
+private WebSocket authentication using the active exchange's native user-data
+stream handshake. No trading mutation is performed.
 """
 import asyncio
 import json
 import sys
 import time
 
-from bot.kucoin import KuCoinClient, REST_BASE, to_kucoin
+from bot.kucoin import KuCoinClient, REST_BASE as KUCOIN_REST_BASE, to_kucoin
 
 
 def _active_orders(data):
@@ -24,14 +25,16 @@ def _active_orders(data):
     return []
 
 
-async def _private_ws_probe(client: KuCoinClient, symbol: str) -> bool:
-    """Authenticate bullet-private and receive a private subscription ack."""
+async def _kucoin_private_ws_probe(client, symbol: str) -> bool:
+    """Authenticate KuCoin bullet-private and receive subscription ack."""
     import websockets
 
     await client._ensure_session()
     endpoint = "/api/v1/bullet-private"
     headers = client._auth_headers("POST", endpoint, "")
-    async with client._session.post(REST_BASE + endpoint, headers=headers) as response:
+    async with client._session.post(
+        KUCOIN_REST_BASE + endpoint, headers=headers
+    ) as response:
         payload = await response.json(content_type=None)
     if not isinstance(payload, dict) or payload.get("code") != "200000":
         return False
@@ -44,9 +47,13 @@ async def _private_ws_probe(client: KuCoinClient, symbol: str) -> bool:
     if not ws_endpoint:
         return False
 
-    ws_url = f"{ws_endpoint}?token={token}&connectId=bgx7-prelive-{int(time.time())}"
-    async with websockets.connect(ws_url, ping_interval=None, close_timeout=5) as ws:
-        # Consume welcome if present, then subscribe to exactly one order topic.
+    ws_url = (
+        f"{ws_endpoint}?token={token}"
+        f"&connectId=bgx7-prelive-{int(time.time())}"
+    )
+    async with websockets.connect(
+        ws_url, ping_interval=None, close_timeout=5
+    ) as ws:
         try:
             await asyncio.wait_for(ws.recv(), timeout=5)
         except asyncio.TimeoutError:
@@ -62,7 +69,9 @@ async def _private_ws_probe(client: KuCoinClient, symbol: str) -> bool:
         deadline = time.time() + 8
         while time.time() < deadline:
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=max(0.2, deadline - time.time()))
+                raw = await asyncio.wait_for(
+                    ws.recv(), timeout=max(0.2, deadline - time.time())
+                )
             except asyncio.TimeoutError:
                 break
             try:
@@ -74,6 +83,43 @@ async def _private_ws_probe(client: KuCoinClient, symbol: str) -> bool:
             if msg.get("type") == "error":
                 return False
     return False
+
+
+async def _binance_private_ws_probe(client, symbol: str) -> bool:
+    """Read-only transport probe of the Binance USD-M user-data stream.
+
+    Binance user-data streams need no subscription message: authorization is
+    a listenKey confirmed by REST (POST /fapi/v1/listenKey). This probe proves
+    only that such a key is accepted on the routed ``/private`` path and that
+    the socket answers ping/pong. It does NOT prove event delivery (ping/pong
+    also succeeds on the legacy unrouted ``/ws/<listenKey>`` path, which no
+    longer pushes user-data events). Live event capability is owned by
+    ``BinanceClient.private_stream_health``.
+    """
+    import websockets
+    from bot.binance import WS_PRIVATE_BASE
+
+    data = await client._listen_key_request("POST")
+    listen_key = str((data or {}).get("listenKey", "") or "")
+    if not listen_key:
+        return False
+
+    async with websockets.connect(
+        f"{WS_PRIVATE_BASE}/ws/{listen_key}",
+        ping_interval=None,
+        close_timeout=5,
+        max_queue=16,
+    ) as ws:
+        pong_waiter = await ws.ping()
+        await asyncio.wait_for(pong_waiter, timeout=5.0)
+        return True
+
+
+async def _private_ws_probe(client, symbol: str) -> bool:
+    """Dispatch private WS probe to the exchange-native protocol."""
+    if callable(getattr(client, "_listen_key_request", None)):
+        return await _binance_private_ws_probe(client, symbol)
+    return await _kucoin_private_ws_probe(client, symbol)
 
 
 async def run_probe() -> int:
