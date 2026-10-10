@@ -42,7 +42,9 @@ async def collect_income_window(*, client, start_ms: int, end_ms: int,
                 return {"status": "INCOME_WINDOW_SHAPE_VALID",
                         "scope": "PAGINATED_READ_SHAPE_ONLY_NOT_FULL_LEDGER_PROOF",
                         "records": result if len(pages) == 1 else [r for p in pages for r in p],
-                        "page_count": len(pages), "execution_effect": "NONE",
+                        "page_count": len(pages), "start_ms": start_ms,
+                        "end_ms": end_ms, "terminal_page_verified": True,
+                        "execution_effect": "NONE",
                         "live_allowed": False}
             final_ts = int(result[-1]["time"])
             if any(int(row["time"]) == final_ts for row in result[:-1]):
