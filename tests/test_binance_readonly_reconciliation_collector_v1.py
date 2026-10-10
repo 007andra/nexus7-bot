@@ -1,6 +1,7 @@
 """Offline collector tests with a fake client; no exchange or production calls."""
 import asyncio
 import unittest
+from datetime import datetime, timezone, timedelta
 
 from bot.binance_readonly_reconciliation_collector_v1 import collect_reconciliation
 
@@ -27,7 +28,7 @@ class ReadonlyCollectorTests(unittest.TestCase):
             client=client,
             internal={"equity_usdt": "5.3", "active_positions": 0,
                       "open_orders": 0, "algo_orders": 0},
-            internal_captured_at="2026-10-10T14:00:00Z",
+            internal_captured_at=datetime.now(timezone.utc).isoformat(),
         ))
         self.assertEqual(report["status"], "BASIC_SNAPSHOT_MATCH")
         self.assertEqual(len(client.calls), 4)
@@ -38,7 +39,7 @@ class ReadonlyCollectorTests(unittest.TestCase):
     def test_read_exception_fails_closed_without_leaking_details(self):
         report = asyncio.run(collect_reconciliation(
             client=FakeClient(fail="/fapi/v1/openOrders"),
-            internal={}, internal_captured_at="2026-10-10T14:00:00Z"))
+            internal={}, internal_captured_at=datetime.now(timezone.utc).isoformat()))
         self.assertEqual(report["status"], "PROOF_MISSING")
         self.assertNotIn("secret-bearing", str(report))
 
@@ -61,7 +62,7 @@ class ReadonlyCollectorTests(unittest.TestCase):
             client=EnvelopeClient(),
             internal={"equity_usdt": "5.3", "active_positions": 0,
                       "open_orders": 0, "algo_orders": 0},
-            internal_captured_at="2026-10-10T14:00:00Z",
+            internal_captured_at=datetime.now(timezone.utc).isoformat(),
         ))
         self.assertEqual(report["status"], "BASIC_SNAPSHOT_MATCH")
 
@@ -74,7 +75,21 @@ class ReadonlyCollectorTests(unittest.TestCase):
 
         report = asyncio.run(collect_reconciliation(
             client=MalformedClient(),
-            internal={}, internal_captured_at="2026-10-10T14:00:00Z"))
+            internal={}, internal_captured_at=datetime.now(timezone.utc).isoformat()))
+        self.assertEqual(report["status"], "PROOF_MISSING")
+
+
+    def test_stale_internal_snapshot_fails_closed(self):
+        report = asyncio.run(collect_reconciliation(
+            client=FakeClient(), internal={},
+            internal_captured_at=(datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()))
+        self.assertEqual(report["status"], "PROOF_MISSING")
+        self.assertEqual(report["reason"], "SNAPSHOT_TIME_SKEW")
+
+    def test_naive_internal_timestamp_fails_closed(self):
+        report = asyncio.run(collect_reconciliation(
+            client=FakeClient(), internal={},
+            internal_captured_at="2026-10-10T14:00:00"))
         self.assertEqual(report["status"], "PROOF_MISSING")
 
 
