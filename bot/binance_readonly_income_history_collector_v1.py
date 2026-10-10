@@ -47,6 +47,10 @@ async def collect_income_window(*, client, start_ms: int, end_ms: int,
                         "execution_effect": "NONE",
                         "live_allowed": False}
             final_ts = int(result[-1]["time"])
+            # A saturated page cannot establish that all rows sharing the
+            # boundary millisecond were returned. Reject even a unique tail
+            # unless the next timestamp is strictly later and independently
+            # proven; this collector intentionally makes no such claim.
             if any(int(row["time"]) == final_ts for row in result[:-1]):
                 return fail
             if final_ts < cursor or final_ts >= end_ms:
