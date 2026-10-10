@@ -10,6 +10,7 @@ Passing this study can only make evidence READY_FOR_MANUAL_REVIEW. It never
 authorizes LIVE execution or modifies risk, sizing, thresholds, HWM/drawdown,
 recovery, override, dispatch, or exchange state.
 """
+from bot.oos_readonly_connection_v1 import OOSReadOnlyConnection
 from __future__ import annotations
 
 from collections import defaultdict
@@ -158,7 +159,12 @@ async def load_frozen_metadata_for_snapshot(db, *, use_fast_path=None):
     ensure_cohort path; do not create a new cohort without that guard.
     No new tables, risk authority, candidate/outcome selection or timer change.
     """
-    if use_fast_path is None:
+    # A dedicated OOS reader must never fall back to DDL or the trading DB.
+    # Legacy callers retain their existing feature-flag behavior.
+    isolated_reader = isinstance(db, OOSReadOnlyConnection)
+    if isolated_reader:
+        use_fast_path = True
+    elif use_fast_path is None:
         use_fast_path = metadata_fast_path_enabled()
     if not use_fast_path:
         return await ensure_cohort(db)
@@ -169,6 +175,8 @@ async def load_frozen_metadata_for_snapshot(db, *, use_fast_path=None):
     if rows:
         raw = rows[0]["payload"] if hasattr(rows[0], "keys") else rows[0][0]
         return json.loads(raw)
+    if isolated_reader:
+        raise RuntimeError("OOS_READONLY_METADATA_MISSING")
     return await ensure_cohort(db)
 
 
