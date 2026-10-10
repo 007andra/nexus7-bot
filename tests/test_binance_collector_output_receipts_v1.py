@@ -6,6 +6,7 @@ from bot.binance_collector_output_receipts_v1 import validate_collector_outputs
 def fills(**changes):
     return {"status": "FILLS_WINDOWS_SHAPE_VALID", "start_ms": 1000,
             "end_ms": 1010, "terminal_page_verified": True,
+            "live_allowed": False, "execution_effect": "NONE",
             "records": [{"time": 1002, "id": 1}], **changes}
 
 
@@ -40,6 +41,14 @@ class CollectorOutputReceiptTests(unittest.TestCase):
 
     def test_income_not_terminal(self):
         self.assertEqual(run(i=income(terminal_page_verified=False))["status"],
+                         "PROOF_MISSING")
+
+
+    def test_live_capable_fills_rejected(self):
+        self.assertEqual(run(f=fills(live_allowed=True))["status"], "PROOF_MISSING")
+
+    def test_income_execution_effect_rejected(self):
+        self.assertEqual(run(i=income(execution_effect="ORDER"))["status"],
                          "PROOF_MISSING")
 
 
