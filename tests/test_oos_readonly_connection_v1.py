@@ -78,6 +78,17 @@ class OOSReadOnlyConnectionTests(unittest.IsolatedAsyncioTestCase):
             await reader._fetchall("SELECT 1", strict=False)
         conn.fetch.assert_not_awaited()
 
+    async def test_missing_metadata_fails_closed_without_ddl(self):
+        from bot.prospective_oos_cohort_v1 import load_frozen_metadata_for_snapshot
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        reader = OOSReadOnlyConnection(conn)
+        with self.assertRaisesRegex(RuntimeError, "OOS_READONLY_METADATA_MISSING"):
+            await load_frozen_metadata_for_snapshot(reader, use_fast_path=False)
+        conn.execute.assert_not_awaited()
+        conn.fetch.assert_awaited_once()
+
+
 
 if __name__ == "__main__":
     unittest.main()
