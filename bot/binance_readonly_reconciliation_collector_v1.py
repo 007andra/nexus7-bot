@@ -30,7 +30,7 @@ async def collect_reconciliation(*, client, internal: dict, internal_captured_at
             "balance": "/fapi/v3/balance",
             "positions": "/fapi/v3/positionRisk",
             "orders": "/fapi/v1/openOrders",
-            "algo_orders": "/fapi/v1/algoOpenOrders",
+            "algo_orders": "/fapi/v1/openAlgoOrders",
         }
         for name, endpoint in endpoints.items():
             result = await client._get(endpoint, auth=True)
