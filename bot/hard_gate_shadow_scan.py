@@ -1324,15 +1324,26 @@ async def _maybe_emit_prospective_oos_cohort(db):
             _lag_probe = OOSLoopLagProbe().start()
         except Exception:
             _lag_probe = None
+    # OFF by default: the snapshot keeps the exact shared `db` path. When the
+    # opt-in dedicated reader is enabled it never falls back to `db`.
+    from bot import oos_readonly_connection_v1 as dedicated
+    _use_dedicated = dedicated.enabled()
     try:
+        snapshot_db = await dedicated.acquire() if _use_dedicated else db
         report = await asyncio.wait_for(
-            oos.snapshot(db, timing_probe=_timing), timeout=3.0
+            oos.snapshot(snapshot_db, timing_probe=_timing), timeout=3.0
         )
         _timing_status = "OK"
         log.warning("%s", oos.format_summary(report))
         log.info("%s", oos.format_concentration(report))
         return report
+    except asyncio.CancelledError:
+        if _use_dedicated:
+            await dedicated.discard()
+        raise
     except Exception as exc:
+        if _use_dedicated:
+            await dedicated.discard()
         _timing_status = (
             "TIMEOUT" if isinstance(exc, asyncio.TimeoutError) else "ERROR"
         )
