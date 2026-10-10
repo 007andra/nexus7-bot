@@ -34,7 +34,7 @@ def reconcile_collected_history(*, fills_by_symbol, income_result, internal,
     trades = []
     for symbol in required_symbols:
         result = fills_by_symbol.get(symbol)
-        if not isinstance(result, dict) or result.get("status") != "FILLS_WINDOW_SHAPE_VALID":
+        if not isinstance(result, dict) or result.get("status") not in ("FILLS_WINDOW_SHAPE_VALID", "FILLS_WINDOWS_SHAPE_VALID"):
             return missing
         records = result.get("records")
         if not isinstance(records, list) or any(
