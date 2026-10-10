@@ -41,28 +41,42 @@ def reconcile_financial_events(
             raise ValueError("invalid window")
         fees = Decimal(0)
         fill_count = 0
+        seen_fills = set()
         for row in trades:
             if not isinstance(row, dict) or "commission" not in row or "time" not in row:
                 raise ValueError("invalid fill")
             if not start <= int(row["time"]) <= end:
                 raise ValueError("out-of-window fill")
+            if row.get("commissionAsset") != "USDT":
+                return {"status": "PROOF_MISSING", "reason": "FEE_ASSET_NOT_USDT"}
+            identity = (str(row.get("symbol", "")), str(row.get("id", "")))
+            if not all(identity) or identity in seen_fills:
+                return {"status": "PROOF_MISSING", "reason": "FILL_ID_MISSING_OR_DUPLICATED"}
+            seen_fills.add(identity)
             fees += _dec(row["commission"])
             fill_count += 1
         funding = Decimal(0)
         transfers = Decimal(0)
+        seen_income = set()
         for row in income:
             if not isinstance(row, dict) or "incomeType" not in row or "income" not in row or "time" not in row:
                 raise ValueError("invalid income")
             if not start <= int(row["time"]) <= end:
                 raise ValueError("out-of-window income")
+            income_id = str(row.get("tranId", ""))
+            if not income_id or income_id in seen_income:
+                return {"status": "PROOF_MISSING", "reason": "INCOME_ID_MISSING_OR_DUPLICATED"}
+            seen_income.add(income_id)
+            if row.get("asset") != "USDT":
+                return {"status": "PROOF_MISSING", "reason": "INCOME_ASSET_NOT_USDT"}
             kind = row["incomeType"]
             if kind == "FUNDING_FEE":
                 funding += _dec(row["income"])
             elif kind == "TRANSFER":
                 transfers += _dec(row["income"])
             elif kind in ("COMMISSION", "COMMISSION_REBATE", "REALIZED_PNL", "WELCOME_BONUS"):
-                # Not all of these represent external cash flows; report
-                # separately in a future comprehensive accounting proof.
+                # Explicitly outside this narrow aggregate comparison;
+                # this result cannot constitute full accounting proof.
                 pass
             else:
                 return {"status": "PROOF_MISSING", "reason": "UNCLASSIFIED_INCOME_TYPE"}
