@@ -53,6 +53,8 @@ async def collect_symbol_fills(*, client, symbol: str, start_ms: int,
                 records.append(row)
             if len(page) < limit:
                 return {"status": "FILLS_WINDOW_SHAPE_VALID", "records": records,
+                        "start_ms": start_ms, "end_ms": end_ms,
+                        "terminal_page_verified": True,
                         "scope": "BOUNDED_SHAPE_ONLY_NOT_EXCHANGE_COMPLETENESS",
                         "execution_effect": "NONE", "live_allowed": False}
             if last_id is None:
