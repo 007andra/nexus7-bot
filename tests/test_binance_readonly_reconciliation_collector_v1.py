@@ -50,5 +50,33 @@ class ReadonlyCollectorTests(unittest.TestCase):
         self.assertEqual(client.calls, [])
 
 
+    def test_conditional_orders_envelope_is_accepted(self):
+        class EnvelopeClient(FakeClient):
+            async def _get(self, endpoint, auth=False):
+                if endpoint == "/fapi/v1/openAlgoOrders":
+                    return {"orders": []}
+                return await super()._get(endpoint, auth=auth)
+
+        report = asyncio.run(collect_reconciliation(
+            client=EnvelopeClient(),
+            internal={"equity_usdt": "5.3", "active_positions": 0,
+                      "open_orders": 0, "algo_orders": 0},
+            internal_captured_at="2026-10-10T14:00:00Z",
+        ))
+        self.assertEqual(report["status"], "BASIC_SNAPSHOT_MATCH")
+
+    def test_malformed_conditional_envelope_fails_closed(self):
+        class MalformedClient(FakeClient):
+            async def _get(self, endpoint, auth=False):
+                if endpoint == "/fapi/v1/openAlgoOrders":
+                    return {"orders": None}
+                return await super()._get(endpoint, auth=auth)
+
+        report = asyncio.run(collect_reconciliation(
+            client=MalformedClient(),
+            internal={}, internal_captured_at="2026-10-10T14:00:00Z"))
+        self.assertEqual(report["status"], "PROOF_MISSING")
+
+
 if __name__ == "__main__":
     unittest.main()
