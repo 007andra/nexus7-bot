@@ -53,6 +53,7 @@ async def collect_fills_windows(*, client, symbol: str, start_ms: int,
         windows += 1
         cursor = upper + 1
     return {"status": "FILLS_WINDOWS_SHAPE_VALID", "records": records,
-            "window_count": windows,
+            "window_count": windows, "start_ms": start_ms, "end_ms": end_ms,
+            "terminal_page_verified": True,
             "scope": "WINDOW_SHAPE_ONLY_NOT_EXCHANGE_COMPLETENESS",
             "execution_effect": "NONE", "live_allowed": False}
