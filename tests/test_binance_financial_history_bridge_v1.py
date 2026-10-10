@@ -9,6 +9,10 @@ COVERAGE = {
     "symbol_universe_verified": True,
     "historical_endpoint_limits_reviewed": True,
     "source_completeness_independently_verified": True,
+    "source_windows": {
+        "BTCUSDT": {"start_ms": 1000, "end_ms": 2000, "complete": True},
+        "income": {"start_ms": 1000, "end_ms": 2000, "complete": True},
+    },
 }
 FILL = {"symbol": "BTCUSDT", "id": 1, "time": 1500,
         "commissionAsset": "USDT", "commission": "0.02"}
@@ -62,6 +66,24 @@ class BridgeTests(unittest.TestCase):
         result = run(fills_by_symbol={
             "BTCUSDT": {"status": "FILLS_WINDOWS_SHAPE_VALID",
                         "window_count": 2}})
+        self.assertEqual(result["status"], "PROOF_MISSING")
+
+
+    def test_missing_per_source_window_fails_closed(self):
+        result = run(coverage={**COVERAGE, "source_windows": {
+            "BTCUSDT": {"start_ms": 1000, "end_ms": 2000, "complete": True}}})
+        self.assertEqual(result["status"], "PROOF_MISSING")
+
+    def test_incorrect_income_window_fails_closed(self):
+        result = run(coverage={**COVERAGE, "source_windows": {
+            **COVERAGE["source_windows"],
+            "income": {"start_ms": 1001, "end_ms": 2000, "complete": True}}})
+        self.assertEqual(result["status"], "PROOF_MISSING")
+
+    def test_incomplete_source_attestation_fails_closed(self):
+        result = run(coverage={**COVERAGE, "source_windows": {
+            **COVERAGE["source_windows"],
+            "BTCUSDT": {"start_ms": 1000, "end_ms": 2000, "complete": False}}})
         self.assertEqual(result["status"], "PROOF_MISSING")
 
 
