@@ -34,6 +34,8 @@ async def collect_reconciliation(*, client, internal: dict, internal_captured_at
         }
         for name, endpoint in endpoints.items():
             result = await client._get(endpoint, auth=True)
+            if name == "algo_orders" and isinstance(result, dict):
+                result = result.get("orders")
             if not isinstance(result, list):
                 return {"status": "PROOF_MISSING", "reason": name.upper() + "_READ_FAILED"}
             snapshots[name] = result
