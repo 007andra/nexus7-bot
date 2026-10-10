@@ -7,10 +7,11 @@ symbols, and internal ledger completeness before aggregate comparison.
 from __future__ import annotations
 
 from bot.binance_financial_event_reconciliation_v1 import reconcile_financial_events
+from bot.binance_coverage_manifest_verifier_v1 import verify_coverage_manifest
 
 
 def reconcile_collected_history(*, fills_by_symbol, income_result, internal,
-                                coverage, required_symbols):
+                                coverage, required_symbols, manifests=None):
     missing = {"status": "PROOF_MISSING", "reason": "HISTORY_COVERAGE_NOT_PROVEN",
                "execution_effect": "NONE", "live_allowed": False}
     if not isinstance(fills_by_symbol, dict) or not isinstance(income_result, dict):
@@ -60,6 +61,17 @@ def reconcile_collected_history(*, fills_by_symbol, income_result, internal,
         trades.extend(records)
     if any(coverage.get(k) is not True for k in (
             "trades_complete", "income_complete", "internal_complete")):
+        return missing
+    if not isinstance(manifests, dict):
+        return missing
+    raw_sources = {symbol: fills_by_symbol[symbol]["records"]
+                   for symbol in required_symbols}
+    raw_sources["income"] = income
+    manifest_result = verify_coverage_manifest(
+        manifests=manifests, required_sources=required_symbols + ["income"],
+        start_ms=coverage["window_start_ms"], end_ms=coverage["window_end_ms"],
+        records_by_source=raw_sources)
+    if manifest_result.get("status") != "MANIFEST_SHAPE_VALID":
         return missing
     return reconcile_financial_events(
         trades=trades, income=income, internal=internal, coverage=coverage)
