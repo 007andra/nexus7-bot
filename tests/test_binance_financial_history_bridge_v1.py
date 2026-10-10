@@ -51,5 +51,19 @@ class BridgeTests(unittest.TestCase):
                          "PROOF_MISSING")
 
 
+    def test_time_sliced_fills_bridge(self):
+        result = run(fills_by_symbol={
+            "BTCUSDT": {"status": "FILLS_WINDOWS_SHAPE_VALID",
+                        "window_count": 2, "records": [FILL]}})
+        self.assertEqual(result["status"], "EVENTS_MATCH")
+        self.assertFalse(result["live_allowed"])
+
+    def test_time_sliced_fills_missing_rows_fails_closed(self):
+        result = run(fills_by_symbol={
+            "BTCUSDT": {"status": "FILLS_WINDOWS_SHAPE_VALID",
+                        "window_count": 2}})
+        self.assertEqual(result["status"], "PROOF_MISSING")
+
+
 if __name__ == "__main__":
     unittest.main()
