@@ -54,10 +54,20 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(result["status"], "PROOF_MISSING")
         self.assertEqual(client.calls, [])
 
-    def test_single_millisecond_tail_fails_closed(self):
-        client = Client([[{"symbol": "BTCUSDT", "id": 1, "time": 1002}]])
+    def test_single_millisecond_tail_is_collected(self):
+        client = Client([[{"symbol": "BTCUSDT", "id": 1, "time": 1002}],
+                         [{"symbol": "BTCUSDT", "id": 2, "time": 1005}]])
         result = run(client, end_ms=1005)
-        self.assertEqual(result["status"], "PROOF_MISSING")
+        self.assertEqual(result["status"], "FILLS_WINDOWS_SHAPE_VALID")
+        self.assertEqual(result["window_count"], 2)
+        self.assertEqual(client.calls[-1][1]["startTime"], 1005)
+        self.assertEqual(client.calls[-1][1]["endTime"], 1005)
+
+    def test_empty_single_millisecond_window(self):
+        client = Client([[]])
+        result = run(client, start_ms=1000, end_ms=1000)
+        self.assertEqual(result["status"], "FILLS_WINDOWS_SHAPE_VALID")
+        self.assertEqual(result["records"], [])
 
 
 if __name__ == "__main__":
