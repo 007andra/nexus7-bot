@@ -49,5 +49,22 @@ class IncomeHistoryCollectorTests(unittest.TestCase):
         self.assertEqual(result["status"], "PROOF_MISSING")
 
 
+    def test_full_page_unique_timestamp_still_fails_closed(self):
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            async def _get(self, route, params, auth=False):
+                self.calls += 1
+                return [{"tranId": 1, "time": 1001, "incomeType": "FUNDING_FEE",
+                         "income": "0.01", "asset": "USDT"}]
+
+        client = Client()
+        result = asyncio.run(collect_income_window(
+            client=client, start_ms=1000, end_ms=2000, limit=1))
+        self.assertEqual(result["status"], "PROOF_MISSING")
+        self.assertEqual(client.calls, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
