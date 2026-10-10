@@ -126,29 +126,70 @@ def _ceil_tick(value, tick):
 
 
 def _bar_path(row, evidence, horizon, now_epoch):
-    """Require complete, timestamp-ordered, independently sourced future candles.
+    """Replay exact signal-to-horizon window with conservative partial candles.
 
-    No gross candle outcome is silently converted into an executable path.
+    Unaligned capture timestamps require authenticated *post-entry* partial
+    interval paths at both ends. Never omit the adverse first minutes, nor
+    borrow a full final candle that extends beyond the evaluated horizon.
+    Sources still require a separate independent audit; values alone do not
+    authenticate candles or order fills.
     """
+    captured = float(row["captured_epoch"])
+    finish = captured + horizon * 60
+    if now_epoch < finish:
+        return None
+    start = math.ceil(captured / INTERVAL_S) * INTERVAL_S
+    unaligned = start > captured
     bars = evidence.get("bars")
-    if not isinstance(bars, list) or len(bars) != horizon // 15:
+    full_count = horizon // 15 - (1 if unaligned else 0)
+    if not isinstance(bars, list) or len(bars) != full_count:
         return None
-    start = math.ceil(float(row["captured_epoch"]) / INTERVAL_S) * INTERVAL_S
-    if now_epoch < start + horizon * 60:
-        return None
+
+    def parse_candle(candle):
+        if not isinstance(candle, dict):
+            return None
+        o, h, l, c = (_positive(candle.get(k)) for k in ("o", "h", "l", "c"))
+        if None in (o, h, l, c) or not (l <= o <= h and l <= c <= h):
+            return None
+        return (o, h, l, c)
+
     output = []
+    if unaligned:
+        initial = evidence.get("entry_partial_window")
+        if (not isinstance(initial, dict) or
+                _finite(initial.get("start_epoch")) != captured or
+                _finite(initial.get("end_epoch")) != start):
+            return None
+        first = parse_candle(initial)
+        if first is None:
+            return None
+        output.append(first)
+
     for i, candle in enumerate(bars):
         if not isinstance(candle, dict):
             return None
         stamp = _finite(candle.get("ts"))
-        o, h, l, c = (_positive(candle.get(k)) for k in ("o", "h", "l", "c"))
-        if (stamp != start + i * INTERVAL_S or
-                None in (o, h, l, c) or
-                not (l <= o <= h and l <= c <= h)):
+        expected = start + i * INTERVAL_S
+        if stamp != expected:
             return None
-        output.append((o, h, l, c))
-    return output
+        parsed = parse_candle(candle)
+        if parsed is None:
+            return None
+        output.append(parsed)
 
+    if unaligned:
+        last_start = start + full_count * INTERVAL_S
+        final = evidence.get("exit_partial_window")
+        if (not isinstance(final, dict) or
+                _finite(final.get("start_epoch")) != last_start or
+                _finite(final.get("end_epoch")) != finish):
+            return None
+        last = parse_candle(final)
+        if last is None:
+            return None
+        output.append(last)
+
+    return output
 
 def net_proof(row, evidence, *, horizon, now_epoch, stress=False):
     """Hypothetical stop-first protected outcome; NEVER a confirmed exchange fill.
@@ -170,6 +211,12 @@ def net_proof(row, evidence, *, horizon, now_epoch, stress=False):
             or evidence.get("bar_interval_seconds") != INTERVAL_S
             or evidence.get("entry_type") not in ("MARKET", "STOP_MARKET")
             or evidence.get("synthetic_data") is not False):
+        return None
+    # A STOP_MARKET trigger/fill is conditional. Without a distinct observed
+    # activation timestamp and fill-market path, treating it as MARKET would
+    # fabricate a trade and optimistic net performance. Reject this unproven
+    # route until an independently audited trigger model exists.
+    if evidence["entry_type"] == "STOP_MARKET":
         return None
     captured_at = _finite(evidence.get("cost_observed_epoch"))
     if captured_at is None or captured_at > row["captured_epoch"]:
@@ -342,8 +389,9 @@ def evaluate(payloads, evidence_by_id_and_horizon, *, now_epoch, source_truncate
     return {
         **AUTHORITY, "cohort_id": COHORT_ID, "cutoff_epoch": CUTOFF_EPOCH,
         "status": ("COLLECTING_PROSPECTIVE_SAMPLE" if len(selected) < TARGET
-                   else "NET_EVIDENCE_INCOMPLETE_OR_FAILED" if len(blockers) > 1
-                   else "MANUAL_AUDIT_REQUIRED"),
+                   else "MANUAL_AUDIT_REQUIRED" if blockers == [
+                       "DURABLE_MEMBER_FREEZE_AND_INDEPENDENT_SOURCE_REVIEW_REQUIRED"
+                   ] else "NET_EVIDENCE_INCOMPLETE_OR_FAILED"),
         "blockers": tuple(blockers),
         "selected": len(selected),
         "membership_durable": False,
