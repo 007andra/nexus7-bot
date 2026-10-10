@@ -50,6 +50,12 @@ def _valid_candidate(raw):
     epoch = _finite(raw.get("captured_epoch"))
     if epoch is None or epoch <= CUTOFF_EPOCH:
         return None
+    # A numeric 1/0 compares equal to True/False in Python, but is not
+    # authenticated canonical boolean decision evidence.
+    if any(type(raw.get(k)) is not bool for k in (
+        "nexus_called", "nexus_allowed", "shadow_only", "live_eligible"
+    )):
+        return None
     if any(raw.get(k) != v for k, v in (
         ("population", "HARD_GATE_SHADOW"), ("side", "SHORT"),
         ("regime", "TRENDING_DOWN"), ("setup", "BOS_BREAK"),
