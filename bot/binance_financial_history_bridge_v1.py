@@ -26,6 +26,22 @@ def reconcile_collected_history(*, fills_by_symbol, income_result, internal,
         return missing
     if coverage.get("source_completeness_independently_verified") is not True:
         return missing
+    # Collector shape statuses are not evidence of source completeness.
+    # Require an independently supplied, exact bounded window for every
+    # symbol and the income source before any aggregate comparison.
+    bounds = coverage.get("source_windows")
+    if not isinstance(bounds, dict):
+        return missing
+    expected_sources = set(required_symbols) | {"income"}
+    if set(bounds) != expected_sources:
+        return missing
+    expected_window = (coverage.get("window_start_ms"), coverage.get("window_end_ms"))
+    for source in expected_sources:
+        entry = bounds.get(source)
+        if not isinstance(entry, dict) or (
+                entry.get("start_ms"), entry.get("end_ms")) != expected_window or (
+                entry.get("complete") is not True):
+            return missing
     if income_result.get("status") != "INCOME_WINDOW_SHAPE_VALID":
         return missing
     income = income_result.get("records")
