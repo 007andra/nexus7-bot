@@ -48,5 +48,17 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(run(client)["status"], "PROOF_MISSING")
 
 
+    def test_insufficient_window_budget_no_network(self):
+        client = Client([])
+        result = run(client, max_windows=1)
+        self.assertEqual(result["status"], "PROOF_MISSING")
+        self.assertEqual(client.calls, [])
+
+    def test_single_millisecond_tail_fails_closed(self):
+        client = Client([[{"symbol": "BTCUSDT", "id": 1, "time": 1002}]])
+        result = run(client, end_ms=1005)
+        self.assertEqual(result["status"], "PROOF_MISSING")
+
+
 if __name__ == "__main__":
     unittest.main()
