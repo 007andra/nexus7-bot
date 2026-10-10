@@ -1,5 +1,7 @@
 """No-network checks for financial history bridge coverage gating."""
 import unittest
+import hashlib
+import json
 
 from bot.binance_financial_history_bridge_v1 import reconcile_collected_history
 
@@ -20,12 +22,24 @@ INTERNAL = {"fill_count": 1, "fees_usdt": "0.02",
             "funding_usdt": "0", "transfers_usdt": "0"}
 
 
+def manifest(rows):
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return [{"start_ms": 1000, "end_ms": 2000, "record_count": len(rows),
+             "terminal_page_verified": True,
+             "sha256": hashlib.sha256(payload.encode()).hexdigest()}]
+
+
+MANIFESTS = {"BTCUSDT": manifest([FILL]), "income": manifest([])}
+
+
+
 def run(**changes):
     args = dict(
         fills_by_symbol={"BTCUSDT": {"status": "FILLS_WINDOW_SHAPE_VALID",
                                      "records": [FILL]}},
         income_result={"status": "INCOME_WINDOW_SHAPE_VALID", "records": []},
-        internal=INTERNAL, coverage=COVERAGE, required_symbols=["BTCUSDT"])
+        internal=INTERNAL, coverage=COVERAGE, required_symbols=["BTCUSDT"],
+        manifests=MANIFESTS)
     args.update(changes)
     return reconcile_collected_history(**args)
 
@@ -85,6 +99,16 @@ class BridgeTests(unittest.TestCase):
             **COVERAGE["source_windows"],
             "BTCUSDT": {"start_ms": 1000, "end_ms": 2000, "complete": False}}})
         self.assertEqual(result["status"], "PROOF_MISSING")
+
+
+    def test_modified_record_hash_fails_closed(self):
+        altered = {**FILL, "commission": "0.03"}
+        result = run(fills_by_symbol={"BTCUSDT": {
+            "status": "FILLS_WINDOWS_SHAPE_VALID", "records": [altered]}})
+        self.assertEqual(result["status"], "PROOF_MISSING")
+
+    def test_missing_manifests_fails_closed(self):
+        self.assertEqual(run(manifests=None)["status"], "PROOF_MISSING")
 
 
 if __name__ == "__main__":
