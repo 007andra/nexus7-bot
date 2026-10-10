@@ -696,12 +696,17 @@ class TradingEngine:
                             "%s", cancel_origin.format_event(cancel_origin.snapshot())
                         )
                     except Exception:
-                        log.warning(
-                            "[ENGINE_CANCEL_ORIGIN_OBSERVER_V1] kind=OBSERVER_ERROR "
-                            "actual_cancel_initiator=UNKNOWN observer_only=true "
-                            "risk_unchanged=true backup_gate_effect=NONE "
-                            "decision_effect=NONE execution_effect=NONE"
-                        )
+                        # A second logger failure must never prevent the
+                        # original cancellation exit and ownership cleanup.
+                        try:
+                            log.warning(
+                                "[ENGINE_CANCEL_ORIGIN_OBSERVER_V1] kind=OBSERVER_ERROR "
+                                "actual_cancel_initiator=UNKNOWN observer_only=true "
+                                "risk_unchanged=true backup_gate_effect=NONE "
+                                "decision_effect=NONE execution_effect=NONE"
+                            )
+                        except Exception:
+                            pass
                     self._liveness_cancelled_in_main_loop = True
                     break
                 except (NameError, AttributeError, TypeError, ImportError) as e:
