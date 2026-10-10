@@ -18,6 +18,8 @@ import math
 import os
 import time
 
+from bot.oos_readonly_connection_v1 import OOSReadOnlyConnection
+
 FLAG = "PROSPECTIVE_OOS_COHORT_V1"
 POPULATION = "HARD_GATE_SHADOW"
 COHORT = "MIN_ORDER_BLOCKED_COUNTERFACTUAL_NEXUS"
@@ -158,7 +160,12 @@ async def load_frozen_metadata_for_snapshot(db, *, use_fast_path=None):
     ensure_cohort path; do not create a new cohort without that guard.
     No new tables, risk authority, candidate/outcome selection or timer change.
     """
-    if use_fast_path is None:
+    # A dedicated OOS reader must never fall back to DDL or the trading DB.
+    # Legacy callers retain their existing feature-flag behavior.
+    isolated_reader = isinstance(db, OOSReadOnlyConnection)
+    if isolated_reader:
+        use_fast_path = True
+    elif use_fast_path is None:
         use_fast_path = metadata_fast_path_enabled()
     if not use_fast_path:
         return await ensure_cohort(db)
@@ -169,6 +176,8 @@ async def load_frozen_metadata_for_snapshot(db, *, use_fast_path=None):
     if rows:
         raw = rows[0]["payload"] if hasattr(rows[0], "keys") else rows[0][0]
         return json.loads(raw)
+    if isolated_reader:
+        raise RuntimeError("OOS_READONLY_METADATA_MISSING")
     return await ensure_cohort(db)
 
 
@@ -315,7 +324,9 @@ async def snapshot(db, *, timing_probe=None):
     if timing_probe is not None:
         # The label describes the selected mode, not a claim of server speed.
         timing_probe.metadata_read_mode = (
-            "IMMUTABLE_READ_FIRST"
+            "DEDICATED_READONLY_CONNECTION"
+            if isinstance(db, OOSReadOnlyConnection)
+            else "IMMUTABLE_READ_FIRST"
             if metadata_fast_path_enabled()
             else "LEGACY_DDL_GUARDED"
         )
