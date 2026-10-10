@@ -47,11 +47,7 @@ async def collect_symbol_fills(*, client, symbol: str, start_ms: int,
                 if timestamp < start_ms:
                     return missing
                 if timestamp > end_ms:
-                    return {"status": "FILLS_WINDOW_SHAPE_VALID", "records": records,
-                            "start_ms": start_ms, "end_ms": end_ms,
-                            "terminal_page_verified": True,
-                            "scope": "BOUNDED_SHAPE_ONLY_NOT_EXCHANGE_COMPLETENESS",
-                            "execution_effect": "NONE", "live_allowed": False}
+                    return missing
                 seen.add(identity)
                 last_id = identity
                 records.append(row)
