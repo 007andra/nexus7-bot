@@ -305,8 +305,14 @@ async def lifespan(app: FastAPI):
         # Optional, local-only diagnostic: never calls DB, exchange or trading guards.
         from bot import engine_internal_liveness_v1 as internal_liveness
         if internal_liveness.enabled():
+            async def _liveness_alert(text):
+                from bot.notifier import notify as _notify_liveness
+                await _notify_liveness(text)
+
             app.state.liveness_watch_task = asyncio.create_task(
-                internal_liveness.run(engine, app.state.engine_task)
+                internal_liveness.run(
+                    engine, app.state.engine_task, alert=_liveness_alert
+                )
             )
         log.info("✅ BGX Capital online (%s %s)", EXCHANGE_NAME, EXCHANGE_PRODUCT)
 
