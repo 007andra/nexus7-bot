@@ -107,15 +107,52 @@ def format_event(result):
     )
 
 
+UNHEALTHY_STATUSES = ("TASK_DONE", "LOCAL_LEASE_EXPIRED", "LOOP_STALE")
+ALERT_REPEAT_SECONDS = 1800.0
+ALERT_TIMEOUT_SECONDS = 20.0
+
+
+def format_alert(result):
+    """Operator alert text; same allowlisted fields as the log line."""
+    return (
+        "⚠️ ENGINE PARADO — " + format_event(result) + "\n"
+        "O processo segue online, mas o loop do engine não está saudável. "
+        "Nenhuma ação automática foi tomada: verificar posições/proteções na "
+        "Binance e decidir reinício manual."
+    )
+
+
+def _dispatch_alert(alert, text, logger):
+    """Fire-and-forget so a slow Telegram call never stalls the watcher."""
+    async def _send():
+        try:
+            await asyncio.wait_for(alert(text), timeout=ALERT_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[ENGINE_INTERNAL_LIVENESS_V1] alert_delivery=FAILED error=%s "
+                "observation_only=true execution_effect=NONE", type(exc).__name__,
+            )
+    return asyncio.ensure_future(_send())
+
+
 async def run(engine, engine_task, *, sleep=asyncio.sleep, clock=time.monotonic,
               interval_s=INTERVAL_SECONDS, emit_every_s=EMIT_EVERY_SECONDS,
-              logger=None):
-    """Independent ticker: capped logging, no mutation or recovery action."""
+              logger=None, alert=None, alert_repeat_s=ALERT_REPEAT_SECONDS):
+    """Independent ticker: capped logging, no mutation or recovery action.
+
+    ``alert`` (optional async callable) is notified on entering an unhealthy
+    status and at most every ``alert_repeat_s`` while it persists. Alerting
+    is notification only: it never restarts tasks or touches trading state.
+    """
     if logger is None:
         from bot.logger import log
         logger = log
     previous_status = None
     last_logged = None
+    last_alerted = None
+    pending_alerts = set()
     while True:
         try:
             now = clock()
@@ -126,11 +163,22 @@ async def run(engine, engine_task, *, sleep=asyncio.sleep, clock=time.monotonic,
             )
             if must_emit:
                 line = format_event(result)
-                if result["status"] in ("TASK_DONE", "LOCAL_LEASE_EXPIRED", "LOOP_STALE"):
+                if result["status"] in UNHEALTHY_STATUSES:
                     logger.warning("%s", line)
                 else:
                     logger.info("%s", line)
                 last_logged = now
+            if result["status"] in UNHEALTHY_STATUSES:
+                if alert is not None and (
+                    previous_status != result["status"] or last_alerted is None
+                    or now - last_alerted >= alert_repeat_s
+                ):
+                    task = _dispatch_alert(alert, format_alert(result), logger)
+                    pending_alerts.add(task)
+                    task.add_done_callback(pending_alerts.discard)
+                    last_alerted = now
+            else:
+                last_alerted = None
             previous_status = result["status"]
         except asyncio.CancelledError:
             raise
