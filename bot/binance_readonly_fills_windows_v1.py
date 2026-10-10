@@ -18,7 +18,7 @@ async def collect_fills_windows(*, client, symbol: str, start_ms: int,
                "execution_effect": "NONE", "live_allowed": False}
     if not (isinstance(start_ms, int) and isinstance(end_ms, int)
             and isinstance(window_ms, int) and isinstance(max_windows, int)
-            and 0 < start_ms < end_ms and 0 < window_ms <= MAX_WINDOW_MS
+            and 0 < start_ms <= end_ms and 0 < window_ms <= MAX_WINDOW_MS
             and max_windows > 0):
         return missing
     if end_ms - start_ms + 1 > max_windows * window_ms:
@@ -32,10 +32,6 @@ async def collect_fills_windows(*, client, symbol: str, start_ms: int,
         if windows >= max_windows:
             return missing
         upper = min(end_ms, cursor + window_ms - 1)
-        if upper <= cursor:
-            # A single-millisecond remainder is not supported by the
-            # underlying collector; do not silently omit it.
-            return missing
         result = await collect_symbol_fills(
             client=client, symbol=symbol, start_ms=cursor, end_ms=upper,
             limit=limit)
