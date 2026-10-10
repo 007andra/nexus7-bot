@@ -108,6 +108,10 @@ def fetch_funding_events(*, symbol: str, start_utc: str, end_utc: str,
     start, end = _utc_ms(start_utc), _utc_ms(end_utc)
     if start >= end:
         raise EvidenceError("INVALID_WINDOW")
+    if end > int(datetime.now(timezone.utc).timestamp() * 1000):
+        raise EvidenceError("FUTURE_FUNDING_WINDOW")
+    if not symbol.isascii() or not symbol.isalnum() or symbol.upper() != symbol:
+        raise EvidenceError("INVALID_SYMBOL")
     events, requests = [], []
     cursor = start
     while cursor < end:
@@ -123,6 +127,8 @@ def fetch_funding_events(*, symbol: str, start_utc: str, end_utc: str,
             if not cursor <= ts < end or (last is not None and ts <= last):
                 raise EvidenceError("FUNDING_ORDER_OR_WINDOW_INVALID")
             rate = Decimal(str(item["fundingRate"]))
+            if not rate.is_finite():
+                raise EvidenceError("INVALID_FUNDING_RATE")
             events.append({"funding_time_ms": ts, "funding_rate": str(rate),
                            "mark_price": str(item.get("markPrice", ""))})
             last = ts
