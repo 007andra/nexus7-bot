@@ -13,7 +13,7 @@ async def collect_symbol_fills(*, client, symbol: str, start_ms: int,
                "execution_effect": "NONE", "live_allowed": False}
     if not (isinstance(symbol, str) and symbol.isalnum() and symbol.endswith("USDT")
             and isinstance(start_ms, int) and isinstance(end_ms, int)
-            and 0 < start_ms < end_ms and end_ms - start_ms <= 7 * 24 * 60 * 60 * 1000 and 1 <= limit <= 1000
+            and 0 < start_ms <= end_ms and end_ms - start_ms <= 7 * 24 * 60 * 60 * 1000 and 1 <= limit <= 1000
             and isinstance(max_pages, int) and max_pages > 0):
         return missing
     records = []
