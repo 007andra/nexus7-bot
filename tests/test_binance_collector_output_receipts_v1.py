@@ -13,6 +13,7 @@ def fills(**changes):
 def income(**changes):
     return {"status": "INCOME_WINDOW_SHAPE_VALID", "start_ms": 1000,
             "end_ms": 1010, "terminal_page_verified": True,
+            "live_allowed": False, "execution_effect": "NONE",
             "records": [], **changes}
 
 
