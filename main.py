@@ -342,6 +342,20 @@ async def lifespan(app: FastAPI):
     )
     app.state.ready = False
     app.state.engine = None
+    # Passive attribution of the known shutdown cancellation route.
+    # Does not alter shutdown ordering, task cancellation or LIVE authority.
+    try:
+        task = getattr(app.state, "engine_task", None)
+        log.warning(
+            "[ENGINE_CANCEL_REQUEST_SITE_V1] site=fastapi_lifespan_shutdown "
+            "engine_task_present=%s engine_task_done=%s "
+            "request_origin=APPLICATION_SHUTDOWN observation_only=true "
+            "decision_effect=NONE execution_effect=NONE",
+            task is not None,
+            task.done() if task is not None else None,
+        )
+    except Exception:
+        pass
     engine.stop()
     for t in ("bootstrap_task", "engine_task", "liveness_watch_task"):
         task=getattr(app.state,t,None)

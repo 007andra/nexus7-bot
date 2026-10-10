@@ -707,6 +707,11 @@ class TradingEngine:
                             )
                         except Exception:
                             pass
+                    try:
+                        from bot.engine_cancel_causal_diag_v1 import format_cancellation
+                        log.warning("%s", format_cancellation())
+                    except Exception:
+                        log.warning("[ENGINE_CANCEL_CAUSAL_DIAG_V1] status=UNAVAILABLE initiator=UNKNOWN observation_only=true execution_effect=NONE")
                     self._liveness_cancelled_in_main_loop = True
                     break
                 except (NameError, AttributeError, TypeError, ImportError) as e:
