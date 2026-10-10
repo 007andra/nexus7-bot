@@ -30,12 +30,16 @@ def validate_collector_outputs(*, fills_by_symbol, income_result,
                 or result.get("end_ms") != end_ms
                 or result.get("terminal_page_verified") is not True):
             return missing
+        if result.get("live_allowed") is not False or result.get("execution_effect") != "NONE":
+            return missing
         records[symbol] = result.get("records")
         terminal[symbol] = True
     if (income_result.get("status") != "INCOME_WINDOW_SHAPE_VALID"
             or income_result.get("start_ms") != start_ms
             or income_result.get("end_ms") != end_ms
             or income_result.get("terminal_page_verified") is not True):
+        return missing
+    if income_result.get("live_allowed") is not False or income_result.get("execution_effect") != "NONE":
         return missing
     records["income"] = income_result.get("records")
     terminal["income"] = True
