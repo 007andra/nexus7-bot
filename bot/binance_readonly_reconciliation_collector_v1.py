@@ -40,6 +40,17 @@ async def collect_reconciliation(*, client, internal: dict, internal_captured_at
                 return {"status": "PROOF_MISSING", "reason": name.upper() + "_READ_FAILED"}
             snapshots[name] = result
             timestamps[name] = datetime.now(timezone.utc).isoformat()
+        def parsed_time(value):
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                raise ValueError("timestamp lacks timezone")
+            return dt.astimezone(timezone.utc)
+
+        stamps = [parsed_time(timestamps[k]) for k in
+                  ("internal", "balance", "positions", "orders", "algo_orders")]
+        if (max(stamps) - min(stamps)).total_seconds() > 30:
+            return {"status": "PROOF_MISSING", "reason": "SNAPSHOT_TIME_SKEW",
+                    "execution_effect": "NONE", "live_allowed": False}
         report = compare_readonly_snapshots(
             balance_rows=snapshots["balance"],
             position_rows=snapshots["positions"],
