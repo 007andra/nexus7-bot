@@ -1,4 +1,5 @@
 """Contract tests for the research-only OOS reader; stdlib unittest runner."""
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -48,6 +49,34 @@ class OOSReadOnlyConnectionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "readonly unavailable"):
                 await OOSReadOnlyConnection.connect("postgresql://localhost/test")
         conn.close.assert_awaited_once()
+
+    async def test_query_cancellation_propagates(self):
+        conn = AsyncMock()
+        conn.fetch.side_effect = asyncio.CancelledError()
+        reader = OOSReadOnlyConnection(conn)
+        with self.assertRaises(asyncio.CancelledError):
+            await reader._fetchall("SELECT payload FROM prospective_oos_cohort_v1")
+        conn.fetch.assert_awaited_once()
+
+    async def test_connect_cancellation_during_session_setup_closes(self):
+        conn = AsyncMock()
+        conn.execute.side_effect = asyncio.CancelledError()
+        with patch("asyncpg.connect", new_callable=AsyncMock, return_value=conn):
+            with self.assertRaises(asyncio.CancelledError):
+                await OOSReadOnlyConnection.connect("postgresql://localhost/test")
+        conn.close.assert_awaited_once()
+
+    async def test_connect_timeout_propagates_without_session_setup(self):
+        with patch("asyncpg.connect", new_callable=AsyncMock, side_effect=asyncio.TimeoutError):
+            with self.assertRaises(asyncio.TimeoutError):
+                await OOSReadOnlyConnection.connect("postgresql://localhost/test")
+            
+    async def test_strict_mode_cannot_be_disabled(self):
+        conn = AsyncMock()
+        reader = OOSReadOnlyConnection(conn)
+        with self.assertRaisesRegex(ValueError, "MUST_FAIL_CLOSED"):
+            await reader._fetchall("SELECT 1", strict=False)
+        conn.fetch.assert_not_awaited()
 
 
 if __name__ == "__main__":
