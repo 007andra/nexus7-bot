@@ -33,8 +33,8 @@ async def collect_fills_windows(*, client, symbol: str, start_ms: int,
             return missing
         upper = min(end_ms, cursor + window_ms - 1)
         if upper <= cursor:
-            # Single-millisecond windows are not supported by the underlying
-            # bounded collector (end must exceed start).
+            # A single-millisecond remainder is not supported by the
+            # underlying collector; do not silently omit it.
             return missing
         result = await collect_symbol_fills(
             client=client, symbol=symbol, start_ms=cursor, end_ms=upper,
