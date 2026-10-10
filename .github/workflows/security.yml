@@ -2,7 +2,9 @@ name: Supply Chain Security
 
 on:
   push:
-    branches: [main]
+    # Exact merge SHA on the production branch is what Railway deploys;
+    # it must be tested itself, not only the PR head before merge.
+    branches: [main, migration/binance-usdm]
   pull_request:
     # migration/binance-usdm is the Binance USD-M production branch; PRs into it
     # must run the same gates as PRs into main.
