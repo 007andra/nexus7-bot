@@ -50,5 +50,14 @@ class FillsHistoryTests(unittest.TestCase):
         self.assertEqual(run(Client([]))["status"], "PROOF_MISSING")
 
 
+    def test_more_than_seven_days_rejected_without_network(self):
+        client = Client([])
+        result = asyncio.run(collect_symbol_fills(
+            client=client, symbol="BTCUSDT", start_ms=1000,
+            end_ms=1000 + 7 * 24 * 60 * 60 * 1000 + 1))
+        self.assertEqual(result["status"], "PROOF_MISSING")
+        self.assertEqual(client.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
