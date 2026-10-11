@@ -170,10 +170,20 @@ class FlagOnUsesDedicatedReader(_Base):
                 patch("asyncpg.connect", new_callable=AsyncMock, return_value=conn), \
                 patch.object(scan, "_emit"):
             task = asyncio.create_task(scan._maybe_emit_prospective_oos_cohort(object()))
-            await started.wait()
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+            try:
+                # Fail promptly if dispatch never reaches the snapshot. A hanging
+                # wait must not consume the entire offline-suite timeout.
+                await asyncio.wait_for(started.wait(), timeout=2.0)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=2.0)
+            finally:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=2.0)
+                except asyncio.CancelledError:
+                    pass
         conn.close.assert_awaited_once()
         self.assertIsNone(dedicated._reader)
 
