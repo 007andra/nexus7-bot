@@ -108,7 +108,11 @@ async def acquire(dsn: str | None = None) -> OOSReadOnlyConnection:
         return _reader
     _reader = None
     if dsn is None:
-        dsn = os.environ.get("DATABASE_URL", "")
+        # A distinct least-privilege DSN is mandatory; never inherit the
+        # trading connection credentials from DATABASE_URL.
+        dsn = os.environ.get("OOS_DIAGNOSTIC_DATABASE_URL", "")
+    if not dsn:
+        raise ValueError("OOS_DIAGNOSTIC_DSN_MISSING")
     _reader = await OOSReadOnlyConnection.connect(dsn)
     return _reader
 
