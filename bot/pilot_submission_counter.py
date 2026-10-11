@@ -80,6 +80,7 @@ async def _reserve_db(token: str, limit: int) -> tuple[bool, int]:
     key = _state_key()
     async with _LOCK:
         async with db._io_lock:
+            conn = getattr(db, "_conn", None) or conn  # recovery may have replaced it
             if getattr(db, "_is_pg", False):
                 async with conn.transaction():
                     await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)

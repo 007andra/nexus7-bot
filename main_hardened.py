@@ -160,6 +160,7 @@ async def service_readiness():
         worker_healthy=engine_task_healthy(
             task,
             running=bool(getattr(engine, "_running", False)),
+            stop_requested=bool(getattr(engine, "_stop_requested", False)),
         ),
     )
     return JSONResponse(

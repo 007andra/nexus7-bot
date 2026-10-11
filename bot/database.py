@@ -10,6 +10,7 @@ import time
 from bot.prospective_oos_snapshot_timing_v1 import active_probe as _oos_snapshot_probe
 from bot.db_lock_owner_trace_v1 import LockHolderTracker, safe_query_label, safe_serialized_label
 from bot.oos_async_contention_observability_v1 import SlowHoldReporter, lock_hold_enabled
+from bot.db_cancel_safety import DatabaseOperationAborted as _DriverAborted, is_spurious_cancel
 from datetime import datetime, timezone, date
 from functools import wraps
 from bot.logger import log
@@ -46,12 +47,119 @@ class PersistenceError(RuntimeError):
     """Critical durable-state operation could not be confirmed."""
 
 
+class DatabaseOperationAborted(PersistenceError, _DriverAborted):
+    """Spurious driver cancel (task not cancelled): an unconfirmed DB operation.
+
+    Subclassing PersistenceError keeps every existing fail-closed durable path
+    (e.g. post-fill trade persistence) on its established error handling.
+    """
+
+
+# ── Shared-connection recovery ────────────────────────────────────────────
+# asyncpg keeps per-connection cancel futures. A cancelled ``cancel_sent_waiter``
+# (or one holding a transport error) is never cleared, so every later query on
+# that connection fails forever. A closed connection was never reopened either.
+# Recovery replaces the connection under ``_io_lock`` (no query in flight),
+# terminates the old one (the server then drops its session advisory locks)
+# and is single-flight and rate-limited, so it can never loop hot.
+_RECOVERY_MIN_INTERVAL_S = 5.0
+_RECOVERY_CONNECT_TIMEOUT_S = 10.0
+_recovery_task = None
+_recovery_last_attempt = float("-inf")
+_recovery_stats = {"scheduled": 0, "recovered": 0, "failed": 0}
+_conn_generation = 0
+
+
+def _connection_error(exc) -> bool:
+    if isinstance(exc, TimeoutError):  # an OSError subclass, but not transport loss
+        return False
+    if isinstance(exc, (_DriverAborted, OSError, ConnectionError)):
+        return True
+    return type(exc).__name__ == "ConnectionDoesNotExistError"
+
+
+def _connection_closed() -> bool:
+    try:
+        return bool(_conn is not None and _conn.is_closed())
+    except Exception:
+        return False
+
+
+def schedule_connection_recovery(reason: str):
+    """Replace the shared PostgreSQL connection soon; never blocks the caller."""
+    global _recovery_task, _recovery_last_attempt
+    if not _is_pg or not DATABASE_URL.startswith("postgresql"):
+        return None
+    if _recovery_task is not None and not _recovery_task.done():
+        return _recovery_task
+    now = time.monotonic()
+    if now - _recovery_last_attempt < _RECOVERY_MIN_INTERVAL_S:
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    _recovery_last_attempt = now
+    _recovery_stats["scheduled"] += 1
+    _recovery_task = loop.create_task(_recover_connection(str(reason)[:64]))
+    return _recovery_task
+
+
+def note_connection_failure(exc=None, *, reason: str) -> None:
+    """Schedule recovery only for transport/driver-state failures, not SQL errors."""
+    if _is_pg and (_connection_error(exc) or _connection_closed()):
+        schedule_connection_recovery(reason)
+
+
+async def _recover_connection(reason: str) -> bool:
+    global _conn, _conn_generation
+    import asyncpg
+    async with _io_lock:
+        old = _conn
+        if not _is_pg or old is None:
+            return False
+        try:
+            new = await asyncpg.connect(
+                DATABASE_URL, timeout=_RECOVERY_CONNECT_TIMEOUT_S
+            )
+        except Exception as exc:
+            _recovery_stats["failed"] += 1
+            log.critical(
+                "[DB_CONNECTION_RECOVERY_V1] status=FAILED reason=%s error=%s "
+                "old_connection=KEPT next_attempt_min_s=%.0f execution_effect=NONE",
+                reason, type(exc).__name__, _RECOVERY_MIN_INTERVAL_S,
+            )
+            return False
+        _conn = new
+        _conn_generation += 1
+        _recovery_stats["recovered"] += 1
+        try:
+            old.terminate()
+        except Exception:
+            pass
+        log.critical(
+            "[DB_CONNECTION_RECOVERY_V1] status=RECONNECTED reason=%s generation=%d "
+            "old_connection=TERMINATED execution_effect=NONE",
+            reason, _conn_generation,
+        )
+        return True
+
+
 def _serialized_io(func):
     @wraps(func)
     async def wrapped(*args, **kwargs):
         label = safe_serialized_label(func.__name__) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
-        async with _io_lock_scope(label):
-            return await func(*args, **kwargs)
+        try:
+            async with _io_lock_scope(label):
+                return await func(*args, **kwargs)
+        except asyncio.CancelledError:
+            if is_spurious_cancel():
+                schedule_connection_recovery(func.__name__)
+                raise DatabaseOperationAborted(func.__name__) from None
+            raise
+        except Exception as exc:
+            note_connection_failure(exc.__cause__ or exc, reason=func.__name__)
+            raise
     return wrapped
 
 
@@ -262,12 +370,16 @@ async def _exec(sql: str, params: tuple = (), *, strict: bool = False):
                     await _conn.commit()
                 return True
             except Exception as e:
+                note_connection_failure(e, reason="exec")
                 log.error(f"DB exec: {e}")
                 if strict:
                     raise PersistenceError("database write failed") from e
                 return False
     except asyncio.CancelledError:
         _cancelled = True
+        if is_spurious_cancel():
+            schedule_connection_recovery("driver_cancel_leak")
+            raise DatabaseOperationAborted("driver cancel without task cancel") from None
         raise
     finally:
         if _probe is not None:
@@ -285,17 +397,24 @@ async def _fetchone(sql: str, params: tuple = (), *, strict: bool = False):
             raise PersistenceError("database unavailable")
         return None
     label = safe_query_label("fetchone", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
-    async with _io_lock_scope(label):
-        try:
-            if _is_pg:
-                return await _conn.fetchrow(_pg_sql(sql), *params)
-            async with _conn.execute(sql, params) as cur:
-                return await cur.fetchone()
-        except Exception as exc:
-            log.warning("DB fetchone failed: %s", exc)
-            if strict:
-                raise PersistenceError("database read failed") from exc
-            return None
+    try:
+        async with _io_lock_scope(label):
+            try:
+                if _is_pg:
+                    return await _conn.fetchrow(_pg_sql(sql), *params)
+                async with _conn.execute(sql, params) as cur:
+                    return await cur.fetchone()
+            except Exception as exc:
+                note_connection_failure(exc, reason="fetchone")
+                log.warning("DB fetchone failed: %s", exc)
+                if strict:
+                    raise PersistenceError("database read failed") from exc
+                return None
+    except asyncio.CancelledError:
+        if is_spurious_cancel():
+            schedule_connection_recovery("driver_cancel_leak")
+            raise DatabaseOperationAborted("driver cancel without task cancel") from None
+        raise
 
 
 async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
@@ -348,12 +467,16 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
                     _row_count = len(_rows)
                 return _rows
             except Exception as exc:
+                note_connection_failure(exc, reason="fetchall")
                 log.warning("DB fetchall failed: %s", exc)
                 if strict:
                     raise PersistenceError("database read failed") from exc
                 return []
     except asyncio.CancelledError:
         _cancelled = True
+        if is_spurious_cancel():
+            schedule_connection_recovery("driver_cancel_leak")
+            raise DatabaseOperationAborted("driver cancel without task cancel") from None
         raise
     finally:
         if _probe is not None:
@@ -898,12 +1021,32 @@ async def get_expectancy_stats(days: int = None) -> dict:
 
 async def close():
     global _conn
+    if _recovery_task is not None and not _recovery_task.done():
+        _recovery_task.cancel()
     if not _conn:
         return
     try:
-        await _conn.close()
+        await asyncio.wait_for(_conn.close(), timeout=5.0)
         log.info("🗄️ Conexão com o banco encerrada")
+    except asyncio.CancelledError:
+        if not is_spurious_cancel():
+            _terminate_quietly(_conn)
+            _conn = None
+            raise
+        # A poisoned asyncpg connection can raise this from its cancel futures.
+        _terminate_quietly(_conn)
+        log.warning("Erro ao fechar banco: DatabaseOperationAborted")
     except Exception as e:
+        _terminate_quietly(_conn)
         log.warning(f"Erro ao fechar banco: {e}")
     finally:
         _conn = None
+
+
+def _terminate_quietly(conn):
+    terminate = getattr(conn, "terminate", None)
+    if callable(terminate):
+        try:
+            terminate()
+        except Exception:
+            pass

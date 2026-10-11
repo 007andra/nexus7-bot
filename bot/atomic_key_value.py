@@ -33,6 +33,7 @@ async def save_key_values_atomic(items, *, strict: bool = False) -> bool:
         return False
 
     async with db._io_lock:
+        conn = db._conn or conn  # recovery may have replaced it while waiting
         try:
             ts = db._now()
             if db._is_pg:
@@ -95,6 +96,7 @@ async def save_key_values_atomic_cas(items, *, expected, strict: bool = True) ->
         return False
 
     async with db._io_lock:
+        conn = db._conn or conn  # recovery may have replaced it while waiting
         try:
             ts = db._now()
             if db._is_pg:
