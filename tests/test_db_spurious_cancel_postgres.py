@@ -145,11 +145,17 @@ class SpuriousCancelPostgresRegression(unittest.IsolatedAsyncioTestCase):
         import asyncpg
         task = self.db._recovery_task
         if task is not None and not task.done():
-            await asyncio.wait_for(asyncio.shield(task), timeout=20)
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=20)
+            except Exception:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         for conn in {id(c): c for c in (self.conn, self.db._conn) if c is not None}.values():
             conn.terminate()
         (self.db._conn, self.db._is_pg, self.db.DATABASE_URL,
          self.db._recovery_task, self.db._recovery_last_attempt) = self._saved
+        if self.db._io_lock.locked():  # never leak a lock into the next test's loop
+            self.db._io_lock = asyncio.Lock()
         await self.proxy.close()
         admin = await asyncpg.connect(DSN)
         try:
