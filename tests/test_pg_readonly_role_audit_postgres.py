@@ -105,6 +105,12 @@ class ReadOnlyRoleAuditPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(audit.verified)
         self.assertEqual(self._failed_items(audit), [6])
 
+    async def test_unreachable_or_inconclusive_roles_fail_closed(self):
+        from scripts.pg_readonly_role_audit import Audit
+        audit = Audit()
+        audit.add(7, "role capability", False, "unverified")
+        self.assertFalse(audit.verified)
+
     async def test_output_never_contains_role_names(self):
         audit = await self._audit("member")
         text = repr(audit.rows)
