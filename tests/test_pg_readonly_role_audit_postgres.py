@@ -105,6 +105,62 @@ class ReadOnlyRoleAuditPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(audit.verified)
         self.assertEqual(self._failed_items(audit), [6])
 
+    async def test_reachable_role_database_privilege_is_detected(self):
+        import asyncpg
+        from scripts.pg_readonly_role_audit import run
+        admin = await asyncpg.connect(DSN)
+        try:
+            await admin.execute(
+                f"GRANT CREATE ON DATABASE {self.db} TO {self.roles['writer']}")
+        finally:
+            await admin.close()
+        audit = await self._audit("member")
+        self.assertFalse(audit.verified)
+        self.assertIn(7, self._failed_items(audit))
+
+    async def test_reachable_role_schema_privilege_is_detected(self):
+        import asyncpg
+        p = urlparse(DSN)
+        admin = await asyncpg.connect(
+            f"postgresql://{p.username}:{p.password or ''}@{p.hostname}:{p.port or 5432}/{self.db}")
+        try:
+            await admin.execute(
+                f"GRANT CREATE ON SCHEMA public TO {self.roles['writer']}")
+        finally:
+            await admin.close()
+        audit = await self._audit("member")
+        self.assertFalse(audit.verified)
+        self.assertIn(7, self._failed_items(audit))
+
+    async def test_reachable_role_sequence_privilege_is_detected(self):
+        import asyncpg
+        p = urlparse(DSN)
+        admin = await asyncpg.connect(
+            f"postgresql://{p.username}:{p.password or ''}@{p.hostname}:{p.port or 5432}/{self.db}")
+        try:
+            await admin.execute("CREATE SEQUENCE public.audit_seq")
+            await admin.execute(
+                f"GRANT USAGE ON SEQUENCE public.audit_seq TO {self.roles['writer']}")
+        finally:
+            await admin.close()
+        audit = await self._audit("member")
+        self.assertFalse(audit.verified)
+        self.assertIn(7, self._failed_items(audit))
+
+    async def test_reachable_role_security_definer_is_detected(self):
+        import asyncpg
+        p = urlparse(DSN)
+        admin = await asyncpg.connect(
+            f"postgresql://{p.username}:{p.password or ''}@{p.hostname}:{p.port or 5432}/{self.db}")
+        try:
+            await admin.execute(
+                f"GRANT EXECUTE ON FUNCTION public.bump(text) TO {self.roles['writer']}")
+        finally:
+            await admin.close()
+        audit = await self._audit("member")
+        self.assertFalse(audit.verified)
+        self.assertIn(7, self._failed_items(audit))
+
     async def test_unreachable_or_inconclusive_roles_fail_closed(self):
         from scripts.pg_readonly_role_audit import Audit
         audit = Audit()
