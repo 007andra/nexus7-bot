@@ -374,6 +374,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Erro ao fechar cliente: {e}")
     try:
+        from bot import oos_research_reader_v2
+        await oos_research_reader_v2.shutdown()
+    except Exception as e:
+        log.warning(f"Erro ao fechar leitor de pesquisa: {type(e).__name__}")
+    try:
         await db.close()
     except Exception as e:
         log.warning(f"Erro ao fechar banco: {e}")

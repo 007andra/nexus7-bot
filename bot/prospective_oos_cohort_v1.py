@@ -19,6 +19,10 @@ import os
 import time
 
 from bot.oos_readonly_connection_v1 import OOSReadOnlyConnection
+from bot.oos_research_reader_v2 import ResearchReader
+
+# Dedicated read-only sessions: never DDL, never the trading connection.
+_ISOLATED_READERS = (OOSReadOnlyConnection, ResearchReader)
 
 FLAG = "PROSPECTIVE_OOS_COHORT_V1"
 POPULATION = "HARD_GATE_SHADOW"
@@ -162,7 +166,7 @@ async def load_frozen_metadata_for_snapshot(db, *, use_fast_path=None):
     """
     # A dedicated OOS reader must never fall back to DDL or the trading DB.
     # Legacy callers retain their existing feature-flag behavior.
-    isolated_reader = isinstance(db, OOSReadOnlyConnection)
+    isolated_reader = isinstance(db, _ISOLATED_READERS)
     if isolated_reader:
         use_fast_path = True
     elif use_fast_path is None:
@@ -325,7 +329,7 @@ async def snapshot(db, *, timing_probe=None):
         # The label describes the selected mode, not a claim of server speed.
         timing_probe.metadata_read_mode = (
             "DEDICATED_READONLY_CONNECTION"
-            if isinstance(db, OOSReadOnlyConnection)
+            if isinstance(db, _ISOLATED_READERS)
             else "IMMUTABLE_READ_FIRST"
             if metadata_fast_path_enabled()
             else "LEGACY_DDL_GUARDED"

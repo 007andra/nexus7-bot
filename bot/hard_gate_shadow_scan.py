@@ -109,6 +109,17 @@ def _candidate_for_persistence(row):
     return stored
 
 
+def _research(db):
+    """Read-only research snapshots: dedicated reader when OOS_RESEARCH_READER_V2 is on.
+
+    Off by default (unchanged path). When on, these SELECT-only readouts never
+    touch the operational connection or ``database._io_lock``; if the reader is
+    unavailable each readout reports an ordinary ERROR instead.
+    """
+    from bot import oos_research_reader_v2
+    return oos_research_reader_v2.route(db)
+
+
 async def _maybe_emit_bbo_calibration(db):
     """Bounded research readout; never participates in trading authority."""
     global _BBO_CALIBRATION_LAST_EMIT
@@ -121,7 +132,7 @@ async def _maybe_emit_bbo_calibration(db):
     _BBO_CALIBRATION_LAST_EMIT = now
     try:
         from bot import bbo_calibration_v2
-        report = await asyncio.wait_for(bbo_calibration_v2.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(bbo_calibration_v2.snapshot(_research(db)), timeout=1.5)
         log.info("%s", bbo_calibration_v2.format_summary(report))
         return report
     except Exception as exc:
@@ -148,7 +159,7 @@ async def _maybe_emit_bbo_calibration_v3(db):
     _BBO_CALIBRATION_V3_LAST_EMIT = now
     try:
         from bot import bbo_calibration_v3
-        report = await asyncio.wait_for(bbo_calibration_v3.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(bbo_calibration_v3.snapshot(_research(db)), timeout=1.5)
         log.info("%s", bbo_calibration_v3.format_summary(report))
         log.info("%s", bbo_calibration_v3.format_group_audit(report))
         return report
@@ -176,7 +187,7 @@ async def _maybe_emit_min_order_frontier(db):
         return None
     _MIN_ORDER_FRONTIER_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(frontier.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(frontier.snapshot(_research(db)), timeout=1.5)
         log.info("%s", frontier.format_summary(report))
         return report
     except Exception as exc:
@@ -903,7 +914,7 @@ async def _mature_existing_prospective_oos_when_gate_clear(
             )
             stats["written"] += 1
 
-    report = await oos.snapshot(db)
+    report = await oos.snapshot(_research(db))
     log.warning("%s", oos.format_summary(report))
     log.info("%s", oos.format_concentration(report))
 
@@ -914,7 +925,7 @@ async def _mature_existing_prospective_oos_when_gate_clear(
     )
 
     audit = await asyncio.wait_for(
-        prospective_oos_enrollment_audit_v1.snapshot(db), timeout=3.0
+        prospective_oos_enrollment_audit_v1.snapshot(_research(db)), timeout=3.0
     )
     log.warning("%s", prospective_oos_enrollment_audit_v1.format_log(audit))
     log.warning(
@@ -923,7 +934,7 @@ async def _mature_existing_prospective_oos_when_gate_clear(
     )
 
     first = await asyncio.wait_for(
-        prospective_oos_first_approval_review_v1.snapshot(db, report),
+        prospective_oos_first_approval_review_v1.snapshot(_research(db), report),
         timeout=3.0,
     )
     log.warning(
@@ -931,7 +942,7 @@ async def _mature_existing_prospective_oos_when_gate_clear(
     )
 
     maturation = await asyncio.wait_for(
-        prospective_oos_maturation_review_v1.snapshot(db, report),
+        prospective_oos_maturation_review_v1.snapshot(_research(db), report),
         timeout=3.0,
     )
     log.warning("%s", prospective_oos_maturation_review_v1.format_log(maturation))
@@ -1007,7 +1018,7 @@ async def _maybe_emit_min_order_capital_adequacy(db):
         return None
     _MIN_ORDER_CAPITAL_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(capital.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(capital.snapshot(_research(db)), timeout=1.5)
         log.info("%s", capital.format_summary(report))
         log.info("%s", capital.format_top_setups(report))
         return report
@@ -1035,7 +1046,7 @@ async def _maybe_emit_min_order_counterfactual_nexus(db):
         return None
     _MIN_ORDER_CF_NEXUS_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(study.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(study.snapshot(_research(db)), timeout=1.5)
         log.info("%s", study.format_summary(report))
         log.info("%s", study.format_top_groups(report))
         log.info("%s", study.format_groups(report))
@@ -1068,7 +1079,7 @@ async def _maybe_emit_min_order_counterfactual_validation(db):
     _MIN_ORDER_CF_VALIDATION_LAST_EMIT = now
     try:
         report = await asyncio.wait_for(
-            validation.snapshot(db), timeout=_MIN_ORDER_CF_VALIDATION_TIMEOUT_S
+            validation.snapshot(_research(db)), timeout=_MIN_ORDER_CF_VALIDATION_TIMEOUT_S
         )
         log.info("%s", validation.format_summary(report))
         log.info("%s", validation.format_top_groups(report))
@@ -1101,7 +1112,7 @@ async def _maybe_emit_min_order_counterfactual_gate_attribution(db):
         return None
     _MIN_ORDER_CF_ATTRIBUTION_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(attribution.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(attribution.snapshot(_research(db)), timeout=1.5)
         log.info("%s", attribution.format_summary(report))
         log.info("%s", attribution.format_closest(report))
         log.info("%s", attribution.format_outcome_reasons(report))
@@ -1134,7 +1145,7 @@ async def _maybe_emit_min_order_counterfactual_threshold_sensitivity(db):
         return None
     _MIN_ORDER_CF_SENSITIVITY_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(sensitivity.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(sensitivity.snapshot(_research(db)), timeout=1.5)
         log.info("%s", sensitivity.format_summary(report))
         return report
     except Exception as exc:
@@ -1165,7 +1176,7 @@ async def _maybe_emit_min_order_counterfactual_decision_review(db):
         return None
     _MIN_ORDER_CF_REVIEW_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(review.snapshot(db), timeout=1.5)
+        report = await asyncio.wait_for(review.snapshot(_research(db)), timeout=1.5)
         log.info("%s", review.format_summary(report))
         return report
     except Exception as exc:
@@ -1199,7 +1210,7 @@ async def _maybe_emit_counterfactual_approval_failure_analysis(db):
         return None
     _APPROVAL_FAILURE_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(analysis.snapshot(db), timeout=3.0)
+        report = await asyncio.wait_for(analysis.snapshot(_research(db)), timeout=3.0)
         log.info("%s", analysis.format_summary(report))
         log.info("%s", analysis.format_feature_comparison(report))
         log.info("%s", analysis.format_concentration(report))
@@ -1239,7 +1250,7 @@ async def _maybe_emit_min_order_capital_ladder(db):
         return None
     _CAPITAL_LADDER_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(ladder.snapshot(db), timeout=3.0)
+        report = await asyncio.wait_for(ladder.snapshot(_research(db)), timeout=3.0)
         log.info("%s", ladder.format_summary(report))
         log.info("%s", ladder.format_ladder(report))
         return report
@@ -1275,7 +1286,7 @@ async def _maybe_emit_calibration_failure_analysis(db):
         return None
     _CALIBRATION_FAILURE_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(analysis.snapshot(db), timeout=3.0)
+        report = await asyncio.wait_for(analysis.snapshot(_research(db)), timeout=3.0)
         log.info("%s", analysis.format_summary(report))
         log.info("%s", analysis.format_features(report, horizon=60))
         log.info("%s", analysis.format_features(report, horizon=240))
@@ -1329,7 +1340,7 @@ async def _maybe_emit_prospective_oos_cohort(db):
     from bot import oos_readonly_connection_v1 as dedicated
     _use_dedicated = dedicated.enabled()
     try:
-        snapshot_db = await dedicated.acquire() if _use_dedicated else db
+        snapshot_db = await dedicated.acquire() if _use_dedicated else _research(db)
         report = await asyncio.wait_for(
             oos.snapshot(snapshot_db, timing_probe=_timing), timeout=3.0
         )
@@ -1383,7 +1394,7 @@ async def _maybe_emit_v4_ablation_phase_a(db):
         return None
     _V4_ABLATION_LAST_EMIT = now
     try:
-        report = await asyncio.wait_for(study.snapshot(db), timeout=3.0)
+        report = await asyncio.wait_for(study.snapshot(_research(db)), timeout=3.0)
         log.warning("%s", study.format_log(report))
         return report
     except asyncio.CancelledError:
@@ -1720,7 +1731,7 @@ async def scan(engine, *, db=None, bbo_views=None):
         try:
             from bot import short_down_bos_v2_outcome_proof as v2_proof
             v2_row = await asyncio.wait_for(
-                v2_proof.maybe_snapshot(db), timeout=5.0
+                v2_proof.maybe_snapshot(_research(db)), timeout=5.0
             )
             if v2_row is not None:
                 _emit("SHORT_DOWN_BOS_V2_OUTCOME_PROOF", {
@@ -1855,7 +1866,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                 )
                 isolated_readiness = reentry_readiness.snapshot(engine)
                 isolated_enrollment_audit = await asyncio.wait_for(
-                    prospective_oos_enrollment_audit_v1.snapshot(db),
+                    prospective_oos_enrollment_audit_v1.snapshot(_research(db)),
                     timeout=3.0,
                 )
                 log.warning(
@@ -1912,7 +1923,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                 )
                 isolated_first_approval = await asyncio.wait_for(
                     prospective_oos_first_approval_review_v1.snapshot(
-                        db,
+                        _research(db),
                         prospective_oos_report,
                     ),
                     timeout=3.0,
@@ -1925,7 +1936,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                 )
                 isolated_maturation = await asyncio.wait_for(
                     prospective_oos_maturation_review_v1.snapshot(
-                        db,
+                        _research(db),
                         prospective_oos_report,
                     ),
                     timeout=3.0,
@@ -2028,7 +2039,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                     )
                     log.warning("%s", oos_progress_board_v2.format_log(progress_board))
                     enrollment_audit = await asyncio.wait_for(
-                        prospective_oos_enrollment_audit_v1.snapshot(db),
+                        prospective_oos_enrollment_audit_v1.snapshot(_research(db)),
                         timeout=3.0,
                     )
                     log.warning(
@@ -2077,7 +2088,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                     )
                     first_approval_review = await asyncio.wait_for(
                         prospective_oos_first_approval_review_v1.snapshot(
-                            db,
+                            _research(db),
                             prospective_oos_report,
                         ),
                         timeout=3.0,
@@ -2091,7 +2102,7 @@ async def scan(engine, *, db=None, bbo_views=None):
                     try:
                         maturation_review = await asyncio.wait_for(
                             prospective_oos_maturation_review_v1.snapshot(
-                                db,
+                                _research(db),
                                 prospective_oos_report,
                             ),
                             timeout=3.0,
