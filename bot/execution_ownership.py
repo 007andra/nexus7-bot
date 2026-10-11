@@ -4,11 +4,12 @@ This authority gates only mutations that can OPEN_NEW_RISK. Risk-reducing
 reduceOnly/protection/reconciliation paths deliberately remain available.
 """
 from __future__ import annotations
-import os, uuid
+import asyncio, os, uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from bot import database as db
 from bot.critical_state import CriticalStateUnavailable
+from bot.db_cancel_safety import is_spurious_cancel
 from bot.execution_capability import ExecutionCapability, current_execution_capability
 
 _KEY = "live_execution_ownership_v1"
@@ -133,6 +134,16 @@ async def acquire_execution_ownership(owner_id: str | None=None) -> ExecutionOwn
     if conn is None or not getattr(db,"_is_pg",False) or db.configured_postgres_unavailable():
         raise ExecutionOwnershipUnavailable("PostgreSQL ownership authority unavailable")
     owner=owner_id or _OWNER_ID; now=_now()
+    try:
+        return await _acquire_locked(conn, owner, now)
+    except asyncio.CancelledError:
+        # A cancel left on the shared connection by another caller must not
+        # silently end the heartbeat; only a real task cancel propagates.
+        if is_spurious_cancel():
+            raise db.DatabaseOperationAborted("ownership acquire") from None
+        raise
+
+async def _acquire_locked(conn, owner, now) -> ExecutionOwnership:
     async with db._io_lock:
       async with conn.transaction():
         await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))",_KEY)
@@ -160,8 +171,13 @@ async def validate_execution_ownership(ownership: ExecutionOwnership) -> None:
     if conn is None or not getattr(db,"_is_pg",False) or db.configured_postgres_unavailable():
         raise ExecutionOwnershipUnavailable("ownership validation database unavailable")
     import json
-    async with db._io_lock:
-        row=await conn.fetchrow("SELECT value FROM key_value WHERE key=$1",_KEY)
+    try:
+        async with db._io_lock:
+            row=await conn.fetchrow("SELECT value FROM key_value WHERE key=$1",_KEY)
+    except asyncio.CancelledError:
+        if is_spurious_cancel():
+            raise db.DatabaseOperationAborted("ownership validate") from None
+        raise
     if not row or not row[0]: raise StaleExecutionFence("REJECTED_STALE_FENCE missing authority")
     cur=json.loads(row[0]); now=_now()
     if str(cur.get("owner_id"))!=ownership.owner_id or int(cur.get("fencing_token",-1))!=ownership.fencing_token:
@@ -271,39 +287,52 @@ async def wait_for_live_execution_ownership(
 
 async def execution_ownership_heartbeat(engine):
     """Renew the LIVE lease for the current owner; fail closed on any loss."""
-    import asyncio
     from bot.logger import log
     if current_execution_capability() is not ExecutionCapability.LIVE:
         invalidate_local_execution_ownership(engine, event="local_invalidated", reason="capability_not_live")
         return
     interval = max(1.0, _LEASE_SECONDS / 3.0)
-    while getattr(engine, "_running", False):
-        try:
-            expires_at = getattr(engine, "_execution_ownership_expires_at", None)
-            remaining = (
-                (expires_at - _now()).total_seconds()
-                if isinstance(expires_at, datetime) else None
-            )
-            _ownership_state_log(
-                engine,
-                event="heartbeat_before_renew",
-                db_lease_valid=None,
-                local_lease_valid=bool(remaining is not None and remaining > 0),
-                execution_ownership_valid=bool(getattr(engine, "_execution_ownership_valid", False)),
-                fencing_valid=None,
-                lease_remaining_seconds=remaining,
-                reason="renewal_start",
-            )
-            ownership = await acquire_execution_ownership()
-            await validate_execution_ownership(ownership)
-            client = getattr(engine, "client", None)
-            raw_client = getattr(client, "_client", client)
-            raw_client._execution_ownership = ownership
-            if client is not raw_client:
-                client._execution_ownership = ownership
-            publish_valid_execution_ownership(engine, ownership, event="heartbeat_renewed")
-            log.info("[EXECUTION_OWNERSHIP] heartbeat_renewed=true fencing_valid=true lease_seconds=%s", _LEASE_SECONDS)
-        except Exception as exc:
-            invalidate_local_execution_ownership(engine, event="heartbeat_failed", reason=type(exc).__name__)
-            log.error("[EXECUTION_OWNERSHIP] heartbeat_invalid type=%s", type(exc).__name__)
-        await asyncio.sleep(interval)
+    try:
+        while getattr(engine, "_running", False):
+            try:
+                expires_at = getattr(engine, "_execution_ownership_expires_at", None)
+                remaining = (
+                    (expires_at - _now()).total_seconds()
+                    if isinstance(expires_at, datetime) else None
+                )
+                _ownership_state_log(
+                    engine,
+                    event="heartbeat_before_renew",
+                    db_lease_valid=None,
+                    local_lease_valid=bool(remaining is not None and remaining > 0),
+                    execution_ownership_valid=bool(getattr(engine, "_execution_ownership_valid", False)),
+                    fencing_valid=None,
+                    lease_remaining_seconds=remaining,
+                    reason="renewal_start",
+                )
+                ownership = await acquire_execution_ownership()
+                await validate_execution_ownership(ownership)
+                client = getattr(engine, "client", None)
+                raw_client = getattr(client, "_client", client)
+                raw_client._execution_ownership = ownership
+                if client is not raw_client:
+                    client._execution_ownership = ownership
+                publish_valid_execution_ownership(engine, ownership, event="heartbeat_renewed")
+                log.info("[EXECUTION_OWNERSHIP] heartbeat_renewed=true fencing_valid=true lease_seconds=%s", _LEASE_SECONDS)
+            except asyncio.CancelledError:
+                if not is_spurious_cancel():
+                    raise
+                # Driver-level cancel leaked from the shared DB connection:
+                # fail closed for this renewal and keep the heartbeat alive.
+                invalidate_local_execution_ownership(engine, event="heartbeat_failed", reason="SpuriousCancelledError")
+                log.error("[EXECUTION_OWNERSHIP] heartbeat_invalid type=SpuriousCancelledError")
+            except Exception as exc:
+                invalidate_local_execution_ownership(engine, event="heartbeat_failed", reason=type(exc).__name__)
+                log.error("[EXECUTION_OWNERSHIP] heartbeat_invalid type=%s", type(exc).__name__)
+            await asyncio.sleep(interval)
+    finally:
+        # A heartbeat that stops while the engine still runs must never leave a
+        # locally valid lease behind it (it would only expire 30s later).
+        if getattr(engine, "_running", False):
+            invalidate_local_execution_ownership(engine, event="heartbeat_stopped", reason="heartbeat_exit_while_engine_running")
+            log.error("[EXECUTION_OWNERSHIP] heartbeat_stopped engine_running=true local_ownership=INVALIDATED")

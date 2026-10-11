@@ -1,10 +1,20 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from bot import conditional_stop_lifecycle as lifecycle
 from bot.native_stop_repair import set_stops
 
 
-class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
+class _IsolatedLifecycle(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # The lifecycle registry is keyed by id(client) when no engine exists;
+        # a new fixture can reuse a collected fixture's id() and inherit stale
+        # slots, making results depend on memory layout.
+        lifecycle._CACHE.clear()
+        lifecycle._LOCKS.clear()
+
+
+class NativeStopRepairTests(_IsolatedLifecycle):
     async def test_delayed_readback_does_not_resubmit(self):
         c = self.client()
         reads = 0
@@ -133,7 +143,7 @@ class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
         c._post.assert_not_called()
 
 
-class NativeStopBreakEvenTests(unittest.IsolatedAsyncioTestCase):
+class NativeStopBreakEvenTests(_IsolatedLifecycle):
     async def test_long_break_even_stop_is_allowed_when_mark_above_entry(self):
         base = NativeStopRepairTests()
         c = base.client("Buy")
@@ -149,7 +159,7 @@ class NativeStopBreakEvenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c._post.call_args.args[1]["stopPrice"], "7.4")
 
 
-class NativeStopTrailingTests(unittest.IsolatedAsyncioTestCase):
+class NativeStopTrailingTests(_IsolatedLifecycle):
     async def test_long_profitable_trailing_stop_is_allowed_below_mark(self):
         base = NativeStopRepairTests()
         c = base.client("Buy")

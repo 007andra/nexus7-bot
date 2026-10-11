@@ -71,7 +71,17 @@ class OOSPgFetchDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe.fetch_calls, 1)
 
     async def test_cancel_propagates(self):
+        # A real cancel of the calling task must still propagate unchanged.
+        task = asyncio.create_task(self.run_fetch(True, slow=True))
+        await asyncio.sleep(0.05)
+        task.cancel()
         with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_driver_cancel_without_task_cancel_is_db_error(self):
+        # asyncpg can raise CancelledError from a shared cancelled future even
+        # though nobody cancelled this task; that must not look like shutdown.
+        with self.assertRaises(database.DatabaseOperationAborted):
             await self.run_fetch(True, asyncio.CancelledError())
 
     async def test_slow_fetch_logs_redacted_client_timing(self):

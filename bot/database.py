@@ -10,6 +10,7 @@ import time
 from bot.prospective_oos_snapshot_timing_v1 import active_probe as _oos_snapshot_probe
 from bot.db_lock_owner_trace_v1 import LockHolderTracker, safe_query_label, safe_serialized_label
 from bot.oos_async_contention_observability_v1 import SlowHoldReporter, lock_hold_enabled
+from bot.db_cancel_safety import DatabaseOperationAborted as _DriverAborted, is_spurious_cancel
 from datetime import datetime, timezone, date
 from functools import wraps
 from bot.logger import log
@@ -46,12 +47,25 @@ class PersistenceError(RuntimeError):
     """Critical durable-state operation could not be confirmed."""
 
 
+class DatabaseOperationAborted(PersistenceError, _DriverAborted):
+    """Spurious driver cancel (task not cancelled): an unconfirmed DB operation.
+
+    Subclassing PersistenceError keeps every existing fail-closed durable path
+    (e.g. post-fill trade persistence) on its established error handling.
+    """
+
+
 def _serialized_io(func):
     @wraps(func)
     async def wrapped(*args, **kwargs):
         label = safe_serialized_label(func.__name__) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
-        async with _io_lock_scope(label):
-            return await func(*args, **kwargs)
+        try:
+            async with _io_lock_scope(label):
+                return await func(*args, **kwargs)
+        except asyncio.CancelledError:
+            if is_spurious_cancel():
+                raise DatabaseOperationAborted(func.__name__) from None
+            raise
     return wrapped
 
 
@@ -268,6 +282,8 @@ async def _exec(sql: str, params: tuple = (), *, strict: bool = False):
                 return False
     except asyncio.CancelledError:
         _cancelled = True
+        if is_spurious_cancel():
+            raise DatabaseOperationAborted("driver cancel without task cancel") from None
         raise
     finally:
         if _probe is not None:
@@ -285,17 +301,22 @@ async def _fetchone(sql: str, params: tuple = (), *, strict: bool = False):
             raise PersistenceError("database unavailable")
         return None
     label = safe_query_label("fetchone", sql) if _OOS_LOCK_OWNER_TRACE_ENABLED else ""
-    async with _io_lock_scope(label):
-        try:
-            if _is_pg:
-                return await _conn.fetchrow(_pg_sql(sql), *params)
-            async with _conn.execute(sql, params) as cur:
-                return await cur.fetchone()
-        except Exception as exc:
-            log.warning("DB fetchone failed: %s", exc)
-            if strict:
-                raise PersistenceError("database read failed") from exc
-            return None
+    try:
+        async with _io_lock_scope(label):
+            try:
+                if _is_pg:
+                    return await _conn.fetchrow(_pg_sql(sql), *params)
+                async with _conn.execute(sql, params) as cur:
+                    return await cur.fetchone()
+            except Exception as exc:
+                log.warning("DB fetchone failed: %s", exc)
+                if strict:
+                    raise PersistenceError("database read failed") from exc
+                return None
+    except asyncio.CancelledError:
+        if is_spurious_cancel():
+            raise DatabaseOperationAborted("driver cancel without task cancel") from None
+        raise
 
 
 async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
@@ -354,6 +375,8 @@ async def _fetchall(sql: str, params: tuple = (), *, strict: bool = False):
                 return []
     except asyncio.CancelledError:
         _cancelled = True
+        if is_spurious_cancel():
+            raise DatabaseOperationAborted("driver cancel without task cancel") from None
         raise
     finally:
         if _probe is not None:

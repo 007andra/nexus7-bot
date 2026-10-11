@@ -532,6 +532,8 @@ class TradingEngine:
                             f"retry_viable={self._viable_retry_attempt}"
                         )
 
+                    self._supervise_ownership_heartbeat()
+
                     if not self.connected:
                         await asyncio.sleep(20)   # scan a cada 20s
                         await self._connect()
@@ -687,6 +689,12 @@ class TradingEngine:
                     await asyncio.sleep(5)
 
                 except asyncio.CancelledError:
+                    if self._running and self._spurious_cancel_in_cycle():
+                        # Driver-level CancelledError (e.g. asyncpg's shared
+                        # cancel_waiter after a diagnostic timeout) while nobody
+                        # cancelled this task: a failed cycle, not a shutdown.
+                        await asyncio.sleep(5)
+                        continue
                     # Observe cancellation ownership without changing exit behavior.
                     # Child await cancellation and direct task.cancel() can both
                     # surface here; the logged category never claims initiator.
@@ -749,6 +757,51 @@ class TradingEngine:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             self._background_tasks.clear()
+
+    def _spurious_cancel_in_cycle(self) -> bool:
+        from bot.db_cancel_safety import is_spurious_cancel
+        if not is_spurious_cancel():
+            return False
+        self._spurious_cancel_count = getattr(self, "_spurious_cancel_count", 0) + 1
+        log.critical(
+            "[ENGINE_SPURIOUS_CANCEL_V1] cycle_failed=true task_cancel_requests=0 "
+            "count=%d action=CONTINUE_LOOP risk_unchanged=true "
+            "decision_effect=NONE execution_effect=NONE",
+            self._spurious_cancel_count,
+        )
+        return True
+
+    def _supervise_ownership_heartbeat(self):
+        """Restart a heartbeat that ended while the engine still runs.
+
+        Renewal re-acquires through the PostgreSQL advisory lock and fencing
+        token, so a restart can never create a second execution authority.
+        """
+        task = getattr(self, "_ownership_heartbeat_task", None)
+        if task is None or not task.done() or not self._running:
+            return
+        from bot.execution_capability import (
+            ExecutionCapability, current_execution_capability,
+        )
+        if current_execution_capability() is not ExecutionCapability.LIVE:
+            return  # non-LIVE heartbeat exits by design after invalidating
+        now = time.monotonic()
+        if now - getattr(self, "_heartbeat_restarted_at", float("-inf")) < 30.0:
+            return
+        self._heartbeat_restarted_at = now
+        from bot.execution_ownership import execution_ownership_heartbeat
+        kind = "CANCELLED" if task.cancelled() else (
+            "EXCEPTION" if task.exception() is not None else "RETURNED"
+        )
+        self._background_tasks.discard(task)
+        log.critical(
+            "[OWNERSHIP_HEARTBEAT_SUPERVISOR_V1] previous_exit=%s action=RESTART "
+            "local_ownership_valid=%s execution_effect=NONE",
+            kind, str(bool(getattr(self, "_execution_ownership_valid", False))).lower(),
+        )
+        self._ownership_heartbeat_task = self._start_background(
+            execution_ownership_heartbeat(self)
+        )
 
     def _start_background(self, coroutine):
         task = asyncio.create_task(coroutine)
