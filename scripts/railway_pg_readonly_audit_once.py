@@ -53,6 +53,7 @@ async def execute() -> int:
         return _emit("INCONCLUSIVE")
 
     conn = None
+    close_ok = True
     try:
         # The diagnostic credential is never transferred to the bot engine.
         import asyncpg
@@ -70,10 +71,13 @@ async def execute() -> int:
             try:
                 await asyncio.wait_for(conn.close(), timeout=5)
             except Exception:
-                # An unconfirmed close also fails closed; see note below.
-                conn.terminate()
+                close_ok = False
+                try:
+                    conn.terminate()
+                except Exception:
+                    pass
 
-    if not _report_complete(audit):
+    if not close_ok or not _report_complete(audit):
         return _emit("INCONCLUSIVE")
     return _emit("PASS" if audit.verified else "FAIL", audit.rows)
 
