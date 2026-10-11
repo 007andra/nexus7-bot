@@ -64,7 +64,8 @@ class FlagOnUsesDedicatedReader(_Base):
     def setUp(self):
         super().setUp()
         os.environ[dedicated.FLAG] = "true"
-        os.environ["DATABASE_URL"] = "postgresql://localhost/test"
+        os.environ["DATABASE_URL"] = "postgresql://trading@localhost/trading"
+        os.environ["OOS_DIAGNOSTIC_DATABASE_URL"] = "postgresql://nexus_oos_diagnostic@localhost/test"
 
     async def test_on_reads_through_reader_and_never_touches_shared_db(self):
         conn = _live_conn()
@@ -105,8 +106,8 @@ class FlagOnUsesDedicatedReader(_Base):
         self.assertEqual(emitted[0][1]["execution_effect"], "NONE")
         self.assertIsNone(dedicated._reader)
 
-    async def test_missing_database_url_fails_closed(self):
-        os.environ["DATABASE_URL"] = ""
+    async def test_missing_diagnostic_database_url_fails_closed(self):
+        os.environ["OOS_DIAGNOSTIC_DATABASE_URL"] = ""
         snapshot = AsyncMock()
         with patch.object(oos, "snapshot", snapshot), patch.object(scan, "_emit"):
             self.assertIsNone(await scan._maybe_emit_prospective_oos_cohort(object()))
