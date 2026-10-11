@@ -302,5 +302,243 @@ class EngineSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["spurious"])
 
 
+class ConnectionRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """Recovery is single-flight, rate-limited and ignores SQL errors."""
+
+    def setUp(self):
+        self._saved = (db._conn, db._is_pg, db.DATABASE_URL, db._recovery_task,
+                       db._recovery_last_attempt)
+        db._conn, db._is_pg = _PoisonedConn(), True
+        db.DATABASE_URL = "postgresql://unit@127.0.0.1:1/none"
+        db._recovery_task, db._recovery_last_attempt = None, float("-inf")
+
+    def tearDown(self):
+        (db._conn, db._is_pg, db.DATABASE_URL, db._recovery_task,
+         db._recovery_last_attempt) = self._saved
+
+    async def test_spurious_cancel_schedules_single_flight_recovery(self):
+        started = asyncio.Event()
+
+        async def fake_recover(reason):
+            started.set()
+            await asyncio.sleep(3600)
+
+        with patch.object(db, "_recover_connection", fake_recover):
+            with self.assertRaises(db.DatabaseOperationAborted):
+                await db._fetchall("SELECT 1")
+            first = db._recovery_task
+            self.assertIsNotNone(first)
+            with self.assertRaises(db.DatabaseOperationAborted):
+                await db._fetchone("SELECT 1")
+            self.assertIs(db._recovery_task, first)  # no duplicate reconnect
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+
+    async def test_recovery_is_rate_limited(self):
+        calls = []
+
+        async def fake_recover(reason):
+            calls.append(reason)
+
+        with patch.object(db, "_recover_connection", fake_recover):
+            t1 = db.schedule_connection_recovery("a")
+            await t1
+            self.assertIsNone(db.schedule_connection_recovery("b"))
+        self.assertEqual(calls, ["a"])
+
+    async def test_sql_errors_do_not_trigger_recovery(self):
+        class UndefinedTableError(Exception):
+            pass
+
+        class _Conn:
+            def is_closed(self):
+                return False
+
+        db._conn = _Conn()
+        with patch.object(db, "schedule_connection_recovery") as sched:
+            db.note_connection_failure(UndefinedTableError("x"), reason="t")
+            db.note_connection_failure(TimeoutError(), reason="t")
+            sched.assert_not_called()
+            db.note_connection_failure(ConnectionResetError("x"), reason="t")
+            sched.assert_called_once()
+
+    async def test_closed_connection_triggers_recovery(self):
+        class _Closed:
+            def is_closed(self):
+                return True
+
+        db._conn = _Closed()
+        with patch.object(db, "schedule_connection_recovery") as sched:
+            db.note_connection_failure(RuntimeError("generic"), reason="t")
+        sched.assert_called_once()
+
+    async def test_failed_reconnect_keeps_old_connection_and_reports(self):
+        old = db._conn
+
+        async def boom(*a, **k):
+            raise OSError("unreachable")
+
+        import asyncpg
+        with patch.object(asyncpg, "connect", boom):
+            self.assertFalse(await db._recover_connection("t"))
+        self.assertIs(db._conn, old)
+        self.assertFalse(db._io_lock.locked())
+
+    async def test_successful_reconnect_swaps_and_terminates_old(self):
+        terminated = []
+
+        class _Old:
+            def terminate(self):
+                terminated.append(True)
+
+        class _New:
+            pass
+
+        db._conn = _Old()
+        new = _New()
+
+        async def ok(*a, **k):
+            return new
+
+        import asyncpg
+        with patch.object(asyncpg, "connect", ok):
+            self.assertTrue(await db._recover_connection("t"))
+        self.assertIs(db._conn, new)
+        self.assertEqual(terminated, [True])
+
+    async def test_close_on_poisoned_connection_terminates_instead_of_raising(self):
+        terminated = []
+
+        class _Poisoned:
+            async def close(self):
+                await _poisoned_future()
+
+            def terminate(self):
+                terminated.append(True)
+
+        db._conn = _Poisoned()
+        await db.close()
+        self.assertIsNone(db._conn)
+        self.assertEqual(terminated, [True])
+
+
+class FencedDispatchTests(unittest.IsolatedAsyncioTestCase):
+    """No exposure-increasing POST may leave when ownership cannot be proven."""
+
+    def setUp(self):
+        self._saved = (db._conn, db._is_pg)
+        db._conn, db._is_pg = _PoisonedConn(), True
+        patcher = patch.object(
+            eo, "current_execution_capability", return_value=ExecutionCapability.LIVE
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        db._conn, db._is_pg = self._saved
+
+    def _client(self):
+        from unittest.mock import AsyncMock
+        from bot.binance import BinanceClient
+        client = BinanceClient.__new__(BinanceClient)
+        client._execution_ownership = eo.ExecutionOwnership(
+            "o", 7, "s", "a", "h", "2099-01-01T00:00:00+00:00")
+        client.entries_paused = False
+        client._request = AsyncMock(return_value={"orderId": 1})
+        client._recover_ambiguous_order = AsyncMock(return_value=None)
+        return client
+
+    async def test_new_risk_order_blocked_when_ownership_db_poisoned(self):
+        client = self._client()
+        body = {"symbol": "BTCUSDT", "side": "BUY", "type": "MARKET",
+                "quantity": "0.001", "newClientOrderId": "bgx-test-1"}
+        with self.assertRaises(db.DatabaseOperationAborted):
+            await client._post("/fapi/v1/order", body)
+        client._request.assert_not_awaited()
+        client._recover_ambiguous_order.assert_not_awaited()
+
+    async def test_reduce_only_order_is_not_gated_by_ownership_db(self):
+        client = self._client()
+        body = {"symbol": "BTCUSDT", "side": "SELL", "type": "MARKET",
+                "quantity": "0.001", "reduceOnly": "true",
+                "newClientOrderId": "bgx-test-2"}
+        await client._post("/fapi/v1/order", body)
+        client._request.assert_awaited_once()
+
+    async def test_expired_fence_blocks_new_risk_order(self):
+        import json
+
+        class _ExpiredLease:
+            async def fetchrow(self, *a, **k):
+                return (json.dumps({"owner_id": "o", "fencing_token": 7,
+                                    "expires_at": "2000-01-01T00:00:00+00:00"}),)
+
+        db._conn = _ExpiredLease()
+        with patch.object(db, "configured_postgres_unavailable", return_value=False):
+            client = self._client()
+            with self.assertRaises(eo.StaleExecutionFence):
+                await client._post("/fapi/v1/order", {
+                    "symbol": "BTCUSDT", "side": "BUY", "type": "MARKET",
+                    "quantity": "0.001", "newClientOrderId": "bgx-test-3"})
+        client._request.assert_not_awaited()
+
+    async def test_superseded_token_blocks_new_risk_order(self):
+        import json
+
+        class _OtherOwner:
+            async def fetchrow(self, *a, **k):
+                return (json.dumps({"owner_id": "other", "fencing_token": 8,
+                                    "expires_at": "2099-01-01T00:00:00+00:00"}),)
+
+        db._conn = _OtherOwner()
+        with patch.object(db, "configured_postgres_unavailable", return_value=False):
+            client = self._client()
+            with self.assertRaises(eo.StaleExecutionFence):
+                await client._post("/fapi/v1/order", {
+                    "symbol": "BTCUSDT", "side": "BUY", "type": "MARKET",
+                    "quantity": "0.001", "newClientOrderId": "bgx-test-4"})
+        client._request.assert_not_awaited()
+
+
+class ReadinessTruthTests(unittest.IsolatedAsyncioTestCase):
+    async def _returned_task(self):
+        task = asyncio.create_task(asyncio.sleep(0))
+        await task
+        return task
+
+    async def test_unrequested_clean_return_is_unhealthy(self):
+        from bot.service_readiness import engine_task_healthy, engine_task_state
+        task = await self._returned_task()
+        self.assertFalse(engine_task_healthy(task, running=False, stop_requested=False))
+        self.assertEqual(engine_task_state(task, stop_requested=False), "EXITED_UNEXPECTEDLY")
+
+    async def test_requested_stop_is_healthy(self):
+        from bot.service_readiness import engine_task_healthy, engine_task_state
+        task = await self._returned_task()
+        self.assertTrue(engine_task_healthy(task, running=False, stop_requested=True))
+        self.assertEqual(engine_task_state(task, stop_requested=True), "STOPPED_ON_REQUEST")
+
+    async def test_running_task_is_healthy(self):
+        from bot.service_readiness import engine_task_healthy, engine_task_state
+        task = asyncio.create_task(asyncio.sleep(3600))
+        try:
+            self.assertTrue(engine_task_healthy(task, running=True, stop_requested=False))
+            self.assertEqual(engine_task_state(task, stop_requested=False), "RUNNING")
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_engine_stop_sets_stop_requested(self):
+        from bot.engine import TradingEngine
+        fake = SimpleNamespace(
+            active=True, _running=True,
+            client=SimpleNamespace(entries_paused=False),
+        )
+        fake.pause_entries = lambda: TradingEngine.pause_entries(fake)
+        TradingEngine.stop(fake)
+        self.assertTrue(fake._stop_requested)
+        self.assertFalse(fake._running)
+
+
 if __name__ == "__main__":
     unittest.main()

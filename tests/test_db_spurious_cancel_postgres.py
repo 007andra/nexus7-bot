@@ -101,6 +101,11 @@ class SpuriousCancelPostgresRegression(unittest.IsolatedAsyncioTestCase):
                 "SELECT 'T'::text AS epoch_id, '{\"started_epoch\": 0}'::text AS payload "
                 "FROM pg_sleep(20)"
             )
+            # Finishes on its own before the delayed CancelRequest arrives: the
+            # shape that leaves asyncpg's cancel_sent_waiter cancelled forever.
+            await admin.execute(
+                f"CREATE VIEW {self.schema}.slow_short AS SELECT 1 AS v FROM pg_sleep(1.7)"
+            )
         finally:
             await admin.close()
 
@@ -111,8 +116,16 @@ class SpuriousCancelPostgresRegression(unittest.IsolatedAsyncioTestCase):
             password=parsed.password, database=(parsed.path or "/").lstrip("/"),
             ssl=False, server_settings={"search_path": self.schema},
         )
-        self._saved = (db._conn, db._is_pg)
+        self._saved = (db._conn, db._is_pg, db.DATABASE_URL,
+                       db._recovery_task, db._recovery_last_attempt)
         db._conn, db._is_pg = self.conn, True
+        user = parsed.username or ""
+        auth = f"{user}:{parsed.password}@" if parsed.password else f"{user}@"
+        db.DATABASE_URL = (
+            f"postgresql://{auth}127.0.0.1:{proxy_port}/{(parsed.path or '/').lstrip('/')}"
+            f"?sslmode=disable&search_path={self.schema}"
+        )
+        db._recovery_task, db._recovery_last_attempt = None, float("-inf")
         env = patch.dict(os.environ, {
             "RISK_EPOCH_SHADOW_ID": "T",
             "MIN_ORDER_FRONTIER_AUDIT_V1": "true",
@@ -130,11 +143,13 @@ class SpuriousCancelPostgresRegression(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         import asyncpg
-        self.db._conn, self.db._is_pg = self._saved
-        try:
-            await asyncio.wait_for(self.conn.close(), timeout=CANCEL_DELAY_S + 25)
-        except Exception:
-            self.conn.terminate()
+        task = self.db._recovery_task
+        if task is not None and not task.done():
+            await asyncio.wait_for(asyncio.shield(task), timeout=20)
+        for conn in {id(c): c for c in (self.conn, self.db._conn) if c is not None}.values():
+            conn.terminate()
+        (self.db._conn, self.db._is_pg, self.db.DATABASE_URL,
+         self.db._recovery_task, self.db._recovery_last_attempt) = self._saved
         await self.proxy.close()
         admin = await asyncpg.connect(DSN)
         try:
@@ -190,6 +205,30 @@ class SpuriousCancelPostgresRegression(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Exception) as ctx:
                 await eo.validate_execution_ownership(owner)
         self.assertIsInstance(ctx.exception, db.DatabaseOperationAborted)
+
+    async def test_permanently_poisoned_connection_is_replaced(self):
+        """cancel_sent_waiter cancelled -> every query fails forever without recovery."""
+        db = self.db
+        old = db._conn
+        try:
+            await asyncio.wait_for(db._fetchall("SELECT v FROM slow_short"), 1.5)
+        except asyncio.TimeoutError:
+            pass
+        try:  # waits on the in-flight CancelRequest and is cancelled there
+            await asyncio.wait_for(db._fetchone("SELECT 1"), 1.5)
+        except asyncio.TimeoutError:
+            pass
+        await asyncio.sleep(CANCEL_DELAY_S + 1)  # cancel and query long finished
+        with self.assertRaises(db.DatabaseOperationAborted):
+            await db._fetchone("SELECT 1")  # still poisoned: proves the hazard
+        recovery = db._recovery_task
+        self.assertIsNotNone(recovery)
+        self.assertTrue(await asyncio.wait_for(recovery, timeout=20))
+        self.assertIsNot(db._conn, old)
+        self.assertTrue(old.is_closed())
+        row = await db._fetchone("SELECT 41 + 1")
+        self.assertEqual(row[0], 42)
+        self.assertFalse(db._io_lock.locked())
 
 
 if __name__ == "__main__":

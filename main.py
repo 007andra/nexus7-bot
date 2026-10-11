@@ -407,8 +407,16 @@ async def health():
         blocked=bool(getattr(app.state, "blocked", False)),
         mode_reason=TRADING_MODE_REASON,
     )
+    # HTTP stays 200 (process liveness contract, no restart loop), but a dead
+    # engine is reported instead of hidden behind "ok".
+    from bot.service_readiness import engine_task_state
+    engine_task = engine_task_state(
+        getattr(app.state, "engine_task", None),
+        stop_requested=bool(getattr(eng, "_stop_requested", False)),
+    )
     return {
-        "status":   "ok",
+        "status":   "degraded" if engine_task in ("FAILED", "CANCELLED", "EXITED_UNEXPECTEDLY") else "ok",
+        "engine_task": engine_task,
         "version":  "12.2.0",
         "exchange": EXCHANGE_NAME,
         "ready":    runtime["ready"],

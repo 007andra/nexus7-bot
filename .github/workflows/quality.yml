@@ -123,6 +123,7 @@ jobs:
         run: |
           python -m unittest -v tests.test_engine_cancel_origin_observer_v1
           python -m unittest -v tests.test_db_spurious_cancel_safety
+          python -m unittest -v tests.test_engine_run_spurious_cancel_loop
 
       - name: Final pre-release proof pack
         run: python -m bot.release_proof

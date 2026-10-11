@@ -135,16 +135,21 @@ async def acquire_execution_ownership(owner_id: str | None=None) -> ExecutionOwn
         raise ExecutionOwnershipUnavailable("PostgreSQL ownership authority unavailable")
     owner=owner_id or _OWNER_ID; now=_now()
     try:
-        return await _acquire_locked(conn, owner, now)
+        return await _acquire_locked(owner, now)
     except asyncio.CancelledError:
         # A cancel left on the shared connection by another caller must not
         # silently end the heartbeat; only a real task cancel propagates.
         if is_spurious_cancel():
+            db.schedule_connection_recovery("ownership_acquire")
             raise db.DatabaseOperationAborted("ownership acquire") from None
         raise
 
-async def _acquire_locked(conn, owner, now) -> ExecutionOwnership:
+async def _acquire_locked(owner, now) -> ExecutionOwnership:
     async with db._io_lock:
+      # Read under the lock: connection recovery may have replaced it.
+      conn=db._conn
+      if conn is None:
+          raise ExecutionOwnershipUnavailable("PostgreSQL ownership authority unavailable")
       async with conn.transaction():
         await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))",_KEY)
         row=await conn.fetchrow("SELECT value FROM key_value WHERE key=$1 FOR UPDATE",_KEY)
@@ -173,9 +178,13 @@ async def validate_execution_ownership(ownership: ExecutionOwnership) -> None:
     import json
     try:
         async with db._io_lock:
+            conn=db._conn
+            if conn is None:
+                raise ExecutionOwnershipUnavailable("ownership validation database unavailable")
             row=await conn.fetchrow("SELECT value FROM key_value WHERE key=$1",_KEY)
     except asyncio.CancelledError:
         if is_spurious_cancel():
+            db.schedule_connection_recovery("ownership_validate")
             raise db.DatabaseOperationAborted("ownership validate") from None
         raise
     if not row or not row[0]: raise StaleExecutionFence("REJECTED_STALE_FENCE missing authority")
@@ -326,7 +335,9 @@ async def execution_ownership_heartbeat(engine):
                 # fail closed for this renewal and keep the heartbeat alive.
                 invalidate_local_execution_ownership(engine, event="heartbeat_failed", reason="SpuriousCancelledError")
                 log.error("[EXECUTION_OWNERSHIP] heartbeat_invalid type=SpuriousCancelledError")
+                db.schedule_connection_recovery("heartbeat")
             except Exception as exc:
+                db.note_connection_failure(exc, reason="heartbeat")
                 invalidate_local_execution_ownership(engine, event="heartbeat_failed", reason=type(exc).__name__)
                 log.error("[EXECUTION_OWNERSHIP] heartbeat_invalid type=%s", type(exc).__name__)
             await asyncio.sleep(interval)

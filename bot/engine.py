@@ -479,6 +479,7 @@ class TradingEngine:
         if self._running:
             return
         self._running = True
+        self._stop_requested = False
         self._background_tasks = set()
         # Diagnostic-only marker; does not change cancellation semantics.
         self._liveness_cancelled_in_main_loop = False
@@ -763,12 +764,17 @@ class TradingEngine:
         if not is_spurious_cancel():
             return False
         self._spurious_cancel_count = getattr(self, "_spurious_cancel_count", 0) + 1
-        log.critical(
-            "[ENGINE_SPURIOUS_CANCEL_V1] cycle_failed=true task_cancel_requests=0 "
-            "count=%d action=CONTINUE_LOOP risk_unchanged=true "
-            "decision_effect=NONE execution_effect=NONE",
-            self._spurious_cancel_count,
-        )
+        count = self._spurious_cancel_count
+        if count == 1 or count % 20 == 0:  # bounded log volume on a sticky fault
+            log.critical(
+                "[ENGINE_SPURIOUS_CANCEL_V1] cycle_failed=true task_cancel_requests=0 "
+                "count=%d action=CONTINUE_LOOP db_recovery=SCHEDULED risk_unchanged=true "
+                "decision_effect=NONE execution_effect=NONE",
+                count,
+            )
+        # Any direct db._conn user may have surfaced the leak; recover the
+        # shared connection (single-flight and rate-limited in database.py).
+        db.schedule_connection_recovery("engine_cycle")
         return True
 
     def _supervise_ownership_heartbeat(self):
@@ -819,6 +825,8 @@ class TradingEngine:
         log.info('[ENTRY_PAUSE] paused=false risk_gates=UNCHANGED')
 
     def stop(self):
+        # Lets readiness tell a requested stop from an unexpected engine exit.
+        self._stop_requested = True
         self.pause_entries()
         self.active   = False
         self._running = False   # FIX: permite que run() seja recriado no resume
