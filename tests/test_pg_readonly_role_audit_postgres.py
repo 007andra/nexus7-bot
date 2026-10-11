@@ -184,6 +184,28 @@ class ReadOnlyRoleAuditPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(role_checks)
         self.assertIn("inherited", role_checks[0]["evidence"])
 
+    async def test_membership_without_inherit_or_set_is_not_a_write_path(self):
+        import asyncpg
+        p = urlparse(DSN)
+        admin = await asyncpg.connect(
+            f"postgresql://{p.username}:{p.password or ''}@{p.hostname}:{p.port or 5432}/{self.db}")
+        blocked = f"blocked_{self.sfx}"
+        try:
+            version = int(await admin.fetchval("SHOW server_version_num"))
+            if version < 160000:
+                self.skipTest("SET FALSE membership requires PostgreSQL 16+")
+            await admin.execute(f"CREATE ROLE {blocked} NOLOGIN")
+            await admin.execute(
+                f"GRANT INSERT ON public.key_value TO {blocked}")
+            await admin.execute(
+                f"GRANT {blocked} TO {self.roles['ro']} WITH INHERIT FALSE, SET FALSE")
+            audit = await self._audit("ro")
+            self.assertTrue(audit.verified, audit.rows)
+        finally:
+            await admin.execute(f"REVOKE {blocked} FROM {self.roles['ro']}")
+            await admin.execute(f"DROP ROLE {blocked}")
+            await admin.close()
+
     async def test_unreachable_or_inconclusive_roles_fail_closed(self):
         from scripts.pg_readonly_role_audit import Audit
         audit = Audit()
