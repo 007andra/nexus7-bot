@@ -177,6 +177,8 @@ async def run(conn) -> Audit:
     # PostgreSQL role membership can allow SET ROLE even with NOINHERIT.
     for r in roles:
         label = r["role"] if r["role"].startswith("pg_") else mask(r["role"])
+        if not (r["inherited"] or r["can_set"]):
+            continue
         if (r["rolsuper"] or r["rolcreatedb"] or r["rolcreaterole"] or r["rolreplication"]
                 or r["rolbypassrls"] or r["role"] in DANGEROUS_PREDEFINED):
             dangerous.append(label)
@@ -210,7 +212,8 @@ async def run(conn) -> Audit:
             role)
         hits = [key for key, value in dict(checks).items() if value]
         if hits:
-            write_via.append(f"{label}:{','.join(hits)}")
+            access = "inherited" if r["inherited"] else "set_role"
+            write_via.append(f"{label}[{access}]:{','.join(hits)}")
     a.add(7, "roles assumíveis/herdadas", not dangerous and not write_via,
           f"memberships={len(roles)} perigosas={dangerous or 'nenhuma'} "
           f"escrita_via_role={write_via or 'nenhuma'} (modo {member_mode})")
