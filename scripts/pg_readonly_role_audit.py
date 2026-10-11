@@ -173,19 +173,44 @@ async def run(conn) -> Audit:
         "FROM pg_roles r WHERE r.rolname <> current_user "
         "AND pg_has_role(current_user, r.oid, 'MEMBER')")
     dangerous, write_via = [], []
+    # Fail closed for any reachable role with an unreviewed capability.
+    # PostgreSQL role membership can allow SET ROLE even with NOINHERIT.
     for r in roles:
+        label = r["role"] if r["role"].startswith("pg_") else mask(r["role"])
         if (r["rolsuper"] or r["rolcreatedb"] or r["rolcreaterole"] or r["rolreplication"]
                 or r["rolbypassrls"] or r["role"] in DANGEROUS_PREDEFINED):
-            dangerous.append(mask(r["role"]) if not r["role"].startswith("pg_") else r["role"])
-        hits = await q1(
-            "SELECT count(*) FILTER (WHERE "
-            + " OR ".join(f"has_table_privilege($1::name, c.oid, '{p}')" for p in TABLE_PRIVS)
-            + ") AS w FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-            f"WHERE c.relkind IN ('r','p','v','m','f') AND {SYSTEM_SCHEMA_FILTER}",
-            r["role"])
-        if hits["w"]:
-            label = r["role"] if r["role"].startswith("pg_") else mask(r["role"])
-            write_via.append(f"{label}:{hits['w']}")
+            dangerous.append(label)
+        role = r["role"]
+        checks = await q1(
+            "SELECT has_database_privilege($1::name, current_database(), 'CREATE') AS db_create, "
+            "has_database_privilege($1::name, current_database(), 'TEMP') AS db_temp, "
+            "EXISTS (SELECT 1 FROM pg_namespace n WHERE "
+            + SYSTEM_SCHEMA_FILTER
+            + " AND (has_schema_privilege($1::name,n.oid,'CREATE') "
+            "OR n.nspowner=(SELECT oid FROM pg_roles WHERE rolname=$1::name))) AS schema_write, "
+            "EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE c.relkind IN ('r','p','v','m','f') AND "
+            + SYSTEM_SCHEMA_FILTER
+            + " AND ("
+            + " OR ".join(f"has_table_privilege($1::name,c.oid,'{p}')" for p in TABLE_PRIVS)
+            + " OR has_any_column_privilege($1::name,c.oid,'INSERT') "
+            "OR has_any_column_privilege($1::name,c.oid,'UPDATE') "
+            "OR c.relowner=(SELECT oid FROM pg_roles WHERE rolname=$1::name))) AS table_write, "
+            "EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE c.relkind='S' AND "
+            + SYSTEM_SCHEMA_FILTER
+            + " AND (has_sequence_privilege($1::name,c.oid,'USAGE') "
+            "OR has_sequence_privilege($1::name,c.oid,'UPDATE') "
+            "OR c.relowner=(SELECT oid FROM pg_roles WHERE rolname=$1::name))) AS sequence_write, "
+            "EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "WHERE "
+            + SYSTEM_SCHEMA_FILTER
+            + " AND ((p.prosecdef AND has_function_privilege($1::name,p.oid,'EXECUTE')) "
+            "OR p.proowner=(SELECT oid FROM pg_roles WHERE rolname=$1::name))) AS routine_write",
+            role)
+        hits = [key for key, value in dict(checks).items() if value]
+        if hits:
+            write_via.append(f"{label}:{','.join(hits)}")
     a.add(7, "roles assumíveis/herdadas", not dangerous and not write_via,
           f"memberships={len(roles)} perigosas={dangerous or 'nenhuma'} "
           f"escrita_via_role={write_via or 'nenhuma'} (modo {member_mode})")
