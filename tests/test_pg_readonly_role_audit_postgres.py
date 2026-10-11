@@ -203,6 +203,7 @@ class ReadOnlyRoleAuditPostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(audit.verified, audit.rows)
         finally:
             await admin.execute(f"REVOKE {blocked} FROM {self.roles['ro']}")
+            await admin.execute(f"REVOKE INSERT ON public.key_value FROM {blocked}")
             await admin.execute(f"DROP ROLE {blocked}")
             await admin.close()
 
