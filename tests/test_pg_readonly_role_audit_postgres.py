@@ -161,6 +161,29 @@ class ReadOnlyRoleAuditPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(audit.verified)
         self.assertIn(7, self._failed_items(audit))
 
+    async def test_set_role_path_is_classified(self):
+        audit = await self._audit("member")
+        self.assertFalse(audit.verified)
+        role_checks = [r for r in audit.rows if r["item"] == 7]
+        self.assertTrue(role_checks)
+        self.assertIn("set_role", role_checks[0]["evidence"])
+
+    async def test_inherited_role_path_is_classified(self):
+        import asyncpg
+        p = urlparse(DSN)
+        admin = await asyncpg.connect(
+            f"postgresql://{p.username}:{p.password or ''}@{p.hostname}:{p.port or 5432}/{self.db}")
+        try:
+            await admin.execute(
+                f"GRANT {self.roles['writer']} TO {self.roles['ro']}")
+        finally:
+            await admin.close()
+        audit = await self._audit("ro")
+        self.assertFalse(audit.verified)
+        role_checks = [r for r in audit.rows if r["item"] == 7]
+        self.assertTrue(role_checks)
+        self.assertIn("inherited", role_checks[0]["evidence"])
+
     async def test_unreachable_or_inconclusive_roles_fail_closed(self):
         from scripts.pg_readonly_role_audit import Audit
         audit = Audit()
