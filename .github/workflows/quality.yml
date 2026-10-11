@@ -118,7 +118,8 @@ jobs:
             tests.test_cash_flow_cas_postgres \
             tests.test_risk_epoch_postgres \
             tests.test_db_spurious_cancel_postgres \
-            tests.test_oos_research_reader_v2_postgres
+            tests.test_oos_research_reader_v2_postgres \
+            tests.test_pg_readonly_role_audit_postgres
 
       - name: Engine cancellation origin classifier (no risk or order effects)
         run: |
