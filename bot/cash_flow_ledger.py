@@ -641,6 +641,103 @@ async def _reload_peak_if_ledger_changed(risk, doc: dict, equity: float, strict:
     setattr(risk, _APPLIED_IDS_ATTR, ids)
 
 
+async def capture_zero_equity_pending(client, risk, *, strict: bool = True) -> dict:
+    """Capture recently observed Binance transfers at zero equity, never rebase.
+
+    Only updates the PENDING evidence ledger with a compare-and-swap. It
+    cannot mark transfers applied, advance their seen cursor, promote HWM or
+    authorize an order. An unreconstructable zero-equity flow remains pending
+    for separate independent attestation.
+    """
+    from bot.binance_accounting_evidence import collect_income
+
+    now_ms = _server_now_ms(client)
+    window_start = now_ms - DETECTION_WINDOW_MS
+    try:
+        rows = await collect_income(client, window_start, now_ms)
+        account = await client.get_account_state()
+        end2 = max(now_ms + 1, _server_now_ms(client))
+        rows_again = await collect_income(client, window_start, end2)
+        account_again = await client.get_account_state()
+    except Exception as exc:
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_EVIDENCE_UNAVAILABLE") from exc
+    if rows != rows_again or account != account_again:
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_EVIDENCE_UNSTABLE")
+    if not isinstance(account, dict):
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_ACCOUNT_UNVERIFIED")
+    flat, _ = _account_flat(account)
+    if not flat or _finite(account.get("equity"), "equity") != 0.0:
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_ACCOUNT_UNVERIFIED")
+
+    cursor_raw = await db.load_key_value(SEEN_CURSOR_KEY, strict=strict)
+    ledger_raw = await db.load_key_value(LEDGER_KEY, strict=strict)
+    if cursor_raw is None or ledger_raw is None:
+        # Do not bootstrap a new cursor after capital has been removed:
+        # doing so could mark a missing outflow as already seen.
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_LEDGER_NOT_BOOTSTRAPPED")
+    seen = set(_parse_cursor(cursor_raw))
+    doc = _parse_ledger(ledger_raw)
+    known = seen | {str(p["identity"]) for p in doc["pending"]} | applied_identities(doc)
+    new_flows = []
+    for row in rows:
+        if classify_income_type(row.get("incomeType")) != "EXTERNAL_FLOW":
+            continue
+        flow = _normalize_flow(row, now_ms)
+        if flow["asset"] != "USDT":
+            raise CashFlowBlocked("BINANCE_ZERO_EQUITY_NON_USDT_FLOW")
+        if flow["identity"] not in known:
+            new_flows.append(flow)
+            known.add(flow["identity"])
+    if new_flows:
+        updated = {**doc, "pending": list(doc["pending"]) + new_flows}
+        ok = await save_key_values_atomic_cas(
+            [(LEDGER_KEY, _dump(updated))],
+            expected={LEDGER_KEY: ledger_raw}, strict=strict,
+        )
+        if strict and not ok:
+            raise db.PersistenceError("zero-equity pending cash-flow write not confirmed")
+    log.warning(
+        "[CASH_FLOW_ZERO_EQUITY] captured_pending=%d "
+        "hwm_changed=false seen_cursor_changed=false applied=false "
+        "execution_effect=BLOCK_NEW_ENTRIES",
+        len(new_flows),
+    )
+    return {"captured_pending": len(new_flows), "blocked": True,
+            "hwm_changed": False, "applied": 0}
+
+
+ZERO_EQUITY_CAPTURE_INTERVAL_S = 300.0
+_ZERO_CAPTURE_ATTR = "_pilot_last_zero_cashflow_capture"
+
+
+async def capture_zero_equity_pending_throttled(engine, log_) -> dict | None:
+    """Zero-equity balance-refresh hook shared by every LIVE runtime path.
+
+    At most one double-read every ``ZERO_EQUITY_CAPTURE_INTERVAL_S`` (the
+    /fapi/v1/income weight is 30 per read). Any failure is logged and
+    swallowed: the caller already blocks new entries at zero equity, so an
+    evidence outage can only lose telemetry, never open risk.
+    """
+    from bot import capital_flow_reconciliation as capital_flows
+
+    if not capital_flows._is_binance_client(engine.client):
+        return None
+    now = time.time()
+    last = float(getattr(engine, _ZERO_CAPTURE_ATTR, 0.0) or 0.0)
+    if now - last < ZERO_EQUITY_CAPTURE_INTERVAL_S:
+        return None
+    setattr(engine, _ZERO_CAPTURE_ATTR, now)
+    try:
+        return await capture_zero_equity_pending(engine.client, engine.risk, strict=True)
+    except Exception as exc:
+        log_.critical(
+            "[CASH_FLOW_ZERO_EQUITY] status=UNCONFIRMED reason=%s hwm_changed=false "
+            "execution_effect=BLOCK_NEW_ENTRIES",
+            type(exc).__name__,
+        )
+        return None
+
+
 async def reconcile_binance(client, risk, current_equity: float, *, strict: bool = True) -> dict:
     from bot.binance_accounting_evidence import collect_income
 
@@ -819,6 +916,39 @@ async def reconcile_binance(client, risk, current_equity: float, *, strict: bool
 
 # ─── operator attestation (one-shot, idempotent, auditable) ───────────────────
 
+def ledger_provable_pre_flow_equity(
+    flows: list[dict],
+    rows: list[dict],
+    account: dict | None,
+    *,
+    rows_cover_until_ms: int | None,
+    now_ms: int,
+) -> float | None:
+    """Pre-flow equity the exchange ledger proves for an attested batch, or None.
+
+    Provable only when the account is flat now, the income rows cover up to
+    ``now_ms`` and every row at or after the first attested flow is one of the
+    attested flows: then the wallet moved only by those flows, so
+    ``E- = wallet_now - net``. Pure function; no I/O.
+    """
+    if account is None or rows_cover_until_ms is None or int(rows_cover_until_ms) < int(now_ms):
+        return None
+    flat, _ = _account_flat(account)
+    if not flat:
+        return None
+    ids = {str(f["identity"]) for f in flows}
+    first_t = min(int(f["time_ms"]) for f in flows)
+    for row in rows:
+        if int(row.get("time", 0) or 0) < first_t:
+            continue
+        if classify_income_type(row.get("incomeType")) != "EXTERNAL_FLOW":
+            return None
+        if flow_identity(row) not in ids:
+            return None
+    wallet = _finite(account.get("walletBalance"), "walletBalance")
+    return wallet - math.fsum(float(f["amount"]) for f in flows)
+
+
 async def attest_flows(
     *,
     rows: list[dict],
@@ -831,13 +961,18 @@ async def attest_flows(
     apply: bool,
     now_ms: int,
     strict: bool = True,
+    account: dict | None = None,
+    rows_cover_until_ms: int | None = None,
 ) -> dict:
     """Record an operator-attested external flow reconciliation.
 
     Amount, direction and timestamps always come from the exchange ledger rows
-    identified by ``tran_ids``; the operator supplies only the pre-flow equity
-    (with an evidence reference) that the ledger alone cannot prove. The same
-    ``reconciliation_id`` is idempotent; a flow can never be applied twice.
+    identified by ``tran_ids``. Dry-run may simulate the operator's
+    proposed pre-flow equity, but APPLY requires a provable, authenticated
+    flat-account/complete-ledger snapshot. If a value cannot be proven,
+    FAIL CLOSED and require an independently reviewed risk-epoch procedure,
+    never quietly accept the typed value. The same ``reconciliation_id``
+    is idempotent; a flow can never be applied twice.
     """
     reconciliation_id = str(reconciliation_id or "").strip()
     if not reconciliation_id or len(reconciliation_id) > 64:
@@ -899,6 +1034,40 @@ async def attest_flows(
     post = pre + net
     if post <= 0:
         raise ValueError("post-flow equity must be positive")
+    provable = ledger_provable_pre_flow_equity(
+        flows, rows, account, rows_cover_until_ms=rows_cover_until_ms, now_ms=now_ms,
+    )
+    # A dry-run can model a manually supplied estimate, but an APPLY must
+    # NEVER promote it to a durable performance HWM without authenticated
+    # account/complete income evidence. Missing/incomplete proof is a separate
+    # fail-closed state, not permission to use operator-typed equity.
+    if apply and provable is None:
+        raise ValueError(
+            "pre-flow equity unverified: no HWM adjustment without complete "
+            "exchange evidence and a flat account; manual risk-epoch review required"
+        )
+    if provable is not None:
+        if provable <= 0:
+            # A zero-equity recapitalisation cannot create a clean risk history:
+            # the outflow preceding the zero must also be reconciled.
+            raise ValueError(
+                "ledger proves zero pre-flow equity; attest together with the earlier "
+                "outflow that emptied the account, or open a reviewed risk epoch"
+            )
+        tolerance = max(_WALLET_TOLERANCE_ABS, abs(provable) * _WALLET_TOLERANCE_REL)
+        if abs(pre - provable) > tolerance:
+            raise ValueError(
+                f"pre_flow_equity contradicts ledger-provable value {provable:.8f}"
+            )
+        if apply:
+            # The caller's current equity must agree with the authenticated
+            # flat-account state; otherwise an unrelated typed value could
+            # manufacture a post-attestation peak or lower the drawdown.
+            observed_equity = _finite(account.get("equity"), "account equity")
+            if abs(current_equity - observed_equity) > tolerance:
+                raise ValueError(
+                    "current_equity contradicts authenticated account state"
+                )
     previous_hwm, peak_raw = await _load_raw_peak(strict)
     record = build_record(
         flows=flows,

@@ -240,6 +240,119 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(self.drawdown(engine), 0.05)  # gross would be 50%
         self.assertTrue(self.entry_allowed(engine))
 
+    async def test_zero_equity_outflow_is_captured_pending_without_peak_write(self):
+        """Authenticated full withdrawal must remain pending, never a trading loss."""
+        client, engine = await self.boot(5.31768526)
+        original_peak = await self.peak()
+        client.income("TRANSFER", -5.31768526)
+        await self.refresh(engine)
+        self.assertEqual(client.wallet, 0.0)
+        self.assertEqual(await self.peak(), original_peak)
+        ledger = await self.ledger()
+        self.assertEqual(len(ledger["pending"]), 1)
+        self.assertEqual(len(ledger["applied"]), 0)
+        self.assertAlmostEqual(float(ledger["pending"][0]["amount"]), -5.31768526)
+        self.assertAlmostEqual(self.drawdown(engine), 1.0)
+        self.assertFalse(self.entry_allowed(engine))
+
+        # Repeated polling cannot duplicate the same income identity.
+        engine._pilot_last_zero_cashflow_capture = 0.0
+        await self.refresh(engine)
+        self.assertEqual(len((await self.ledger())["pending"]), 1)
+        self.assertEqual(await self.peak(), original_peak)
+
+        # Detection-window expiry must never purge durable pending evidence.
+        engine._pilot_last_zero_cashflow_capture = 0.0
+        client.advance(cfl.DETECTION_WINDOW_MS + 60_000)
+        await self.refresh(engine)
+        self.assertEqual(len((await self.ledger())["pending"]), 1)
+        self.assertEqual(await self.peak(), original_peak)
+
+    async def test_active_nexus_runtime_zero_branch_captures_outflow(self):
+        """Production runs nexus_runtime_engine (pilot runtime not installed):
+        its zero-equity branch must capture too, throttled, never touching HWM."""
+        from bot import nexus_runtime_engine as runtime
+
+        client, boot_engine = await self.boot(22.7986938551)
+        client.income("REALIZED_PNL", 5.31768526 - 22.7986938551)
+        await self.refresh(boot_engine)
+        peak = await self.peak()
+        cursor = await db.load_key_value(cfl.SEEN_CURSOR_KEY)
+        client.income("TRANSFER", -client.wallet)  # exact zero, as Binance reports it
+
+        engine = object.__new__(runtime.TradingEngine)
+        engine.client = client
+        engine.risk = boot_engine.risk
+        engine.paper_trade = False
+        engine._validation_safety_lock_active = False
+
+        async def zero_state(_client):
+            return {"equity": 0.0, "available": 0.0}
+
+        with patch.object(runtime.account_balance_semantics, "read_account_state", zero_state):
+            await engine._update_balance()
+            self.assertEqual(len((await self.ledger())["pending"]), 1)
+            client.income("TRANSFER", 1.0)  # within the throttle interval: not read
+            client.income("TRANSFER", -1.0)
+            await engine._update_balance()
+            self.assertEqual(len((await self.ledger())["pending"]), 1)
+            engine._pilot_last_zero_cashflow_capture -= cfl.ZERO_EQUITY_CAPTURE_INTERVAL_S
+            await engine._update_balance()
+        ledger = await self.ledger()
+        self.assertEqual(len(ledger["pending"]), 3)
+        self.assertEqual(ledger["applied"], [])
+        self.assertEqual(await self.peak(), peak)
+        self.assertEqual(await db.load_key_value(cfl.SEEN_CURSOR_KEY), cursor)
+        self.assertTrue(engine._drawdown_hard_gate_active)
+
+    async def test_zero_equity_throttled_capture_swallows_outage(self):
+        client, engine = await self.boot(5.0)
+        client.income("TRANSFER", -5.0)
+        client.fail = True
+        logger = SimpleNamespace(critical=lambda *a, **k: None)
+        self.assertIsNone(await cfl.capture_zero_equity_pending_throttled(engine, logger))
+        self.assertEqual((await self.ledger())["pending"], [])
+        self.assertAlmostEqual(await self.peak(), 5.0)
+
+    async def test_zero_equity_capture_refuses_unbootstrapped_cursor(self):
+        """A new empty ledger is not allowed to hide preexisting outflows."""
+        client = FakeBinance(0.0)
+        with self.assertRaisesRegex(cfl.CashFlowBlocked, "NOT_BOOTSTRAPPED"):
+            await cfl.capture_zero_equity_pending(client, new_risk(1.0))
+        self.assertIsNone(await self.ledger())
+
+    async def test_zero_equity_evidence_outage_never_changes_ledger_or_hwm(self):
+        """An unavailable account ledger cannot be guessed from wallet delta."""
+        client, engine = await self.boot(5.0)
+        peak_before = await self.peak()
+        ledger_before = await self.ledger()
+        client.income("TRANSFER", -5.0)
+        client.fail = True
+        with self.assertRaisesRegex(
+            cfl.CashFlowBlocked, "BINANCE_ZERO_EQUITY_EVIDENCE_UNAVAILABLE"
+        ):
+            await cfl.capture_zero_equity_pending(client, engine.risk, strict=True)
+        self.assertEqual(await self.ledger(), ledger_before)
+        self.assertEqual(await self.peak(), peak_before)
+
+    async def test_zero_equity_unstable_account_snapshots_refuse_write(self):
+        """Two conflicting authenticated account states do not prove a transfer."""
+        from unittest.mock import AsyncMock
+
+        client, engine = await self.boot(5.0)
+        ledger_before = await self.ledger()
+        peak_before = await self.peak()
+        client.income("TRANSFER", -5.0)
+        current = await client.get_account_state()
+        changed = {**current, "walletBalance": 0.1, "equity": 0.1}
+        with patch.object(
+            client, "get_account_state", AsyncMock(side_effect=[current, changed])
+        ):
+            with self.assertRaisesRegex(cfl.CashFlowBlocked, "EVIDENCE_UNSTABLE"):
+                await cfl.capture_zero_equity_pending(client, engine.risk, strict=True)
+        self.assertEqual(await self.ledger(), ledger_before)
+        self.assertEqual(await self.peak(), peak_before)
+
     # 6 ────────────────────────────────────────────────────────────────────────
     async def test_06_realized_loss_after_withdrawal_still_increases_and_blocks(self):
         client, engine = await self.boot(10.0)
@@ -382,36 +495,21 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(dry["status"], "DRY_RUN")
         self.assertAlmostEqual(await self.peak(), 10.0)  # dry run changes nothing
-        out = await cfl.attest_flows(
-            rows=client.rows, reconciliation_id="op-2026-09-26-w1", tran_ids=[tran],
-            pre_flow_equity=9.8, current_equity=client.wallet, reason="operator withdrawal",
-            evidence_ref="PILOT_LIVE_BALANCE equity=9.8 before transfer", apply=True,
-            now_ms=client.now,
-        )
-        self.assertEqual(out["status"], "APPLIED")
-        record = out["record"]
-        for field in (
-            "reconciliation_id", "net_amount", "direction", "flow_time_first_ms",
-            "pre_flow_equity", "previous_hwm", "adjusted_hwm", "reason", "evidence_ref",
-        ):
-            self.assertIn(field, record)
-        self.assertAlmostEqual(record["net_amount"], -4.0)  # from the exchange row
-        self.assertAlmostEqual(record["adjusted_hwm"], 10.0 * 5.8 / 9.8)
-        again = await cfl.attest_flows(
-            rows=client.rows, reconciliation_id="op-2026-09-26-w1", tran_ids=[tran],
-            pre_flow_equity=9.8, current_equity=client.wallet, reason="operator withdrawal",
-            evidence_ref="x", apply=True, now_ms=client.now,
-        )
-        self.assertEqual(again["status"], "ALREADY_APPLIED")
-
-        # the running process picks the operator record up without restart
-        await self.refresh(engine)
-        expected_peak = 10.0 * 5.8 / 9.8
-        self.assertAlmostEqual(self.drawdown(engine), 1.0 - client.wallet / expected_peak)
-        # trading losses (0.2 unrealized before + 0.11 net at close) stay in the drawdown
-        self.assertAlmostEqual(client.wallet, 5.69)
-        self.assertAlmostEqual(self.drawdown(engine), 1.0 - 5.69 / (10.0 * 5.8 / 9.8))
-        self.assertGreater(self.drawdown(engine), 1.0 - 9.8 / 10.0)
+        # Historical account had open position during withdrawal followed
+        # by REALIZED_PNL and COMMISSION: the ledger alone cannot establish
+        # exact pre-flow equity. A typed value may remain a DRY_RUN estimate,
+        # but must NOT mutate HWM or mark this transfer as reconciled.
+        with self.assertRaisesRegex(ValueError, "pre-flow equity unverified"):
+            await cfl.attest_flows(
+                rows=client.rows, reconciliation_id="op-2026-09-26-w1",
+                tran_ids=[tran], pre_flow_equity=9.8,
+                current_equity=client.wallet, reason="operator withdrawal",
+                evidence_ref="PILOT_LIVE_BALANCE equity=9.8 before transfer",
+                apply=True, now_ms=client.now,
+            )
+        self.assertAlmostEqual(await self.peak(), 10.0)
+        self.assertEqual((await self.ledger())["applied"], [])
+        await self.assert_blocked(engine, "BINANCE_CAPITAL_FLOW_REBASE_UNCONFIRMED")
 
     # 15 ───────────────────────────────────────────────────────────────────────
     async def test_15_multiple_deposits_and_withdrawals(self):
@@ -570,6 +668,141 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertAlmostEqual(await self.peak(), 10.0)
 
+    async def _emptied_then_redeposited(self, deposit=100.0):
+        """Production shape of 2026-10-11: HWM 22.7987, loss to 5.31768526, full outflow."""
+        client, engine = await self.boot(22.7986938551)
+        client.income("REALIZED_PNL", 5.31768526 - 22.7986938551)
+        await self.refresh(engine)
+        self.assertAlmostEqual(self.drawdown(engine), 1.0 - 5.31768526 / 22.7986938551)
+        out_tran = client.income("TRANSFER", -5.31768526)
+        self.assertAlmostEqual(client.wallet, 0.0)
+        # equity==0: the runtime skips reconciliation, so the outflow never
+        # reaches the durable ledger; time passes beyond the 48h runtime window
+        client.advance(49 * 3600 * 1000)
+        in_tran = client.income("TRANSFER", deposit)
+        return client, out_tran, in_tran
+
+    async def test_recapitalisation_cannot_erase_drawdown_with_typed_pre_flow_equity(self):
+        client, _, in_tran = await self._emptied_then_redeposited(100.0)
+        kwargs = dict(
+            rows=client.rows, reconciliation_id="op-redeposit", tran_ids=[in_tran],
+            pre_flow_equity=22.7986938551, current_equity=client.wallet,
+            reason="redeposit", evidence_ref="operator", apply=False, now_ms=client.now,
+        )
+        # Without exchange account evidence the typed value would rebase the
+        # HWM to 122.8 and report 18.6% drawdown: below the 30% gate.
+        unchecked = await cfl.attest_flows(**kwargs)
+        self.assertLess(unchecked["record"]["trading_drawdown_after"], 0.30)
+        account = await client.get_account_state()
+        for typed in (22.7986938551, 5.31768526, 1.0):
+            with self.subTest(typed=typed), self.assertRaisesRegex(ValueError, "zero pre-flow equity"):
+                await cfl.attest_flows(**{
+                    **kwargs, "pre_flow_equity": typed, "apply": True,
+                    "account": account, "rows_cover_until_ms": client.now,
+                })
+        self.assertAlmostEqual(await self.peak(), 22.7986938551)
+
+    async def test_recapitalisation_attested_with_outflow_preserves_economic_drawdown(self):
+        client, out_tran, in_tran = await self._emptied_then_redeposited(100.0)
+        account = await client.get_account_state()
+        kwargs = dict(
+            rows=client.rows, reconciliation_id="op-out-in", tran_ids=[out_tran, in_tran],
+            current_equity=client.wallet, reason="outflow+redeposit", evidence_ref="income rows",
+            now_ms=client.now, account=account, rows_cover_until_ms=client.now,
+        )
+        with self.assertRaisesRegex(ValueError, "contradicts ledger-provable value 5.31768526"):
+            await cfl.attest_flows(**kwargs, pre_flow_equity=22.7986938551, apply=True)
+        out = await cfl.attest_flows(**kwargs, pre_flow_equity=5.31768526, apply=True)
+        self.assertEqual(out["status"], "APPLIED")
+        self.assertAlmostEqual(
+            out["record"]["trading_drawdown_after"], 1.0 - 5.31768526 / 22.7986938551, places=9,
+        )
+        self.assertGreater(out["record"]["trading_drawdown_after"], 0.30)
+
+    async def test_provable_pre_flow_equity_is_none_without_full_evidence(self):
+        client, out_tran, in_tran = await self._emptied_then_redeposited(100.0)
+        account = await client.get_account_state()
+        flows = [cfl._normalize_flow(r, client.now) for r in client.rows
+                 if str(r["tranId"]) in {out_tran, in_tran}]
+        args = (flows, client.rows)
+        self.assertAlmostEqual(cfl.ledger_provable_pre_flow_equity(
+            *args, account, rows_cover_until_ms=client.now, now_ms=client.now), 5.31768526)
+        self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
+            *args, None, rows_cover_until_ms=client.now, now_ms=client.now))
+        self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
+            *args, account, rows_cover_until_ms=client.now - 1, now_ms=client.now))
+        self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
+            *args, {**account, "positionMargin": 1.0}, rows_cover_until_ms=client.now,
+            now_ms=client.now))
+        client.income("COMMISSION", -0.01)
+        self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
+            flows, client.rows, account, rows_cover_until_ms=client.now, now_ms=client.now))
+
+    async def test_attestation_no_hwm_change_when_exchange_evidence_incomplete(self):
+        client, _, in_tran = await self._emptied_then_redeposited(100.0)
+        original_peak = await self.peak()
+        base = dict(
+            rows=client.rows, reconciliation_id="op-missing-coverage",
+            tran_ids=[in_tran], pre_flow_equity=22.7986938551,
+            current_equity=client.wallet, reason="rebalance",
+            evidence_ref="unconfirmed", apply=True, now_ms=client.now,
+        )
+        account = await client.get_account_state()
+        cases = (
+            {"account": None, "rows_cover_until_ms": client.now},
+            {"account": account, "rows_cover_until_ms": client.now - 1},
+            {"account": {**account, "positionMargin": 1.0},
+             "rows_cover_until_ms": client.now},
+        )
+        for evidence in cases:
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(
+                ValueError, "pre-flow equity unverified"
+            ):
+                await cfl.attest_flows(**{**base, **evidence})
+            self.assertAlmostEqual(await self.peak(), original_peak)
+            self.assertEqual((await self.ledger())["applied"], [])
+
+        # Fresh fully covered input with post-flow commission cannot pretend
+        # that wallet_now - external flows is pre-flow equity.
+        client.income("COMMISSION", -0.01)
+        account = await client.get_account_state()
+        with self.assertRaisesRegex(ValueError, "pre-flow equity unverified"):
+            await cfl.attest_flows(**{
+                **base, "rows": client.rows, "current_equity": client.wallet,
+                "account": account, "rows_cover_until_ms": client.now,
+            })
+        self.assertAlmostEqual(await self.peak(), original_peak)
+        self.assertEqual((await self.ledger())["applied"], [])
+
+    async def test_attestation_rejects_typed_current_equity_inconsistent_with_account(self):
+        client, out_tran, in_tran = await self._emptied_then_redeposited(100.0)
+        account = await client.get_account_state()
+        with self.assertRaisesRegex(ValueError, "current_equity contradicts"):
+            await cfl.attest_flows(
+                rows=client.rows, reconciliation_id="op-forged-current",
+                tran_ids=[out_tran, in_tran],
+                pre_flow_equity=5.31768526,
+                current_equity=client.wallet + 50,
+                reason="forged-current", evidence_ref="income rows",
+                apply=True, now_ms=client.now, account=account,
+                rows_cover_until_ms=client.now,
+            )
+        self.assertAlmostEqual(await self.peak(), 22.7986938551)
+        self.assertEqual((await self.ledger())["applied"], [])
+
+    async def test_attestation_dry_run_remains_non_mutating_without_evidence(self):
+        client, _, in_tran = await self._emptied_then_redeposited(100.0)
+        out = await cfl.attest_flows(
+            rows=client.rows, reconciliation_id="dry-unverified",
+            tran_ids=[in_tran], pre_flow_equity=22.7986938551,
+            current_equity=client.wallet, reason="dry-estimate",
+            evidence_ref="unverified", apply=False, now_ms=client.now,
+            account=None, rows_cover_until_ms=None,
+        )
+        self.assertEqual(out["status"], "DRY_RUN")
+        self.assertAlmostEqual(await self.peak(), 22.7986938551)
+        self.assertEqual((await self.ledger())["applied"], [])
+
     def test_twr_math_identities(self):
         # a flow alone never changes drawdown: 1 - E+/P' == 1 - E-/P
         for peak, pre, amount in ((10.0, 9.0, -4.0), (10.8262, 9.8410, -4.0), (50.0, 40.0, 25.0)):
@@ -611,6 +844,110 @@ class CashFlowAdminCliTests(unittest.IsolatedAsyncioTestCase):
             out = await cash_flow_admin._run(cash_flow_admin._parser().parse_args(base))
             self.assertEqual(out["status"], "DRY_RUN")
             self.assertFalse(attest.await_args.kwargs["apply"])
+            # the exchange account state is always handed to the consistency check
+            self.assertEqual(attest.await_args.kwargs["account"]["walletBalance"], 6.0)
+            self.assertEqual(attest.await_args.kwargs["rows_cover_until_ms"], T0)
             await cash_flow_admin._run(cash_flow_admin._parser().parse_args(
                 base + ["--apply", "--confirm", "ATTEST:op-1"]))
             self.assertTrue(attest.await_args.kwargs["apply"])
+
+    async def test_cli_apply_rebases_default_income_window_after_clock_advances(self):
+        """Two authenticated reads take real time; default window must cover both."""
+        from unittest.mock import AsyncMock
+        from bot import cash_flow_admin
+
+        clock = iter([T0, T0 + 37])
+        account = {"equity": 6.0, "walletBalance": 6.0}
+        client = SimpleNamespace(
+            _now_ms=lambda: next(clock),
+            get_account_state=AsyncMock(return_value=account),
+            close=AsyncMock(),
+        )
+        args = cash_flow_admin._parser().parse_args([
+            "attest", "--reconciliation-id", "op-clock-advance",
+            "--tran-ids", "7", "--pre-flow-equity", "10",
+            "--evidence-ref", "source", "--reason", "reconcile",
+            "--apply", "--confirm", "ATTEST:op-clock-advance",
+        ])
+        with (
+            patch("bot.database.init", AsyncMock()),
+            patch("bot.database.close", AsyncMock()),
+            patch.object(cash_flow_admin, "_client", AsyncMock(return_value=client)),
+            patch("bot.binance_accounting_evidence.collect_income",
+                  AsyncMock(return_value=[])) as income,
+            patch.object(cash_flow_admin.ledger, "attest_flows",
+                         AsyncMock(return_value={"status": "APPLIED"})) as attest,
+        ):
+            out = await cash_flow_admin._run(args)
+        self.assertEqual(out["status"], "APPLIED")  # mock only; no durable write
+        self.assertEqual(income.await_count, 2)
+        self.assertEqual(income.await_args_list[0].args,
+                         (client, T0 - cash_flow_admin._WINDOW_MS, T0))
+        self.assertEqual(income.await_args_list[1].args,
+                         (client, T0 + 37 - cash_flow_admin._WINDOW_MS, T0 + 37))
+        self.assertEqual(attest.await_args.kwargs["rows_cover_until_ms"], T0 + 37)
+        self.assertTrue(attest.await_args.kwargs["apply"])
+
+    async def test_cli_apply_rejects_income_or_account_changes_during_evidence_read(self):
+        from unittest.mock import AsyncMock
+        from bot import cash_flow_admin
+
+        args = cash_flow_admin._parser().parse_args([
+            "attest", "--reconciliation-id", "op-stable",
+            "--tran-ids", "7", "--pre-flow-equity", "10",
+            "--evidence-ref", "source", "--reason", "reconcile",
+            "--apply", "--confirm", "ATTEST:op-stable",
+        ])
+        stable = {"equity": 6.0, "walletBalance": 6.0}
+        for accounts, incomes, error in (
+            ([stable, stable], [[{"incomeType": "TRANSFER"}], []],
+             "unstable Binance income"),
+            ([stable, {"equity": 7.0, "walletBalance": 7.0}],
+             [[], []], "unstable Binance account"),
+        ):
+            with self.subTest(error=error):
+                client = SimpleNamespace(
+                    _now_ms=lambda: T0,
+                    get_account_state=AsyncMock(side_effect=accounts),
+                    close=AsyncMock(),
+                )
+                with patch("bot.database.init", AsyncMock()), \
+                     patch("bot.database.close", AsyncMock()), \
+                     patch.object(cash_flow_admin, "_client", AsyncMock(return_value=client)), \
+                     patch("bot.binance_accounting_evidence.collect_income",
+                           AsyncMock(side_effect=incomes)), \
+                     patch.object(cash_flow_admin.ledger, "attest_flows",
+                                  AsyncMock()) as attest:
+                    with self.assertRaisesRegex(ValueError, error):
+                        await cash_flow_admin._run(args)
+                    attest.assert_not_awaited()
+
+    async def test_cli_old_since_window_cannot_claim_now_is_covered(self):
+        from unittest.mock import AsyncMock
+        from bot import cash_flow_admin
+
+        client = SimpleNamespace(
+            _now_ms=lambda: T0,
+            get_account_state=AsyncMock(return_value={
+                "equity": 6.0, "walletBalance": 6.0,
+            }),
+            close=AsyncMock(),
+        )
+        too_old = T0 - 9 * 86400 * 1000
+        args = cash_flow_admin._parser().parse_args([
+            "attest", "--reconciliation-id", "op-old-window",
+            "--tran-ids", "7", "--pre-flow-equity", "10",
+            "--evidence-ref", "source", "--reason", "reconcile",
+            "--since-ms", str(too_old), "--apply",
+            "--confirm", "ATTEST:op-old-window",
+        ])
+        with patch("bot.database.init", AsyncMock()), \
+             patch("bot.database.close", AsyncMock()), \
+             patch.object(cash_flow_admin, "_client", AsyncMock(return_value=client)), \
+             patch("bot.binance_accounting_evidence.collect_income",
+                   AsyncMock(return_value=[])), \
+             patch.object(cash_flow_admin.ledger, "attest_flows",
+                          AsyncMock()) as attest:
+            with self.assertRaisesRegex(ValueError, "incomplete Binance income window"):
+                await cash_flow_admin._run(args)
+            attest.assert_not_awaited()

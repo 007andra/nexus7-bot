@@ -36,6 +36,14 @@ MARKER_KEY = (
     "risk:hwm_incident_repair:20260930:"
     + hwm_namespace.hwm_namespace()
 )
+# Writers whose own provenance may legitimately supersede the repaired HWM.
+# "bootstrap" and "incident_repair" are excluded: after the repair either one
+# would mean the durable HWM was recreated or rewritten outside the ledger.
+_SUPERSEDING_REASONS = frozenset({
+    "new_equity_high",
+    "external_capital_flow_rebase",
+    "external_position_performance_rebase",
+})
 _TOL = 1e-6
 _EQUITY_TOL = 0.02
 
@@ -151,9 +159,30 @@ async def repair_if_needed(risk, equity: float, *, strict: bool = True) -> dict:
         if (
             str(marker.get("incident_id") or "") != INCIDENT_ID
             or not _close(marker.get("new_peak"), REPAIRED_HWM)
-            or not _close(peak, REPAIRED_HWM)
         ):
             raise db.PersistenceError("incident repair marker/HWM mismatch")
+        if not _close(peak, REPAIRED_HWM):
+            # A later writer may legitimately move the HWM (cash-flow rebase,
+            # real new high). Only accept that when its own durable provenance
+            # describes exactly the current HWM; never re-install the old
+            # repaired value over it, and never accept an unexplained change.
+            provenance_raw = await db.load_key_value(
+                hwm_namespace.provenance_key(), strict=strict
+            )
+            if provenance_raw is None:
+                raise db.PersistenceError("incident repair marker/HWM mismatch")
+            provenance = _load_json(provenance_raw, "HWM provenance")
+            if (
+                str(provenance.get("reason") or "") not in _SUPERSEDING_REASONS
+                or not _close(provenance.get("new_peak"), peak)
+            ):
+                raise db.PersistenceError("incident repair marker/HWM mismatch")
+            return {
+                "status": "SUPERSEDED",
+                "repaired_peak": REPAIRED_HWM,
+                "current_peak": peak,
+                "superseded_by": provenance["reason"],
+            }
         ddp.install_reconciled_peak(risk, REPAIRED_HWM, equity)
         return {
             "status": "ALREADY_REPAIRED",

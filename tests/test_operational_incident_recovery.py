@@ -23,6 +23,26 @@ class FakeStore:
         return True
 
 
+
+def test_legacy_hwm_rebase_is_not_installed_on_future_live_release():
+    """A release gate must never implicitly enable the old incident HWM reset."""
+    import ast
+    import inspect
+
+    from bot import runtime_bootstrap
+
+    tree = ast.parse(inspect.getsource(runtime_bootstrap.install))
+    installs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "install"
+        and isinstance(node.func.value, ast.Name)
+        and "operational_incident_recovery" in node.func.value.id
+    ]
+    assert installs == [], "historical HWM incident repair cannot auto-install"
+
+
 def test_incident_target_preserves_clean_drawdown():
     equity = 18.5482
     peak = recovery._target_peak(equity)

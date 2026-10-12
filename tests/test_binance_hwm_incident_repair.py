@@ -200,6 +200,49 @@ class HwmIncidentRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(risk.peak_balance, repair.REPAIRED_HWM)
         save.assert_not_awaited()
 
+    async def _after_marker(self, peak, provenance):
+        marker = json.dumps({"incident_id": repair.INCIDENT_ID, "new_peak": repair.REPAIRED_HWM})
+        risk = SimpleNamespace(peak_balance=peak, drawdown=0.0)
+
+        async def load(key, strict=True):
+            if key == ddp.DURABLE_EQUITY_PEAK_KEY:
+                return format(peak, ".17g")
+            if key == repair.MARKER_KEY:
+                return marker
+            if key == hwm_namespace.provenance_key():
+                return None if provenance is None else json.dumps(provenance)
+            raise AssertionError(key)
+
+        with patch.object(repair.db, "load_key_value", AsyncMock(side_effect=load)), \
+                patch.object(repair, "save_key_values_atomic_cas", AsyncMock()) as save:
+            try:
+                return await repair.repair_if_needed(risk, 50.0), risk
+            finally:
+                save.assert_not_awaited()
+
+    async def test_later_ledger_rebase_supersedes_marker_without_reinstalling_old_peak(self):
+        # 2026-10-11 outflow + redeposit attested: HWM = 22.7987 * 50 / 5.31768526
+        rebased = repair.REPAIRED_HWM * 50.0 / 5.31768526
+        for reason in ("external_capital_flow_rebase", "new_equity_high",
+                       "external_position_performance_rebase"):
+            with self.subTest(reason=reason):
+                result, risk = await self._after_marker(
+                    rebased, {"reason": reason, "new_peak": rebased})
+                self.assertEqual(result["status"], "SUPERSEDED")
+                self.assertAlmostEqual(risk.peak_balance, rebased)  # untouched
+
+    async def test_unexplained_hwm_change_after_marker_still_fails_closed(self):
+        rebased = repair.REPAIRED_HWM * 2
+        for provenance in (
+            None,
+            {"reason": "bootstrap", "new_peak": rebased},
+            {"reason": "incident_repair", "new_peak": rebased},
+            {"reason": "external_capital_flow_rebase", "new_peak": rebased + 1},
+        ):
+            with self.subTest(provenance=provenance), \
+                    self.assertRaisesRegex(db.PersistenceError, "marker/HWM mismatch"):
+                await self._after_marker(rebased, provenance)
+
 
 if __name__ == "__main__":
     unittest.main()

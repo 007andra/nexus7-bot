@@ -73,6 +73,40 @@ async def _run(args) -> dict:
             start = args.since_ms if args.since_ms is not None else now_ms - _WINDOW_MS
             end = min(now_ms, int(start) + _WINDOW_MS)
             rows = await collect_income(client, int(start), end)
+            if args.apply:
+                # Re-check AFTER the income fetch. The first account snapshot
+                # can go stale while the Binance ledger is being paginated.
+                # An old --since-ms window cannot prove current equity.
+                verified_now_ms = client._now_ms()
+                # The default lookback must slide with the second observation.
+                # Otherwise any nonzero elapsed time makes second_end stale and
+                # falsely rejects every normal --apply call. Explicit --since-ms
+                # stays fixed and fails closed when it no longer covers now.
+                second_start = (
+                    verified_now_ms - _WINDOW_MS
+                    if args.since_ms is None else int(start)
+                )
+                second_end = min(verified_now_ms, second_start + _WINDOW_MS)
+                if second_end < verified_now_ms:
+                    raise ValueError("incomplete Binance income window: attestation apply refused")
+                rows_again = await collect_income(client, second_start, second_end)
+                account_again = await client.get_account_state()
+                if rows_again != rows or not isinstance(account_again, dict):
+                    raise ValueError("unstable Binance income evidence: attestation apply refused")
+                balance_fields = (
+                    "equity", "walletBalance", "positionMargin",
+                    "unrealisedPNL", "multiAssetsMargin",
+                )
+                if not isinstance(account, dict) or any(
+                    account.get(key) != account_again.get(key)
+                    for key in balance_fields
+                ):
+                    raise ValueError("unstable Binance account balance: attestation apply refused")
+                # Attest against the second fresh observation, not the older
+                # pre-fetch snapshot. No database write has occurred yet.
+                now_ms = verified_now_ms
+                account = account_again
+                end = second_end
             return await ledger.attest_flows(
                 rows=rows,
                 reconciliation_id=args.reconciliation_id,
@@ -83,6 +117,8 @@ async def _run(args) -> dict:
                 evidence_ref=args.evidence_ref,
                 apply=bool(args.apply),
                 now_ms=now_ms,
+                account=account,
+                rows_cover_until_ms=end,
             )
         if args.command == "rebaseline-wallet":
             if args.apply and args.confirm != "REBASELINE-WALLET":

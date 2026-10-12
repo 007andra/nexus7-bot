@@ -14,6 +14,7 @@ import time
 
 from bot import account_balance_semantics
 from bot import capital_flow_reconciliation as capital_flows
+from bot import cash_flow_ledger
 from bot import binance_hwm_incident_repair as hwm_incident_repair
 from bot import missed_opportunity_audit
 from bot.account_capital_reader import read_account_capital
@@ -111,6 +112,10 @@ class TradingEngine(CoreTradingEngine):
 
             if equity <= 0.0:
                 await restore_zero_equity_peak_fail_closed(self.risk, strict=True)
+                # Record new transfer identities as PENDING evidence only (no
+                # HWM, cursor or gate change) so a full outflow is not lost
+                # when it leaves the 48h runtime detection window.
+                await cash_flow_ledger.capture_zero_equity_pending_throttled(self, log)
                 self.risk.balance_confirmed = False
                 self.risk.invalidate_capital()
                 self._drawdown_hard_gate_active = True
