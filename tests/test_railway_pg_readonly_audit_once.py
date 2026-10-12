@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from scripts import railway_pg_readonly_audit_once as worker
+from scripts.pg_temp_grant_origin import TempOrigin
 
 
 class FakeTransaction:
@@ -60,18 +61,27 @@ def report(fail_item=None, drop_item=None, fail_group3=None):
 
 class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
     async def _call(self, *, dsn="postgresql://user:SECRET_URI@host/db",
-                    audit=None, error=None, close_fails=False):
+                    audit=None, error=None, close_fails=False,
+                    origin_error=None):
         output = StringIO()
         conn = FakeConnection(close_fails=close_fails)
         with patch.dict(os.environ, {worker.DSN_ENV: dsn} if dsn else {}, clear=True), \
                 patch("asyncpg.connect", new_callable=AsyncMock) as connect, \
                 patch.object(worker, "run", new_callable=AsyncMock) as run, \
+                patch.object(worker, "inspect_temp_origin", new_callable=AsyncMock) as probe, \
                 redirect_stdout(output):
             connect.return_value = conn
             if error:
                 connect.side_effect = error
             run.return_value = audit if audit is not None else report()
+            probe.return_value = TempOrigin(
+                from_public=True, from_direct=False, from_inherited=False,
+                from_owner=False, default_acl=True,
+            )
+            if origin_error:
+                probe.side_effect = RuntimeError("password=SECRET_URI")
             rc = await worker.execute()
+            self.last_origin_probe_calls = probe.await_count
         return rc, output.getvalue(), conn, connect, run
 
     async def test_default_is_inert_without_dsn(self):
@@ -151,6 +161,44 @@ class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rc, 2)
         self.assertIn("status=INCONCLUSIVE", output)
         self.assertNotIn("[PG_ROLE_AUDIT_DB_PRIVILEGES]", output)
+
+    async def test_temp_failure_reports_exact_public_source_only(self):
+        rc, output, conn, _, _ = await self._call(
+            audit=report(fail_group3="TEMP"))
+        self.assertEqual(rc, 1)
+        self.assertTrue(conn.readonly)
+        self.assertEqual(self.last_origin_probe_calls, 1)
+        self.assertIn("[PG_TEMP_ORIGIN] status=RESOLVED", output)
+        self.assertIn("public=true direct=false inherited=false", output)
+        self.assertIn("potential_revocation_scope=DATABASE_WIDE", output)
+        self.assertIn("READ_ONLY_ROLE_VERIFIED=false", output)
+        self.assertNotIn("SECRET_URI", output)
+
+    async def test_origin_failure_does_not_change_authoritative_audit_fail(self):
+        rc, output, _, _, _ = await self._call(
+            audit=report(fail_group3="TEMP"), origin_error=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("[PG_TEMP_ORIGIN] status=INCONCLUSIVE", output)
+        self.assertIn("[PG_ROLE_AUDIT_ONCE] status=FAIL", output)
+        self.assertIn("READ_ONLY_ROLE_VERIFIED=false", output)
+        self.assertNotIn("SECRET_URI", output)
+        self.assertNotIn("password=", output)
+
+    async def test_origin_not_run_when_temp_is_not_failed(self):
+        for audit in (report(), report(fail_item=7)):
+            with self.subTest(verified=audit.verified):
+                rc, output, _, _, _ = await self._call(audit=audit)
+                self.assertEqual(self.last_origin_probe_calls, 0)
+                self.assertNotIn("[PG_TEMP_ORIGIN]", output)
+                self.assertEqual(rc, 0 if audit.verified else 1)
+
+    async def test_origin_not_run_for_invalid_main_audit(self):
+        audit = report(fail_group3="TEMP")
+        audit.rows[2]["check"] = "secret_role_name"
+        rc, output, _, _, _ = await self._call(audit=audit)
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.last_origin_probe_calls, 0)
+        self.assertNotIn("[PG_TEMP_ORIGIN]", output)
 
     async def test_missing_checks_cannot_pass(self):
         rc, output, _, _, _ = await self._call(audit=report(drop_item=6))
