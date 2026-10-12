@@ -195,9 +195,9 @@ async def _main(args):
         result = await probe(client, start_ms, end_ms)
         # No transaction IDs, credentials or raw API errors in the report.
         print(json.dumps(result, sort_keys=True))
-        return 2 if result["status"] in {
-            "INCOMPLETE_INCOME_EVIDENCE", "INCOMPLETE_ROUTE_COVERAGE"
-        } else 0
+        # CLI exit 0 requires the strongest matched identity proof; an
+        # unmatched or amount-only observation must never look like PASS.
+        return 0 if result["status"] == "EXACT_ID_AND_AMOUNT_TIME" else 2
     except Exception:
         # A traceback can expose signed HTTP response details. Fail closed with
         # a constant, non-sensitive envelope; an absent result is never proof.
