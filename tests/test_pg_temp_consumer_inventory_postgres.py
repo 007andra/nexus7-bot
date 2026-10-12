@@ -93,7 +93,7 @@ class ConsumerInventoryPostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(secret, line)
         # Two distinct login sessions connected to exactly this fixture DB.
         import re
-        m = re.search(r"distinct_roles=(\\d+)", line)
+        m = re.search(r"distinct_roles=(\d+)", line)
         self.assertIsNotNone(m, line)
         self.assertGreaterEqual(int(m.group(1)), 2)
 
