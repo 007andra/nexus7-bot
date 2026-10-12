@@ -124,6 +124,11 @@ class CandidateTests(unittest.TestCase):
             "EXIT_QUOTE_60": lambda e: e["exit_quotes"].pop("60"),
             "EXIT_QUOTE_240_STALE": lambda e: e["exit_quotes"]["240"].update(observed_ms=c["captured_ms"]),
             "ENTRY_QUOTE_CROSSED": lambda e: e["entry_quote"].update(bid="100.02"),
+            "ENTRY_QUOTE_FUTURE": lambda e: e["entry_quote"].update(observed_ms=c["captured_ms"] + 1),
+            "EXIT_QUOTE_60_FUTURE": lambda e: e["exit_quotes"]["60"].update(
+                observed_ms=c["captured_ms"] + 3_600_001),
+            "TP_NOT_BELOW_ACTUAL_ENTRY": lambda e: e["entry_quote"].update(
+                bid="93.90", ask="94.00"),
             "FEE_OBSERVED_AFTER_ENTRY": lambda e: e["fee"].update(observed_ms=c["captured_ms"] + 1),
             "FEE_SOURCE_UNVERIFIED": lambda e: e["fee"].update(source="KUCOIN_PROXY"),
             "FEE_INVALID": lambda e: e["fee"].update(taker_rate=0.0005),
@@ -215,6 +220,14 @@ class CohortTests(unittest.TestCase):
         self.assertFalse(report["promotion_allowed"])
         again = ev.evaluate_cohort(enrolled, evid, as_of_ms=AS_OF * 2)
         self.assertEqual(report, again)  # fixed seed: deterministic
+
+    def test_more_than_frozen_first_40_never_passes(self):
+        enrolled, evid = self.cohort(n=41)
+        report = ev.evaluate_cohort(enrolled, evid, as_of_ms=AS_OF * 2)
+        self.assertEqual(report["status"], "NOT_PROVEN")
+        self.assertIn("OVER_TARGET_40", report["blockers"])
+        self.assertFalse(report["promotion_allowed"])
+        self.assertFalse(report["live_allowed"])
 
     def test_one_indeterminate_row_blocks_without_replacement(self):
         enrolled, evid = self.cohort()
