@@ -333,6 +333,30 @@ async def lifespan(app: FastAPI):
 
     app.state.bootstrap_task = asyncio.create_task(_bootstrap())
 
+    # Operator-gated, one-shot diagnostic: run only after normal bootstrap,
+    # on a *separate* asyncpg connection and READ ONLY transaction. The
+    # observer is never part of readiness, the engine, or live-order authority.
+    # Disabled by default. Its PASS result only emits evidence in deploy logs.
+    app.state.pg_role_audit_task = None
+    if os.environ.get("PG_ROLE_AUDIT_STARTUP_ONCE", "") == "true":
+        try:
+            from bot import pg_role_audit_startup_once as _pg_role_audit
+            app.state.pg_role_audit_task = asyncio.create_task(
+                _pg_role_audit.run_after_bootstrap(app.state.bootstrap_task)
+            )
+            log.info(
+                "[PG_ROLE_AUDIT_STARTUP] status=SCHEDULED "
+                "decision_effect=NONE execution_effect=NONE"
+            )
+        except Exception:
+            # Do not log exception text: it may contain credentials. Never
+            # disturb normal startup because an observer could not start.
+            log.warning(
+                "[PG_ROLE_AUDIT_STARTUP] status=INCONCLUSIVE "
+                "reason=observer_schedule_failed execution_effect=NONE"
+            )
+            log.warning("READ_ONLY_ROLE_VERIFIED=false")
+
     # yield IMEDIATO — /health passa a responder agora, sem esperar a KuCoin
     yield
 
@@ -363,11 +387,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     engine.stop()
-    for t in ("bootstrap_task", "engine_task", "liveness_watch_task"):
+    for t in ("bootstrap_task", "engine_task", "liveness_watch_task", "pg_role_audit_task"):
         task=getattr(app.state,t,None)
         if task and not task.done():
             task.cancel()
-    tasks = [getattr(app.state, name, None) for name in ('bootstrap_task', 'engine_task', 'liveness_watch_task')]
+    tasks = [getattr(app.state, name, None) for name in ('bootstrap_task', 'engine_task', 'liveness_watch_task', 'pg_role_audit_task')]
     await asyncio.gather(*(t for t in tasks if t is not None), return_exceptions=True)
     try:
         await client.close()
