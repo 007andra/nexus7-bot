@@ -641,6 +641,71 @@ async def _reload_peak_if_ledger_changed(risk, doc: dict, equity: float, strict:
     setattr(risk, _APPLIED_IDS_ATTR, ids)
 
 
+async def capture_zero_equity_pending(client, risk, *, strict: bool = True) -> dict:
+    """Capture recently observed Binance transfers at zero equity, never rebase.
+
+    Only updates the PENDING evidence ledger with a compare-and-swap. It
+    cannot mark transfers applied, advance their seen cursor, promote HWM or
+    authorize an order. An unreconstructable zero-equity flow remains pending
+    for separate independent attestation.
+    """
+    from bot.binance_accounting_evidence import collect_income
+
+    now_ms = _server_now_ms(client)
+    window_start = now_ms - DETECTION_WINDOW_MS
+    try:
+        rows = await collect_income(client, window_start, now_ms)
+        account = await client.get_account_state()
+        end2 = max(now_ms + 1, _server_now_ms(client))
+        rows_again = await collect_income(client, window_start, end2)
+        account_again = await client.get_account_state()
+    except Exception as exc:
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_EVIDENCE_UNAVAILABLE") from exc
+    if rows != rows_again or account != account_again:
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_EVIDENCE_UNSTABLE")
+    if not isinstance(account, dict):
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_ACCOUNT_UNVERIFIED")
+    flat, _ = _account_flat(account)
+    if not flat or _finite(account.get("equity"), "equity") != 0.0:
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_ACCOUNT_UNVERIFIED")
+
+    cursor_raw = await db.load_key_value(SEEN_CURSOR_KEY, strict=strict)
+    ledger_raw = await db.load_key_value(LEDGER_KEY, strict=strict)
+    if cursor_raw is None or ledger_raw is None:
+        # Do not bootstrap a new cursor after capital has been removed:
+        # doing so could mark a missing outflow as already seen.
+        raise CashFlowBlocked("BINANCE_ZERO_EQUITY_LEDGER_NOT_BOOTSTRAPPED")
+    seen = set(_parse_cursor(cursor_raw))
+    doc = _parse_ledger(ledger_raw)
+    known = seen | {str(p["identity"]) for p in doc["pending"]} | applied_identities(doc)
+    new_flows = []
+    for row in rows:
+        if classify_income_type(row.get("incomeType")) != "EXTERNAL_FLOW":
+            continue
+        flow = _normalize_flow(row, now_ms)
+        if flow["asset"] != "USDT":
+            raise CashFlowBlocked("BINANCE_ZERO_EQUITY_NON_USDT_FLOW")
+        if flow["identity"] not in known:
+            new_flows.append(flow)
+            known.add(flow["identity"])
+    if new_flows:
+        updated = {**doc, "pending": list(doc["pending"]) + new_flows}
+        ok = await save_key_values_atomic_cas(
+            [(LEDGER_KEY, _dump(updated))],
+            expected={LEDGER_KEY: ledger_raw}, strict=strict,
+        )
+        if strict and not ok:
+            raise db.PersistenceError("zero-equity pending cash-flow write not confirmed")
+    log.warning(
+        "[CASH_FLOW_ZERO_EQUITY] captured_pending=%d "
+        "hwm_changed=false seen_cursor_changed=false applied=false "
+        "execution_effect=BLOCK_NEW_ENTRIES",
+        len(new_flows),
+    )
+    return {"captured_pending": len(new_flows), "blocked": True,
+            "hwm_changed": False, "applied": 0}
+
+
 async def reconcile_binance(client, risk, current_equity: float, *, strict: bool = True) -> dict:
     from bot.binance_accounting_evidence import collect_income
 
