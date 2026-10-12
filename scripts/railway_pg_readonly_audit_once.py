@@ -16,6 +16,7 @@ import os
 
 from scripts.pg_readonly_role_audit import run
 from scripts.pg_temp_grant_origin import inspect_temp_origin, origin_log_line
+from scripts.pg_temp_consumer_inventory import collect as collect_consumers, log_line as inventory_log_line
 
 EXPECTED_CHECKS = {1: 1, 2: 1, 3: 3, 4: 2, 5: 2, 6: 2, 7: 1, 8: 1}
 DSN_ENV = "OOS_DIAGNOSTIC_DATABASE_URL"
@@ -102,6 +103,8 @@ async def execute() -> int:
     close_ok = True
     temp_origin = None
     temp_origin_attempted = False
+    consumer_inventory = None
+    consumer_inventory_attempted = False
     try:
         # The diagnostic credential is never transferred to the bot engine.
         import asyncpg
@@ -127,6 +130,19 @@ async def execute() -> int:
                 # Never print database/driver errors (they may contain DSNs).
                 # A failed provenance query cannot make the main audit PASS.
                 temp_origin = None
+
+            # Separate bounded catalog/statistics evidence for issue #649.
+            # This does not alter the original role audit or prove absence of
+            # other sessions/consumers across the full workload lifecycle.
+            consumer_inventory_attempted = True
+            try:
+                async with conn.transaction(readonly=True):
+                    consumer_inventory = await asyncio.wait_for(
+                        collect_consumers(conn), timeout=8
+                    )
+            except Exception:
+                # No raw driver/SQL exception or identity in logs.
+                consumer_inventory = None
     except Exception:
         # Do NOT print exception text/traceback: some drivers include DSNs.
         return _emit("INCONCLUSIVE")
@@ -145,6 +161,8 @@ async def execute() -> int:
         return _emit("INCONCLUSIVE")
     if temp_origin_attempted:
         print(origin_log_line(temp_origin), flush=True)
+    if consumer_inventory_attempted:
+        print(inventory_log_line(consumer_inventory), flush=True)
     return _emit("PASS" if audit.verified else "FAIL", audit.rows)
 
 
