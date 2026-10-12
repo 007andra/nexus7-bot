@@ -35,7 +35,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(v31.PREREG_EPOCH, 1791833992.0)
         bad = v31.EnrollmentAuthority("a" * 40, v31.PREREG_EPOCH - 1,
                                       v31.PREREG_EPOCH + 150, "safe-review")
-        with self.assertRaisesRegex(v31.RosterEvidenceError, "CHRONOLOGICAL"):
+        with self.assertRaisesRegex(v31.RosterEvidenceError, "INVALID_TIMESTAMP"):
             v31.propose_roster([candidate(0)], authority=bad)
         missing = v31.EnrollmentAuthority("not_sha", v31.PREREG_EPOCH + 1,
                                           v31.PREREG_EPOCH + 2, "safe-review")
