@@ -18,7 +18,8 @@ from uuid import uuid4
 TEST_DSN = os.environ.get("TEST_POSTGRES_DSN", "")
 
 
-@unittest.skipUnless(TEST_DSN, "isolated PostgreSQL required")
+@unittest.skipUnless(TEST_DSN and os.environ.get("GITHUB_ACTIONS") == "true",
+                     "isolated GitHub Actions PostgreSQL only")
 class TempPublicRevocationCompatibilityPostgres(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         import asyncpg
