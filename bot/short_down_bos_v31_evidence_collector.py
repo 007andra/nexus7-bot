@@ -49,6 +49,7 @@ FORBIDDEN_PERMISSIONS = (
     "enableFutures", "enableSpotAndMarginTrading", "enableMargin",
     "enableWithdrawals", "enableInternalTransfer", "permitsUniversalTransfer",
     "enableVanillaOptions", "enablePortfolioMarginTrading",
+    "enableFixApiTrade",
 )
 BAR_MS = 15 * 60_000
 FUNDING_PAGE_LIMIT = 1000
