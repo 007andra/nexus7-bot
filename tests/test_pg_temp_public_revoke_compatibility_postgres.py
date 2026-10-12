@@ -10,30 +10,40 @@ from __future__ import annotations
 
 import logging
 import os
-from unittest import IsolatedAsyncioTestCase
+import unittest
 from unittest.mock import patch
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from uuid import uuid4
 
 TEST_DSN = os.environ.get("TEST_POSTGRES_DSN", "")
 
 
-@__import__("unittest").skipUnless(TEST_DSN, "isolated PostgreSQL required")
-class TempPublicRevocationCompatibilityPostgres(IsolatedAsyncioTestCase):
+@unittest.skipUnless(TEST_DSN, "isolated PostgreSQL required")
+class TempPublicRevocationCompatibilityPostgres(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         import asyncpg
 
         suffix = uuid4().hex[:12]
         self.dbname = f"temp_scope_{suffix}"
         self.login = f"temp_app_{suffix}"
-        self.admin = await asyncpg.connect(TEST_DSN)
+        self.admin = None
         self.app = None
         self.database_created = False
         self.role_created = False
-        self._register_cleanup = True
+        # Prevent accidental use on ANY production DSN, even if a CI secret
+        # unexpectedly points to a remote server. Verify before SQL mutation.
+        parsed = urlparse(TEST_DSN)
+        if (os.environ.get("GITHUB_ACTIONS") != "true"
+                or parsed.scheme not in ("postgresql", "postgres")
+                or parsed.hostname not in ("localhost", "127.0.0.1")
+                or parsed.port != 5432
+                or parsed.path != "/nexus_release_proof"
+                or parsed.username != "proof"):
+            self.fail("PostgreSQL fixture is not the pinned local CI service")
+
         # addAsyncCleanup executes even if asyncSetUp fails partway through.
         self.addAsyncCleanup(self._cleanup_database_and_role)
-
+        self.admin = await asyncpg.connect(TEST_DSN)
         await self.admin.execute(
             f"CREATE ROLE {self.login} LOGIN PASSWORD 'test-only-password'"
         )
@@ -41,20 +51,13 @@ class TempPublicRevocationCompatibilityPostgres(IsolatedAsyncioTestCase):
         await self.admin.execute(f"CREATE DATABASE {self.dbname}")
         self.database_created = True
 
-        parsed = urlparse(TEST_DSN)
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 5432
-        if not (host in ("localhost", "127.0.0.1", "::1")
-                or os.environ.get("GITHUB_ACTIONS", "").lower() == "true"):
-            self.skipTest("destructive setup requires isolated CI database")
-        app_dsn = (
-            f"postgresql://{self.login}:test-only-password@"
-            f"{host}:{port}/{self.dbname}"
-        )
+        host, port = parsed.hostname, parsed.port
         # Only the transient fixture database's ACL and public schema grants
-        # are changed.  Never manipulate the shared CI database privileges.
-        isolated_admin_dsn = TEST_DSN.rsplit("/", 1)[0] + "/" + self.dbname
-        scoped_admin = await asyncpg.connect(isolated_admin_dsn)
+        # are changed. Never manipulate the shared CI database privileges.
+        scoped_admin = await asyncpg.connect(
+            host=host, port=port, database=self.dbname,
+            user=parsed.username, password=unquote(parsed.password or ""),
+        )
         try:
             await scoped_admin.execute(
                 f"REVOKE TEMPORARY ON DATABASE {self.dbname} FROM PUBLIC"
@@ -68,7 +71,10 @@ class TempPublicRevocationCompatibilityPostgres(IsolatedAsyncioTestCase):
         finally:
             await scoped_admin.close()
 
-        self.app = await asyncpg.connect(app_dsn)
+        self.app = await asyncpg.connect(
+            host=host, port=port, database=self.dbname,
+            user=self.login, password="test-only-password",
+        )
 
     async def _cleanup_database_and_role(self):
         if self.app is not None:
@@ -172,4 +178,4 @@ class TempPublicRevocationCompatibilityPostgres(IsolatedAsyncioTestCase):
 
 
 if __name__ == "__main__":
-    __import__("unittest").main()
+    unittest.main()
