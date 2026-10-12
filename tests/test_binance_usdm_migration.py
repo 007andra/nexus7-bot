@@ -205,6 +205,48 @@ class BinanceMigrationTests(unittest.TestCase):
         self.assertIs(state["multiAssetsMargin"], False)
         self.assertIn(("GET", "/fapi/v1/accountConfig", {}, True), client.calls)
 
+    def test_missing_equity_and_collateral_are_not_synthetic_zero(self):
+        # The read-only account endpoint may return a partial dict without
+        # raising. Such a response must not publish zero as exchange truth.
+        config = {"canTrade": True, "multiAssetsMargin": False}
+        for payload, code in (
+            ({}, "BINANCE_ACCOUNT_EQUITY_UNAVAILABLE"),
+            ({"availableBalance": "0"}, "BINANCE_ACCOUNT_EQUITY_UNAVAILABLE"),
+            ({"totalMarginBalance": "0"}, "BINANCE_ACCOUNT_AVAILABLE_UNAVAILABLE"),
+            ({"totalWalletBalance": "0"}, "BINANCE_ACCOUNT_AVAILABLE_UNAVAILABLE"),
+            ({"totalMarginBalance": "9", "availableBalance": None},
+             "BINANCE_ACCOUNT_AVAILABLE_UNAVAILABLE"),
+        ):
+            with self.subTest(payload=payload):
+                client = FakeBinance({
+                    "/fapi/v3/account": payload,
+                    "/fapi/v1/accountConfig": config,
+                })
+                with self.assertRaisesRegex(RuntimeError, code):
+                    run(client.get_account_state())
+                self.assertEqual(client.calls[0][1], "/fapi/v3/account")
+                self.assertTrue(all(method == "GET" and authenticated
+                                    for method, _, _, authenticated in client.calls))
+
+    def test_explicit_zero_account_values_remain_valid_read_only_evidence(self):
+        config = {"canTrade": True, "multiAssetsMargin": False}
+        for payload in (
+            {"totalMarginBalance": "0", "totalWalletBalance": "0",
+             "availableBalance": "0"},
+            {"totalWalletBalance": "0.00000000", "availableBalance": "0"},
+        ):
+            with self.subTest(payload=payload):
+                client = FakeBinance({
+                    "/fapi/v3/account": payload,
+                    "/fapi/v1/accountConfig": config,
+                })
+                state = run(client.get_account_state())
+                self.assertEqual(state["equity"], 0.0)
+                self.assertEqual(state["available"], 0.0)
+                self.assertFalse(state["multiAssetsMargin"])
+                self.assertTrue(state["canTrade"])
+                self.assertTrue(all(method == "GET" for method, *_ in client.calls))
+
     def test_account_config_is_authoritative_over_v3_flags_and_fresh(self):
         client = FakeBinance({
             "/fapi/v3/account": {"totalMarginBalance": "6", "availableBalance": "6",
