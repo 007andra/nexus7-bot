@@ -270,3 +270,35 @@ def test_one_shot_cli_does_not_mark_partial_income_as_success():
     assert code == 2
     assert json.loads(buf.getvalue())["destination"] == "UNVERIFIED"
     client.close.assert_awaited_once()
+
+
+def test_cli_exit_zero_requires_unique_exact_transaction_identity():
+    from unittest.mock import AsyncMock
+    client = SimpleNamespace(close=AsyncMock())
+    async def only_time_amount(*args):
+        return {"status": "AMOUNT_TIME_ONLY", "destination": "UNVERIFIED"}
+    out = io.StringIO()
+    with (patch("bot.binance.BinanceClient", return_value=client),
+          patch.object(proof, "probe", only_time_amount), redirect_stdout(out)):
+        code = run(proof._main(SimpleNamespace(
+            start_utc="2026-10-11T19:39:00Z",
+            end_utc="2026-10-11T19:43:00Z",
+        )))
+    assert code == 2
+    assert json.loads(out.getvalue())["destination"] == "UNVERIFIED"
+
+    client2 = SimpleNamespace(close=AsyncMock())
+    async def exact_match(*args):
+        return {"status": "EXACT_ID_AND_AMOUNT_TIME", "destination": "SPOT",
+                "destination_credit_confirmed": False}
+    out2 = io.StringIO()
+    with (patch("bot.binance.BinanceClient", return_value=client2),
+          patch.object(proof, "probe", exact_match), redirect_stdout(out2)):
+        code2 = run(proof._main(SimpleNamespace(
+            start_utc="2026-10-11T19:39:00Z",
+            end_utc="2026-10-11T19:43:00Z",
+        )))
+    assert code2 == 0
+    record = json.loads(out2.getvalue())
+    assert record["destination"] == "SPOT"
+    assert record["destination_credit_confirmed"] is False
