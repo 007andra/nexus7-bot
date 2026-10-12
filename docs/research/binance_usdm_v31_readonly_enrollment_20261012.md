@@ -37,3 +37,16 @@ A later separately reviewed milestone may implement: (a) an append-only immutabl
 `python -m unittest tests.test_short_down_bos_v31_readonly_enrollment -v`
 
 Full CI (Quality Check and Supply Chain Security) is required. Zero real trading actions are in the test suite.
+
+
+## Milestone 2 — deterministic append-only hash-chain *proposal*
+
+`bot.short_down_bos_v31_manifest` adds a **pure, offline** manifest state transition to the same draft PR. It is NOT connected to runtime, PostgreSQL, filesystems, S3, Binance or live order execution. Every chronological natural approval becomes an immutable dataclass event with SHA256 hash of the full original entry/SL/TP geometry, symbol, timestamp, candidate ID, disposition, sequence and previous digest. A duplicate ID with changed geometry, backward timestamp, conflicting sequence, omission, altered event, or changed preapproved cutoff fails closed.
+
+An over-cap symbol creates a `SKIPPED_SYMBOL_CAP` event, not an invisible replacement. Entries after the first forty are `SKIPPED_AFTER_40`; outcome quality is never an input. `verify_manifest` recomputes the entire chain and independently checks per-symbol caps, chronological order, monotonic sequence, original geometry and allowed decisions. A separately supplied trusted `head_digest` can detect rewrites relative to a **genuinely protected external anchor**.
+
+**IMPORTANT security boundary:** A SHA256 chain by itself does NOT stop a privileged writer from replacing all events and recalculating digests. The module neither signs events nor provides durable append-only storage, independent notarization or a trusted history. All output continues to expose `roster_durable=false`, `net_evidence_ready=false`, `promotion_allowed=false` and `live_allowed=false`. The runtime cannot truthfully claim that the 40 have been enrolled. A future separately reviewed storage adapter must guarantee atomic compare-and-append / UNIQUE candidate ID, append-only immutable rows, source-verifiable cutoff, protected external head anchors and crash-safe resume, under a research-only database role, with no trading DB write privileges.
+
+No production deployment or flag enabling is authorized by CI alone. No protocol #658 changes, no account access, no new capital transaction or LIVE order.
+
+New standalone suite: `python -m unittest tests.test_short_down_bos_v31_manifest -v`.
