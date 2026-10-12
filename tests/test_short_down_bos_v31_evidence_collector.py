@@ -14,10 +14,11 @@ READ_ONLY = {"enableReading": True, **{key: False for key in col.FORBIDDEN_PERMI
 
 
 class FakeTransport:
-    def __init__(self, restrictions=READ_ONLY, clock=ENTRY):
+    def __init__(self, restrictions=READ_ONLY, clock=ENTRY, book_delay_ms=0):
         self.calls = []
         self.restrictions = dict(restrictions)
         self.clock = clock
+        self.book_delay_ms = book_delay_ms
 
     async def __call__(self, host, path, query, headers):
         self.calls.append((host, path, dict(query), dict(headers)))
@@ -26,7 +27,8 @@ class FakeTransport:
         if path == "/fapi/v1/time":
             return {"serverTime": self.clock}
         if path == "/fapi/v1/ticker/bookTicker":
-            return {"symbol": SYM, "bidPrice": "99.99", "askPrice": "100.01", "time": self.clock}
+            return {"symbol": SYM, "bidPrice": "99.99", "askPrice": "100.01",
+                    "time": self.clock - self.book_delay_ms}
         if path == "/fapi/v1/exchangeInfo":
             return {"symbols": [{"symbol": SYM, "status": "TRADING", "filters": [
                 {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
@@ -134,6 +136,50 @@ class EvidenceTests(unittest.IsolatedAsyncioTestCase):
         out = ev.evaluate_candidate(CANDIDATE, e, as_of_ms=ENTRY + 10**8)
         self.assertEqual(out["status"], ev.PROVEN, out)
         self.assertGreater(out["net_240"], out["net_60"])  # funding received after 60m
+
+    async def test_entry_metadata_precedes_the_timestamped_quote(self):
+        transport = FakeTransport()
+        client = col.ReadOnlyBinanceResearchClient(transport, environ=ENV)
+        await client.preflight()
+        evidence = await col.capture_entry(
+            client, CANDIDATE, reference_notional="100", leverage=3,
+            slippage_fraction="0.0005", protection=PROTECTION)
+        paths = [call[1] for call in transport.calls]
+        quote = paths.index("/fapi/v1/ticker/bookTicker")
+        self.assertLess(paths.index("/fapi/v1/commissionRate"), quote)
+        self.assertLess(paths.index("/fapi/v1/exchangeInfo"), quote)
+        self.assertLess(paths.index("/fapi/v1/leverageBracket"), quote)
+        self.assertEqual(paths[quote + 1], "/fapi/v1/time")
+        self.assertEqual(evidence["signal_captured_ms"], CANDIDATE["captured_ms"])
+        self.assertEqual(evidence["entry_book_read_ms"], ENTRY)
+
+    async def test_pre_signal_and_stale_quotes_fail_closed(self):
+        cases = [
+            (FakeTransport(), {**CANDIDATE, "captured_ms": ENTRY + 1},
+             "ENTRY_BOOK_PRECEDES_SIGNAL"),
+            (FakeTransport(book_delay_ms=2_001), CANDIDATE, "ENTRY_BOOK_NOT_FRESH"),
+            (FakeTransport(), {k: v for k, v in CANDIDATE.items()
+                               if k != "captured_ms"}, "CANDIDATE_TIMESTAMP_INVALID"),
+        ]
+        for transport, candidate, reason in cases:
+            with self.subTest(reason=reason):
+                client = col.ReadOnlyBinanceResearchClient(transport, environ=ENV)
+                await client.preflight()
+                with self.assertRaisesRegex(col.CollectorRefused, reason):
+                    await col.capture_entry(
+                        client, candidate, reference_notional="100", leverage=3,
+                        slippage_fraction="0.0005", protection=PROTECTION)
+
+    async def test_canonical_epoch_seconds_are_accepted_as_signal_provenance(self):
+        transport = FakeTransport()
+        client = col.ReadOnlyBinanceResearchClient(transport, environ=ENV)
+        await client.preflight()
+        candidate = {k: v for k, v in CANDIDATE.items() if k != "captured_ms"}
+        candidate["captured_epoch"] = (ENTRY - 500) / 1000
+        evidence = await col.capture_entry(
+            client, candidate, reference_notional="100", leverage=3,
+            slippage_fraction="0.0005", protection=PROTECTION)
+        self.assertEqual(evidence["signal_captured_ms"], ENTRY - 500)
 
     async def test_late_horizon_quote_is_never_accepted(self):
         transport = FakeTransport()
