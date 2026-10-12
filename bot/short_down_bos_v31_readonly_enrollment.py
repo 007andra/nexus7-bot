@@ -63,14 +63,17 @@ class EnrollmentAuthority:
         return max(PREREG_EPOCH, commit, authorized)
 
 
-def _epoch(value) -> float:
+def _epoch(value, *, historical_candidate=False) -> float:
     if isinstance(value, bool):
         raise RosterEvidenceError("V31_INVALID_TIMESTAMP")
     try:
         result = float(value)
     except (TypeError, ValueError, OverflowError):
         raise RosterEvidenceError("V31_INVALID_TIMESTAMP") from None
-    if not math.isfinite(result) or not (PREREG_EPOCH <= result <= 4_102_444_800):
+    # The chronological admission cutoff applies to enrollment, not to
+    # parsing historical candidates that must be safely excluded.
+    min_epoch = 0.0 if historical_candidate else PREREG_EPOCH
+    if not math.isfinite(result) or not (min_epoch < result <= 4_102_444_800):
         raise RosterEvidenceError("V31_INVALID_TIMESTAMP")
     return result
 
@@ -106,7 +109,7 @@ def propose_roster(candidates, *, authority: EnrollmentAuthority,
             raise RosterEvidenceError("V31_INVALID_ROW_SHAPE")
         if not _is_canonical(raw):
             continue
-        t = _epoch(raw.get("captured_epoch"))
+        t = _epoch(raw.get("captured_epoch"), historical_candidate=True)
         if t <= cutoff:
             continue
         cid = raw.get("candidate_id")
