@@ -70,7 +70,8 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_any_write_permission_on_research_key_is_refused(self):
         for perm in ("enableFutures", "enableWithdrawals", "enableInternalTransfer",
-                     "enableSpotAndMarginTrading", "permitsUniversalTransfer"):
+                     "enableSpotAndMarginTrading", "permitsUniversalTransfer",
+                     "enableFixApiTrade"):
             with self.subTest(perm=perm):
                 client = col.ReadOnlyBinanceResearchClient(
                     FakeTransport({**READ_ONLY, perm: True}), environ=ENV)
