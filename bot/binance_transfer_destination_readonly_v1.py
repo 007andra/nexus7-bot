@@ -155,7 +155,14 @@ def compare_income_and_routes(income_rows: list[dict], by_route: dict[str, list[
 async def probe(client, start_ms: int, end_ms: int, reader=None) -> dict:
     start_ms, end_ms = _window(start_ms, end_ms)
     # All five calls are authenticated GETs; not called automatically by the bot.
-    income = await collect_income(client, start_ms, end_ms)
+    try:
+        income = await collect_income(client, start_ms, end_ms)
+    except Exception:
+        # Exchange failures may include response bodies in exception messages.
+        # Preserve neither the message nor a misleading destination inference.
+        return {"status": "INCOMPLETE_INCOME_EVIDENCE", "destination": "UNVERIFIED",
+                "authority": False, "decision_effect": "NONE",
+                "execution_effect": "NONE"}
     history_reader = reader or read_route
     by_route = {}
     for kind in ROUTES:
@@ -177,18 +184,40 @@ def _parse_utc(value: str) -> int:
 
 
 async def _main(args):
-    from bot.binance import BinanceClient
-    client = BinanceClient()
+    client = None
     try:
-        result = await probe(client, _parse_utc(args.start_utc), _parse_utc(args.end_utc))
-        # Never emit transaction identifiers, request parameters or sensitive payloads.
+        # Include parsing and client initialization within the redacted boundary.
+        start_ms = _parse_utc(args.start_utc)
+        end_ms = _parse_utc(args.end_utc)
+        _window(start_ms, end_ms)
+        from bot.binance import BinanceClient
+        client = BinanceClient()
+        result = await probe(client, start_ms, end_ms)
+        # No transaction IDs, credentials or raw API errors in the report.
         print(json.dumps(result, sort_keys=True))
+        return 2 if result["status"] in {
+            "INCOMPLETE_INCOME_EVIDENCE", "INCOMPLETE_ROUTE_COVERAGE"
+        } else 0
+    except Exception:
+        # A traceback can expose signed HTTP response details. Fail closed with
+        # a constant, non-sensitive envelope; an absent result is never proof.
+        print(json.dumps({
+            "status": "PROBE_FAILED_CLOSED", "destination": "UNVERIFIED",
+            "authority": False, "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        }, sort_keys=True))
+        return 2
     finally:
-        await client.close()
+        if client is not None:
+            try:
+                await client.close()
+            except Exception:
+                # Close failures must not print raw driver or HTTP messages.
+                pass
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="One-time, Binance signed GET-only transfer probe")
     parser.add_argument("--start-utc", required=True)
     parser.add_argument("--end-utc", required=True)
-    asyncio.run(_main(parser.parse_args()))
+    raise SystemExit(asyncio.run(_main(parser.parse_args())))
