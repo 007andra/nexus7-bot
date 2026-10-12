@@ -1,5 +1,8 @@
 """Offline, credential-free verification for the one-shot SAPI destination probe."""
 import asyncio
+import io
+import json
+from contextlib import redirect_stdout
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import TestCase
@@ -200,3 +203,70 @@ def test_probe_missing_permission_fails_closed_instead_of_guessing():
     assert r["status"] == "INCOMPLETE_ROUTE_COVERAGE"
     assert r["destination"] == "UNVERIFIED"
     assert "not-authorized" not in str(r)
+
+
+def test_failed_futures_income_get_hides_private_response_and_aborts_routes():
+    async def damaged_income(_client, _start, _end):
+        raise RuntimeError("SIGNED_GET_PRIVATE_API_BODY_DO_NOT_LEAK")
+    route_called = []
+    async def route_reader(*args):
+        route_called.append(True)
+        return []
+    with patch.object(proof, "collect_income", damaged_income):
+        result = run(proof.probe(
+            SimpleNamespace(), 1_000_000, 1_100_000, reader=route_reader,
+        ))
+    assert result == {
+        "status": "INCOMPLETE_INCOME_EVIDENCE", "destination": "UNVERIFIED",
+        "authority": False, "decision_effect": "NONE",
+        "execution_effect": "NONE",
+    }
+    assert route_called == []
+    assert "PRIVATE_API_BODY" not in repr(result)
+
+
+def test_one_shot_cli_rejects_raw_authenticated_error_without_traceback():
+    client = SimpleNamespace(close=__import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock())
+    async def bad_probe(*args):
+        raise RuntimeError("SIGNED_RESPONSE_SECRET_DO_NOT_LOG")
+    buf = io.StringIO()
+    with (patch("bot.binance.BinanceClient", return_value=client),
+          patch.object(proof, "probe", bad_probe), redirect_stdout(buf)):
+        code = run(proof._main(SimpleNamespace(
+            start_utc="2026-10-11T19:39:00Z",
+            end_utc="2026-10-11T19:43:00Z",
+        )))
+    assert code == 2
+    result = json.loads(buf.getvalue())
+    assert result["status"] == "PROBE_FAILED_CLOSED"
+    assert result["destination"] == "UNVERIFIED"
+    assert "SIGNED_RESPONSE_SECRET" not in buf.getvalue()
+    client.close.assert_awaited_once()
+
+
+def test_one_shot_cli_validates_window_before_initializing_binance_client():
+    buf = io.StringIO()
+    with patch("bot.binance.BinanceClient") as ctor, redirect_stdout(buf):
+        code = run(proof._main(SimpleNamespace(
+            start_utc="2026-10-11T19:39:00",
+            end_utc="2026-10-11T19:43:00Z",
+        )))
+    assert code == 2
+    assert json.loads(buf.getvalue())["status"] == "PROBE_FAILED_CLOSED"
+    ctor.assert_not_called()
+
+
+def test_one_shot_cli_does_not_mark_partial_income_as_success():
+    client = SimpleNamespace(close=__import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock())
+    async def incomplete_probe(*args):
+        return {"status": "INCOMPLETE_INCOME_EVIDENCE", "destination": "UNVERIFIED"}
+    buf = io.StringIO()
+    with (patch("bot.binance.BinanceClient", return_value=client),
+          patch.object(proof, "probe", incomplete_probe), redirect_stdout(buf)):
+        code = run(proof._main(SimpleNamespace(
+            start_utc="2026-10-11T19:39:00Z",
+            end_utc="2026-10-11T19:43:00Z",
+        )))
+    assert code == 2
+    assert json.loads(buf.getvalue())["destination"] == "UNVERIFIED"
+    client.close.assert_awaited_once()
