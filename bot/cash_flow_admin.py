@@ -78,10 +78,18 @@ async def _run(args) -> dict:
                 # can go stale while the Binance ledger is being paginated.
                 # An old --since-ms window cannot prove current equity.
                 verified_now_ms = client._now_ms()
-                second_end = min(verified_now_ms, int(start) + _WINDOW_MS)
+                # The default lookback must slide with the second observation.
+                # Otherwise any nonzero elapsed time makes second_end stale and
+                # falsely rejects every normal --apply call. Explicit --since-ms
+                # stays fixed and fails closed when it no longer covers now.
+                second_start = (
+                    verified_now_ms - _WINDOW_MS
+                    if args.since_ms is None else int(start)
+                )
+                second_end = min(verified_now_ms, second_start + _WINDOW_MS)
                 if second_end < verified_now_ms:
                     raise ValueError("incomplete Binance income window: attestation apply refused")
-                rows_again = await collect_income(client, int(start), second_end)
+                rows_again = await collect_income(client, second_start, second_end)
                 account_again = await client.get_account_state()
                 if rows_again != rows or not isinstance(account_again, dict):
                     raise ValueError("unstable Binance income evidence: attestation apply refused")
