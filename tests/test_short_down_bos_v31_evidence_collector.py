@@ -156,6 +156,29 @@ class EvidenceTests(unittest.IsolatedAsyncioTestCase):
         out = ev.evaluate_candidate(CANDIDATE, e, as_of_ms=ENTRY + 10**8)
         self.assertEqual(out["reason"], "TRIGGER_PRICE_SOURCE_MISMATCH")
 
+    async def test_path_requires_matured_last_mark_bar(self):
+        transport = FakeTransport()
+        client = col.ReadOnlyBinanceResearchClient(transport, environ=ENV)
+        await client.preflight()
+        e = await col.capture_entry(
+            client, CANDIDATE, reference_notional="100", leverage=3,
+            slippage_fraction="0.0005", protection=PROTECTION,
+        )
+        end = e["entry_ms"] + 240 * 60_000
+        closed_at = ((end + col.BAR_MS - 1) // col.BAR_MS) * col.BAR_MS
+        transport.clock = closed_at - 1
+        with self.assertRaisesRegex(col.CollectorRefused, "PATH_HORIZON_NOT_MATURED"):
+            await col.capture_path(client, e)
+        self.assertNotIn("bars", e)
+        self.assertNotIn("funding", e)
+        self.assertNotIn("/fapi/v1/fundingRate", [v[1] for v in transport.calls])
+        self.assertNotIn("/fapi/v1/markPriceKlines", [v[1] for v in transport.calls])
+
+        transport.clock = closed_at
+        await col.capture_path(client, e)
+        self.assertEqual(e["path_observed_ms"], closed_at)
+        self.assertTrue(e["funding"]["coverage"]["complete"])
+
     def test_full_funding_page_has_no_coverage_proof(self):
         page = [{"symbol": SYM, "fundingTime": i, "fundingRate": "0", "markPrice": "1"}
                 for i in range(col.FUNDING_PAGE_LIMIT)]
