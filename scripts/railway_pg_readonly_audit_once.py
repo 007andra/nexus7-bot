@@ -15,6 +15,7 @@ from collections import Counter
 import os
 
 from scripts.pg_readonly_role_audit import run
+from scripts.pg_temp_grant_origin import inspect_temp_origin, origin_log_line
 
 EXPECTED_CHECKS = {1: 1, 2: 1, 3: 3, 4: 2, 5: 2, 6: 2, 7: 1, 8: 1}
 DSN_ENV = "OOS_DIAGNOSTIC_DATABASE_URL"
@@ -99,6 +100,8 @@ async def execute() -> int:
 
     conn = None
     close_ok = True
+    temp_origin = None
+    temp_origin_attempted = False
     try:
         # The diagnostic credential is never transferred to the bot engine.
         import asyncpg
@@ -108,6 +111,22 @@ async def execute() -> int:
         )
         async with conn.transaction(readonly=True):
             audit = await asyncio.wait_for(run(conn), timeout=45)
+
+        # Attribution is supplemental: its own READ ONLY transaction cannot
+        # change the authoritative 13-check audit result. Query only when the
+        # valid audit found effective TEMP privilege (group 3 TEMP=FAIL).
+        if (_report_complete(audit)
+                and _group3_results(audit.rows)["TEMP"] == "FAIL"):
+            temp_origin_attempted = True
+            try:
+                async with conn.transaction(readonly=True):
+                    temp_origin = await asyncio.wait_for(
+                        inspect_temp_origin(conn), timeout=6
+                    )
+            except Exception:
+                # Never print database/driver errors (they may contain DSNs).
+                # A failed provenance query cannot make the main audit PASS.
+                temp_origin = None
     except Exception:
         # Do NOT print exception text/traceback: some drivers include DSNs.
         return _emit("INCONCLUSIVE")
@@ -124,6 +143,8 @@ async def execute() -> int:
 
     if not close_ok or not _report_complete(audit):
         return _emit("INCONCLUSIVE")
+    if temp_origin_attempted:
+        print(origin_log_line(temp_origin), flush=True)
     return _emit("PASS" if audit.verified else "FAIL", audit.rows)
 
 

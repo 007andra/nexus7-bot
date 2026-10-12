@@ -86,6 +86,88 @@ class ReadOnlyRoleAuditPostgresTests(unittest.IsolatedAsyncioTestCase):
     def _failed_items(self, audit):
         return sorted({r["item"] for r in audit.rows if r["result"] == "FAIL"})
 
+    async def _temp_origin(self, key="ro"):
+        """Query a disposable PostgreSQL database via the diagnostic login."""
+        import asyncpg
+        from scripts.pg_temp_grant_origin import inspect_temp_origin
+        conn = await asyncpg.connect(_dsn(self.roles[key], self.db))
+        try:
+            async with conn.transaction(readonly=True):
+                return await inspect_temp_origin(conn)
+        finally:
+            await conn.close()
+
+    async def test_temp_origin_rejects_absent_effective_privilege(self):
+        with self.assertRaises(ValueError):
+            await self._temp_origin()
+
+    async def test_temp_origin_public_grant_is_database_wide(self):
+        import asyncpg
+        admin = await asyncpg.connect(DSN)
+        try:
+            await admin.execute(f"GRANT TEMP ON DATABASE {self.db} TO PUBLIC")
+        finally:
+            await admin.close()
+
+        origin = await self._temp_origin()
+        self.assertTrue(origin.from_public)
+        self.assertFalse(origin.from_direct)
+        self.assertFalse(origin.from_inherited)
+        self.assertFalse(origin.from_owner)
+        self.assertFalse(origin.default_acl)
+        # The fixture has three other connectable LOGIN roles depending on
+        # PUBLIC TEMP. The count is never logged; only a cardinality band.
+        self.assertGreaterEqual(origin.other_login_roles_public_dependent, 1)
+
+    async def test_temp_origin_direct_role_grant(self):
+        import asyncpg
+        admin = await asyncpg.connect(DSN)
+        try:
+            await admin.execute(
+                f"GRANT TEMP ON DATABASE {self.db} TO {self.roles['ro']}")
+        finally:
+            await admin.close()
+
+        origin = await self._temp_origin()
+        self.assertTrue(origin.from_direct)
+        self.assertFalse(origin.from_public)
+        self.assertFalse(origin.from_inherited)
+        self.assertFalse(origin.from_owner)
+        self.assertEqual(origin.other_login_roles_public_dependent, 0)
+
+    async def test_temp_origin_effective_inherited_grant(self):
+        import asyncpg
+        admin = await asyncpg.connect(DSN)
+        try:
+            await admin.execute(
+                f"GRANT TEMP ON DATABASE {self.db} TO {self.roles['writer']}")
+            await admin.execute(
+                f"GRANT {self.roles['writer']} TO {self.roles['ro']}")
+        finally:
+            await admin.close()
+
+        origin = await self._temp_origin()
+        self.assertTrue(origin.from_inherited)
+        self.assertFalse(origin.from_direct)
+        self.assertFalse(origin.from_public)
+        self.assertFalse(origin.from_owner)
+
+    async def test_temp_origin_multiple_grants_are_not_hidden(self):
+        import asyncpg
+        admin = await asyncpg.connect(DSN)
+        try:
+            await admin.execute(f"GRANT TEMP ON DATABASE {self.db} TO PUBLIC")
+            await admin.execute(
+                f"GRANT TEMP ON DATABASE {self.db} TO {self.roles['ro']}")
+        finally:
+            await admin.close()
+
+        origin = await self._temp_origin()
+        self.assertTrue(origin.from_public)
+        self.assertTrue(origin.from_direct)
+        self.assertFalse(origin.from_inherited)
+        self.assertFalse(origin.from_owner)
+
     async def test_read_only_role_is_verified(self):
         audit = await self._audit("ro")
         self.assertTrue(audit.verified, audit.rows)
