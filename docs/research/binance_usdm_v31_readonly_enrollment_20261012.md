@@ -50,3 +50,15 @@ An over-cap symbol creates a `SKIPPED_SYMBOL_CAP` event, not an invisible replac
 No production deployment or flag enabling is authorized by CI alone. No protocol #658 changes, no account access, no new capital transaction or LIVE order.
 
 New standalone suite: `python -m unittest tests.test_short_down_bos_v31_manifest -v`.
+
+
+## Milestone 3 — separated PostgreSQL transactional adapter, OFFLINE ONLY
+
+Files:
+- `bot/short_down_bos_v31_postgres_adapter.py`: caller-supplied **isolated research** PostgreSQL connection, required `nexus_v31_writer` role and dedicated database name `nexus7_research_*`, witnessed previous-chain SHA-256 digest, `SERIALIZABLE` transaction, `SELECT ... FOR UPDATE` head lock, full on-read chain verification, append event `INSERT` plus compare-and-swap head `UPDATE` in the **same transaction**; no automatic database provisioning or credential reading.
+- `docs/research/sql/v31_isolated_manifest.sql`: **DBA-only proposal**, not an executed migration. Existing events protected by privilege denial and a rejection trigger, and header updates constrained to one supported digest step. No real schema or extra Railway service was created.
+- `tests/test_short_down_bos_v31_postgres_adapter.py`: offline fake DB models transaction rollback, stale external witness, idempotent replay, collision, tampered rows, role/db mismatch, missing genesis, CAS race, and reader-only verification. These are simulated tests; real PostgreSQL ownership/DDL + concurrent-transaction integration must pass under an isolated CI DB before production consideration.
+
+**Hard release boundary:** This adapter has **NO autonomous external anchor or cryptographic-signature verification**. `PriorHeadWitness` is merely a caller-provided digest and reference, and must be authenticated **by an independent service** outside the mutable database. A compromised caller with a forged witness can defeat this contract. The new digest returned after committing must be independently anchored before the *next* append. The observed chain is not externally notarized in current production. This library emits `roster_durable=false` on every path: no authorization for retrospective promotion, 40/40 results, funds, orders, risk/HWM or live trading.
+
+The research writer is not authorized to connect to or create the NEXUS production trading database, change production environment variables, create resources with cost, or run the schema proposal. Actual provisioned isolated DB, trusted external signer, immutable/durable manifest, ordering source and independent human review must be separately authorized and verified before any prospective collection starts. A green CI proves code checks, not real PostgreSQL durability.
