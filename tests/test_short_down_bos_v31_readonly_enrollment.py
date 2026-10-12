@@ -94,6 +94,20 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(v31.RosterEvidenceError, "CONFLICTING"):
             v31.propose_roster(rows, authority=authority())
 
+    def test_duplicate_same_time_and_symbol_with_altered_stop_fails(self):
+        base = candidate(3)
+        changed = dict(base)
+        changed["stop"] = 103.0
+        with self.assertRaisesRegex(v31.RosterEvidenceError, "CONFLICTING"):
+            v31.propose_roster([base, changed], authority=authority())
+
+    def test_duplicate_same_time_and_symbol_with_altered_target_fails(self):
+        base = candidate(5)
+        changed = dict(base)
+        changed["target"] = 94.0
+        with self.assertRaisesRegex(v31.RosterEvidenceError, "CONFLICTING"):
+            v31.propose_roster([base, changed], authority=authority())
+
     def test_duplicate_identical_is_idempotent(self):
         x = candidate(1)
         y = v31.propose_roster([x, dict(x)], authority=authority())
