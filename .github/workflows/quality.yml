@@ -119,6 +119,12 @@ jobs:
       - name: Startup PostgreSQL role audit observer safety contract
         run: python -m unittest -v tests.test_pg_role_audit_startup_once
 
+      - name: PostgreSQL PUBLIC TEMP revocation compatibility on disposable DB
+        run: |
+          test "$GITHUB_ACTIONS" = "true"
+          test "$TEST_POSTGRES_DSN" = "postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof"
+          python -m unittest -v tests.test_pg_temp_public_revoke_compatibility_postgres
+
       - name: P0 CAS real PostgreSQL incident regression (must not skip)
         run: |
           test -n "$TEST_POSTGRES_DSN"
