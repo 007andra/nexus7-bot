@@ -870,11 +870,12 @@ async def attest_flows(
     """Record an operator-attested external flow reconciliation.
 
     Amount, direction and timestamps always come from the exchange ledger rows
-    identified by ``tran_ids``; the operator supplies only the pre-flow equity
-    (with an evidence reference) that the ledger alone cannot prove. When the
-    ledger *can* prove it (see ``ledger_provable_pre_flow_equity``) a typed
-    value that contradicts it is refused. The same ``reconciliation_id`` is
-    idempotent; a flow can never be applied twice.
+    identified by ``tran_ids``. Dry-run may simulate the operator's
+    proposed pre-flow equity, but APPLY requires a provable, authenticated
+    flat-account/complete-ledger snapshot. If a value cannot be proven,
+    FAIL CLOSED and require an independently reviewed risk-epoch procedure,
+    never quietly accept the typed value. The same ``reconciliation_id``
+    is idempotent; a flow can never be applied twice.
     """
     reconciliation_id = str(reconciliation_id or "").strip()
     if not reconciliation_id or len(reconciliation_id) > 64:
@@ -939,12 +940,19 @@ async def attest_flows(
     provable = ledger_provable_pre_flow_equity(
         flows, rows, account, rows_cover_until_ms=rows_cover_until_ms, now_ms=now_ms,
     )
+    # A dry-run can model a manually supplied estimate, but an APPLY must
+    # NEVER promote it to a durable performance HWM without authenticated
+    # account/complete income evidence. Missing/incomplete proof is a separate
+    # fail-closed state, not permission to use operator-typed equity.
+    if apply and provable is None:
+        raise ValueError(
+            "pre-flow equity unverified: no HWM adjustment without complete "
+            "exchange evidence and a flat account; manual risk-epoch review required"
+        )
     if provable is not None:
         if provable <= 0:
-            # Recapitalising an emptied account: the typed pre-flow equity is
-            # the only input that would rebase the HWM, and the exchange proves
-            # it was zero. Attesting the deposit alone would let any typed
-            # value erase historical drawdown.
+            # A zero-equity recapitalisation cannot create a clean risk history:
+            # the outflow preceding the zero must also be reconciled.
             raise ValueError(
                 "ledger proves zero pre-flow equity; attest together with the earlier "
                 "outflow that emptied the account, or open a reviewed risk epoch"
@@ -954,6 +962,15 @@ async def attest_flows(
             raise ValueError(
                 f"pre_flow_equity contradicts ledger-provable value {provable:.8f}"
             )
+        if apply:
+            # The caller's current equity must agree with the authenticated
+            # flat-account state; otherwise an unrelated typed value could
+            # manufacture a post-attestation peak or lower the drawdown.
+            observed_equity = _finite(account.get("equity"), "account equity")
+            if abs(current_equity - observed_equity) > tolerance:
+                raise ValueError(
+                    "current_equity contradicts authenticated account state"
+                )
     previous_hwm, peak_raw = await _load_raw_peak(strict)
     record = build_record(
         flows=flows,
