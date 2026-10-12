@@ -126,11 +126,11 @@ class PgRoleStartupOnceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_production_lifespan_integration_keeps_task_in_shutdown(self):
         # Contract-only inspection: importing main executes runtime side effects.
-        tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+        main_source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        tree = ast.parse(main_source)
         lifespan = next(n for n in ast.walk(tree)
                         if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
-        segment = ast.get_source_segment(Path("main.py").read_text(encoding="utf-8"),
-                                         lifespan)
+        segment = ast.get_source_segment(main_source, lifespan)
         self.assertIn('os.environ.get("PG_ROLE_AUDIT_STARTUP_ONCE", "") == "true"',
                       segment)
         self.assertIn("run_after_bootstrap(app.state.bootstrap_task)", segment)
