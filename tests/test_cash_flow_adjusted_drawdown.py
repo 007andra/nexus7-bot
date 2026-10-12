@@ -756,13 +756,15 @@ class CashFlowAdminCliTests(unittest.IsolatedAsyncioTestCase):
             "--evidence-ref", "source", "--reason", "reconcile",
             "--apply", "--confirm", "ATTEST:op-clock-advance",
         ])
-        with patch("bot.database.init", AsyncMock()), \\
-             patch("bot.database.close", AsyncMock()), \\
-             patch.object(cash_flow_admin, "_client", AsyncMock(return_value=client)), \\
-             patch("bot.binance_accounting_evidence.collect_income",
-                   AsyncMock(return_value=[])) as income, \\
-             patch.object(cash_flow_admin.ledger, "attest_flows",
-                          AsyncMock(return_value={"status": "APPLIED"})) as attest:
+        with (
+            patch("bot.database.init", AsyncMock()),
+            patch("bot.database.close", AsyncMock()),
+            patch.object(cash_flow_admin, "_client", AsyncMock(return_value=client)),
+            patch("bot.binance_accounting_evidence.collect_income",
+                  AsyncMock(return_value=[])) as income,
+            patch.object(cash_flow_admin.ledger, "attest_flows",
+                         AsyncMock(return_value={"status": "APPLIED"})) as attest,
+        ):
             out = await cash_flow_admin._run(args)
         self.assertEqual(out["status"], "APPLIED")  # mock only; no durable write
         self.assertEqual(income.await_count, 2)
