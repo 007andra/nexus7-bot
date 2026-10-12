@@ -242,6 +242,15 @@ async def capture_horizon(client, evidence: dict, horizon_min: int) -> dict:
 async def capture_path(client, evidence: dict) -> dict:
     symbol, entry = evidence["symbol"], evidence["entry_ms"]
     end = entry + 240 * 60_000
+    # The horizon may fall inside a 15m candle. A nominal 240m elapsed
+    # interval does NOT prove that the final mark-price candle has closed,
+    # or that funding history already covers the entire exposure.
+    # Verify exchange time BEFORE claiming either source is complete.
+    final_close = ((end + BAR_MS - 1) // BAR_MS) * BAR_MS
+    server = await client.get(FAPI, "/fapi/v1/time")
+    observed_ms = int(server["serverTime"])
+    if observed_ms < final_close:
+        raise CollectorRefused("PATH_HORIZON_NOT_MATURED")
     first_open = entry - entry % BAR_MS
     klines = await client.get(FAPI, "/fapi/v1/markPriceKlines", {
         "symbol": symbol, "interval": "15m", "startTime": first_open,
@@ -250,4 +259,7 @@ async def capture_path(client, evidence: dict) -> dict:
     funding = await client.get(FAPI, "/fapi/v1/fundingRate", {
         "symbol": symbol, "startTime": entry - 1, "endTime": end, "limit": FUNDING_PAGE_LIMIT})
     evidence["funding"] = normalize_funding(funding, symbol, entry - 1, end)
+    # Explicit exchange-time provenance: caller must not use ingestion
+    # clock or a fabricated future as-of time to bless incomplete history.
+    evidence["path_observed_ms"] = observed_ms
     return evidence
