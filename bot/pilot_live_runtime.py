@@ -112,17 +112,23 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
         # but can never rebase the HWM or clear the zero-capital hard gate.
         # Data-source outages must not kill zero-equity telemetry or fail open.
         if capital_flows._is_binance_client(engine.client):
-            try:
-                await cash_flow_ledger.capture_zero_equity_pending(
-                    engine.client, engine.risk, strict=True,
-                )
-            except Exception as exc:
-                log.critical(
-                    "[CASH_FLOW_ZERO_EQUITY] status=UNCONFIRMED "
-                    "reason=%s hwm_changed=false "
-                    "execution_effect=BLOCK_NEW_ENTRIES",
-                    type(exc).__name__,
-                )
+            capture_now = time.time()
+            last_capture = float(
+                getattr(engine, "_pilot_last_zero_cashflow_capture", 0.0) or 0.0
+            )
+            if capture_now - last_capture >= 300.0:
+                engine._pilot_last_zero_cashflow_capture = capture_now
+                try:
+                    await cash_flow_ledger.capture_zero_equity_pending(
+                        engine.client, engine.risk, strict=True,
+                    )
+                except Exception as exc:
+                    log.critical(
+                        "[CASH_FLOW_ZERO_EQUITY] status=UNCONFIRMED "
+                        "reason=%s hwm_changed=false "
+                        "execution_effect=BLOCK_NEW_ENTRIES",
+                        type(exc).__name__,
+                    )
         engine._pilot_prev_account_equity = 0.0
         engine._pilot_prev_account_observed_ms = external_performance.server_now_ms(
             engine.client
