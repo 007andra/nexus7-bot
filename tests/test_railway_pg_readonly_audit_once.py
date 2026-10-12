@@ -38,15 +38,24 @@ class FakeConnection:
         self.terminated = True
 
 
-def report(fail_item=None, drop_item=None):
-    rows = [
-        {"item": item, "result": "FAIL" if item == fail_item else "PASS",
-         "evidence": "SECRET_ROLE SECRET_TABLE SECRET_URI"}
-        for item, num in worker.EXPECTED_CHECKS.items()
-        for _ in range(num)
-        if item != drop_item
-    ]
-    return SimpleNamespace(rows=rows, verified=not fail_item and drop_item is None)
+def report(fail_item=None, drop_item=None, fail_group3=None):
+    rows = []
+    labels3 = list(worker.DB_PRIVILEGE_CHECKS.values())
+    for item, num in worker.EXPECTED_CHECKS.items():
+        if item == drop_item:
+            continue
+        for index in range(num):
+            label = labels3[index] if item == 3 else "synthetic test check"
+            should_fail = item == fail_item or (
+                item == 3 and fail_group3 == list(worker.DB_PRIVILEGE_CHECKS)[index]
+            )
+            rows.append({
+                "item": item, "check": label,
+                "result": "FAIL" if should_fail else "PASS",
+                "evidence": "SECRET_ROLE SECRET_TABLE SECRET_URI",
+            })
+    return SimpleNamespace(rows=rows,
+                           verified=not fail_item and not drop_item and not fail_group3)
 
 
 class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +103,54 @@ class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("status=FAIL", output)
         self.assertIn("READ_ONLY_ROLE_VERIFIED=false", output)
         self.assertNotIn("SECRET_ROLE", output)
+
+    async def test_all_three_group3_privileges_are_redacted_and_pass(self):
+        rc, output, _, _, _ = await self._call()
+        self.assertEqual(rc, 0)
+        for name in ("CREATE", "TEMP", "OWNER"):
+            self.assertIn(
+                f"[PG_ROLE_AUDIT_DB_PRIVILEGES] check={name} result=PASS",
+                output,
+            )
+        self.assertEqual(output.count("[PG_ROLE_AUDIT_DB_PRIVILEGES]"), 3)
+        self.assertNotIn("SECRET_ROLE", output)
+        self.assertNotIn("SECRET_TABLE", output)
+        self.assertNotIn("SECRET_URI", output)
+
+    async def test_each_group3_privilege_failure_is_distinguishable(self):
+        for target in ("CREATE", "TEMP", "OWNER"):
+            with self.subTest(target=target):
+                rc, output, _, _, _ = await self._call(
+                    audit=report(fail_group3=target))
+                self.assertEqual(rc, 1)
+                self.assertIn("[PG_ROLE_AUDIT_ONCE] item=3 result=FAIL", output)
+                self.assertIn("READ_ONLY_ROLE_VERIFIED=false", output)
+                for name in ("CREATE", "TEMP", "OWNER"):
+                    expected = "FAIL" if name == target else "PASS"
+                    self.assertIn(
+                        f"[PG_ROLE_AUDIT_DB_PRIVILEGES] check={name} "
+                        f"result={expected}", output)
+                self.assertNotIn("SECRET_URI", output)
+
+    async def test_invalid_group3_label_cannot_become_verified_or_leak(self):
+        audit = report()
+        audit.rows[2]["check"] = "password=SECRET_URI"
+        audit.verified = True
+        rc, output, _, _, _ = await self._call(audit=audit)
+        self.assertEqual(rc, 2)
+        self.assertIn("status=INCONCLUSIVE", output)
+        self.assertIn("READ_ONLY_ROLE_VERIFIED=false", output)
+        self.assertNotIn("[PG_ROLE_AUDIT_DB_PRIVILEGES]", output)
+        self.assertNotIn("SECRET_URI", output)
+
+    async def test_duplicate_group3_check_cannot_pass_even_with_correct_count(self):
+        audit = report()
+        audit.rows[3]["check"] = audit.rows[2]["check"]
+        audit.verified = True
+        rc, output, _, _, _ = await self._call(audit=audit)
+        self.assertEqual(rc, 2)
+        self.assertIn("status=INCONCLUSIVE", output)
+        self.assertNotIn("[PG_ROLE_AUDIT_DB_PRIVILEGES]", output)
 
     async def test_missing_checks_cannot_pass(self):
         rc, output, _, _, _ = await self._call(audit=report(drop_item=6))
