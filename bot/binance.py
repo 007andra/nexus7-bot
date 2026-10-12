@@ -717,13 +717,22 @@ class BinanceClient:
                 raise ValueError(name)
             return value
 
-        equity = finite(
-            "totalMarginBalance", data.get("totalWalletBalance", 0)
-        )
-        available = finite("availableBalance", 0)
+        # A missing Binance USD-M account field is UNKNOWN, not a verified
+        # zero. Preserve explicit zero as a legitimate observable balance,
+        # while refusing incomplete payloads before they reach LIVE risk.
+        # Do not log raw account data or make any exchange mutation.
+        # Binance defines totalMarginBalance as wallet balance + unrealized
+        # PnL. totalWalletBalance is not an equity substitute when positions
+        # exist. Never synthesize an authenticated zero from absent fields.
+        if data.get("totalMarginBalance") is None:
+            raise RuntimeError("BINANCE_ACCOUNT_EQUITY_UNAVAILABLE")
+        if data.get("availableBalance") is None:
+            raise RuntimeError("BINANCE_ACCOUNT_AVAILABLE_UNAVAILABLE")
+        equity = finite("totalMarginBalance")
+        available = finite("availableBalance")
         if equity < 0 or available < 0:
             raise RuntimeError("negative account state")
-        return {
+        state = {
             "equity": equity,
             "available": available,
             "available_source": "availableBalance",
@@ -745,6 +754,25 @@ class BinanceClient:
             "multiAssetsMargin": account_config["multiAssetsMargin"],
             "canTrade": account_config["canTrade"],
         }
+        # The two fields must be present in the signed account response;
+        # log only source names and zero/nonzero classes (never values,
+        # assets, account identity or raw payloads). Emitted on transitions
+        # rather than on every account poll to keep telemetry bounded.
+        evidence = (equity == 0.0, available == 0.0,
+                    account_config["multiAssetsMargin"])
+        if getattr(self, "_last_account_field_evidence", None) != evidence:
+            self._last_account_field_evidence = evidence
+            log.info(
+                "[BINANCE_CAPITAL_FIELD_EVIDENCE] "
+                "source=/fapi/v3/account auth=true "
+                "equity_source=totalMarginBalance "
+                "available_source=availableBalance "
+                "account_config_validated=true "
+                "equity_explicit_zero=%s available_explicit_zero=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                str(evidence[0]).lower(), str(evidence[1]).lower(),
+            )
+        return state
 
     async def get_leverage_brackets(self, symbol: str) -> dict:
         """Return validated user-specific USD-M leverage brackets, cached read-only."""
