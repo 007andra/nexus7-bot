@@ -220,6 +220,43 @@ async def collect_income(client, start_ms: int, end_ms: int) -> list[dict]:
     raise ValueError("income coverage exceeds pagination budget")
 
 
+def summarize_usdt_transfer_timing(rows: list[dict]) -> dict | None:
+    """Redacted minute-level provenance for genuine USD-M USDT TRANSFER rows.
+
+    This is a diagnostic summary, NOT evidence of transfer destination or
+    account ownership. Never include transaction IDs, account IDs, counterparties,
+    symbols, free-form info fields, or the unfiltered exchange payload in logs.
+    The caller must already have collected the complete bounded income window.
+    """
+    transfers = []
+    for row in rows:
+        if (str(row.get("incomeType") or "").upper() != "TRANSFER"
+                or str(row.get("asset") or "").upper() != "USDT"):
+            continue
+        event_ms = int(row["time"])
+        amount = Decimal(str(row["income"]))
+        if event_ms <= 0 or not amount.is_finite():
+            raise ValueError("invalid USDT transfer evidence")
+        transfers.append((event_ms, amount))
+    if not transfers:
+        return None
+    transfers.sort(key=lambda item: item[0])
+
+    def utc_minute(timestamp_ms: int) -> str:
+        return time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(timestamp_ms // 1000))
+
+    return {
+        "first_utc_minute": utc_minute(transfers[0][0]),
+        "last_utc_minute": utc_minute(transfers[-1][0]),
+        "count": len(transfers),
+        "outflow_count": sum(amount < 0 for _, amount in transfers),
+        "inflow_count": sum(amount > 0 for _, amount in transfers),
+        "net_usdt": format(
+            sum((amount for _, amount in transfers), Decimal("0")), ".8f"
+        ),
+    }
+
+
 def _registry_order_ids(registry) -> set[str]:
     if not isinstance(registry, list):
         return set()
@@ -773,6 +810,22 @@ async def audit_ledger(engine):
                 for kind, values in sorted(by_type.items())
             ) or "NONE",
         )
+        transfer_evidence = summarize_usdt_transfer_timing(rows)
+        if transfer_evidence is not None:
+            log.warning(
+                "[BINANCE_TRANSFER_MINUTE_EVIDENCE] status=OBSERVED "
+                "source=/fapi/v1/income scope=USDT_TRANSFER_ONLY "
+                "window_hours=48 count=%d outflow_count=%d inflow_count=%d "
+                "net_usdt=%s first_utc_minute=%s last_utc_minute=%s "
+                "destination=UNVERIFIED authority=false "
+                "decision_effect=NONE execution_effect=NONE",
+                transfer_evidence["count"],
+                transfer_evidence["outflow_count"],
+                transfer_evidence["inflow_count"],
+                transfer_evidence["net_usdt"],
+                transfer_evidence["first_utc_minute"],
+                transfer_evidence["last_utc_minute"],
+            )
         return rows
     except Exception as exc:
         log.warning(

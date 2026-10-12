@@ -1,6 +1,9 @@
 import asyncio
-
+import time
 import unittest
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from bot import binance_accounting_evidence as accounting
 
@@ -95,6 +98,85 @@ def test_collect_income_pages_and_deduplicates():
     rows = run(accounting.collect_income(client, 1000, 2000))
     assert len(rows) == 1
     assert rows[0]["incomeType"] == "REALIZED_PNL"
+
+
+def test_transfer_minute_evidence_uses_only_usdt_and_never_leaks_ids():
+    minute = int(datetime(2026, 10, 11, 19, 41, tzinfo=timezone.utc).timestamp() * 1000)
+    secret = "private-transaction-identifier"
+    rows = [
+        {"incomeType": "TRANSFER", "asset": "USDT", "income": "-5.31768526",
+         "time": minute + 19000, "tranId": secret, "info": secret},
+        {"incomeType": "TRANSFER", "asset": "BNB", "income": "-80",
+         "time": minute, "tranId": "bnb-private"},
+        {"incomeType": "REALIZED_PNL", "asset": "USDT", "income": "-4",
+         "time": minute, "tranId": "pnl-private"},
+        {"incomeType": "TRANSFER", "asset": "USDT", "income": "1.25000000",
+         "time": minute + 62000, "tranId": "internal-private"},
+    ]
+    result = accounting.summarize_usdt_transfer_timing(rows)
+    assert result == {
+        "first_utc_minute": "2026-10-11T19:41Z",
+        "last_utc_minute": "2026-10-11T19:42Z",
+        "count": 2,
+        "outflow_count": 1,
+        "inflow_count": 1,
+        "net_usdt": "-4.06768526",
+    }
+    assert secret not in repr(result)
+    assert "bnb-private" not in repr(result)
+    assert "pnl-private" not in repr(result)
+    assert accounting.summarize_usdt_transfer_timing([
+        {"incomeType": "FUNDING_FEE", "asset": "USDT",
+         "income": "-1", "time": minute}
+    ]) is None
+
+
+def test_transfer_minute_evidence_refuses_unconfirmed_values():
+    for amount, timestamp in (("nan", 1000), ("inf", 1000), ("1", 0)):
+        with unittest.TestCase().assertRaises(ValueError):
+            accounting.summarize_usdt_transfer_timing([{
+                "incomeType": "TRANSFER", "asset": "USDT",
+                "income": amount, "time": timestamp,
+            }])
+
+
+def test_audit_ledger_logs_transfer_minute_without_raw_identity_or_mutation():
+    now_ms = int(time.time() * 1000)
+    secret = "private-transfer-id-never-log"
+    payload = [{
+        "incomeType": "TRANSFER", "asset": "USDT", "income": "-5.31768526",
+        "time": now_ms - 120000, "tranId": secret, "info": secret,
+    }]
+    client = FakeClient({"/fapi/v1/income": payload})
+    with (
+        patch.object(accounting.db, "load_key_value", AsyncMock(return_value=None)),
+        patch.object(accounting.db, "save_key_value", AsyncMock(return_value=True)) as save,
+        patch.object(accounting.log, "warning") as log,
+    ):
+        rows = run(accounting.audit_ledger(SimpleNamespace(client=client)))
+        observed = [call for call in log.call_args_list
+                    if "[BINANCE_TRANSFER_MINUTE_EVIDENCE]" in call.args[0]]
+        assert len(observed) == 1
+        emitted = observed[0]
+        assert "destination=UNVERIFIED" in emitted.args[0]
+        assert "authority=false" in emitted.args[0]
+        assert "execution_effect=NONE" in emitted.args[0]
+        assert emitted.args[1:4] == (1, 1, 0)
+        assert emitted.args[4] == "-5.31768526"
+        assert secret not in repr(log.call_args_list)
+        assert len(rows) == 1
+        assert save.await_count == 1
+    assert client.calls
+    assert all(endpoint == "/fapi/v1/income" and auth
+               for endpoint, _, auth in client.calls)
+
+
+def test_audit_ledger_on_no_transfers_emits_no_transfer_provenance():
+    client = FakeClient({"/fapi/v1/income": []})
+    with patch.object(accounting.log, "warning") as log:
+        assert run(accounting.audit_ledger(SimpleNamespace(client=client))) == []
+    assert not any("[BINANCE_TRANSFER_MINUTE_EVIDENCE]" in call.args[0]
+                   for call in log.call_args_list)
 
 
 def test_bgx_order_evidence_never_becomes_bgx_confirmed():
