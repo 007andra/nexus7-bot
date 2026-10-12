@@ -96,7 +96,7 @@ class ReadOnlyBinanceResearchClient:
         if not isinstance(restrictions, dict) or restrictions.get("enableReading") is not True:
             raise CollectorRefused("RESEARCH_KEY_CANNOT_READ")
         for perm in FORBIDDEN_PERMISSIONS:
-            if restrictions.get(perm, False) is not False:
+            if restrictions.get(perm) is not False:
                 raise CollectorRefused("RESEARCH_KEY_HAS_WRITE_PERMISSION")
         self.verified_read_only = True
 
