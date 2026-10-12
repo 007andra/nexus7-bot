@@ -819,6 +819,39 @@ async def reconcile_binance(client, risk, current_equity: float, *, strict: bool
 
 # ─── operator attestation (one-shot, idempotent, auditable) ───────────────────
 
+def ledger_provable_pre_flow_equity(
+    flows: list[dict],
+    rows: list[dict],
+    account: dict | None,
+    *,
+    rows_cover_until_ms: int | None,
+    now_ms: int,
+) -> float | None:
+    """Pre-flow equity the exchange ledger proves for an attested batch, or None.
+
+    Provable only when the account is flat now, the income rows cover up to
+    ``now_ms`` and every row at or after the first attested flow is one of the
+    attested flows: then the wallet moved only by those flows, so
+    ``E- = wallet_now - net``. Pure function; no I/O.
+    """
+    if account is None or rows_cover_until_ms is None or int(rows_cover_until_ms) < int(now_ms):
+        return None
+    flat, _ = _account_flat(account)
+    if not flat:
+        return None
+    ids = {str(f["identity"]) for f in flows}
+    first_t = min(int(f["time_ms"]) for f in flows)
+    for row in rows:
+        if int(row.get("time", 0) or 0) < first_t:
+            continue
+        if classify_income_type(row.get("incomeType")) != "EXTERNAL_FLOW":
+            return None
+        if flow_identity(row) not in ids:
+            return None
+    wallet = _finite(account.get("walletBalance"), "walletBalance")
+    return wallet - math.fsum(float(f["amount"]) for f in flows)
+
+
 async def attest_flows(
     *,
     rows: list[dict],
@@ -831,13 +864,17 @@ async def attest_flows(
     apply: bool,
     now_ms: int,
     strict: bool = True,
+    account: dict | None = None,
+    rows_cover_until_ms: int | None = None,
 ) -> dict:
     """Record an operator-attested external flow reconciliation.
 
     Amount, direction and timestamps always come from the exchange ledger rows
     identified by ``tran_ids``; the operator supplies only the pre-flow equity
-    (with an evidence reference) that the ledger alone cannot prove. The same
-    ``reconciliation_id`` is idempotent; a flow can never be applied twice.
+    (with an evidence reference) that the ledger alone cannot prove. When the
+    ledger *can* prove it (see ``ledger_provable_pre_flow_equity``) a typed
+    value that contradicts it is refused. The same ``reconciliation_id`` is
+    idempotent; a flow can never be applied twice.
     """
     reconciliation_id = str(reconciliation_id or "").strip()
     if not reconciliation_id or len(reconciliation_id) > 64:
@@ -899,6 +936,24 @@ async def attest_flows(
     post = pre + net
     if post <= 0:
         raise ValueError("post-flow equity must be positive")
+    provable = ledger_provable_pre_flow_equity(
+        flows, rows, account, rows_cover_until_ms=rows_cover_until_ms, now_ms=now_ms,
+    )
+    if provable is not None:
+        if provable <= 0:
+            # Recapitalising an emptied account: the typed pre-flow equity is
+            # the only input that would rebase the HWM, and the exchange proves
+            # it was zero. Attesting the deposit alone would let any typed
+            # value erase historical drawdown.
+            raise ValueError(
+                "ledger proves zero pre-flow equity; attest together with the earlier "
+                "outflow that emptied the account, or open a reviewed risk epoch"
+            )
+        tolerance = max(_WALLET_TOLERANCE_ABS, abs(provable) * _WALLET_TOLERANCE_REL)
+        if abs(pre - provable) > tolerance:
+            raise ValueError(
+                f"pre_flow_equity contradicts ledger-provable value {provable:.8f}"
+            )
     previous_hwm, peak_raw = await _load_raw_peak(strict)
     record = build_record(
         flows=flows,

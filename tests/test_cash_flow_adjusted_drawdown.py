@@ -570,6 +570,76 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertAlmostEqual(await self.peak(), 10.0)
 
+    async def _emptied_then_redeposited(self, deposit=100.0):
+        """Production shape of 2026-10-11: HWM 22.7987, loss to 5.31768526, full outflow."""
+        client, engine = await self.boot(22.7986938551)
+        client.income("REALIZED_PNL", 5.31768526 - 22.7986938551)
+        await self.refresh(engine)
+        self.assertAlmostEqual(self.drawdown(engine), 1.0 - 5.31768526 / 22.7986938551)
+        out_tran = client.income("TRANSFER", -5.31768526)
+        self.assertAlmostEqual(client.wallet, 0.0)
+        # equity==0: the runtime skips reconciliation, so the outflow never
+        # reaches the durable ledger; time passes beyond the 48h runtime window
+        client.advance(49 * 3600 * 1000)
+        in_tran = client.income("TRANSFER", deposit)
+        return client, out_tran, in_tran
+
+    async def test_recapitalisation_cannot_erase_drawdown_with_typed_pre_flow_equity(self):
+        client, _, in_tran = await self._emptied_then_redeposited(100.0)
+        kwargs = dict(
+            rows=client.rows, reconciliation_id="op-redeposit", tran_ids=[in_tran],
+            pre_flow_equity=22.7986938551, current_equity=client.wallet,
+            reason="redeposit", evidence_ref="operator", apply=False, now_ms=client.now,
+        )
+        # Without exchange account evidence the typed value would rebase the
+        # HWM to 122.8 and report 18.6% drawdown: below the 30% gate.
+        unchecked = await cfl.attest_flows(**kwargs)
+        self.assertLess(unchecked["record"]["trading_drawdown_after"], 0.30)
+        account = await client.get_account_state()
+        for typed in (22.7986938551, 5.31768526, 1.0):
+            with self.subTest(typed=typed), self.assertRaisesRegex(ValueError, "zero pre-flow equity"):
+                await cfl.attest_flows(**{
+                    **kwargs, "pre_flow_equity": typed, "apply": True,
+                    "account": account, "rows_cover_until_ms": client.now,
+                })
+        self.assertAlmostEqual(await self.peak(), 22.7986938551)
+
+    async def test_recapitalisation_attested_with_outflow_preserves_economic_drawdown(self):
+        client, out_tran, in_tran = await self._emptied_then_redeposited(100.0)
+        account = await client.get_account_state()
+        kwargs = dict(
+            rows=client.rows, reconciliation_id="op-out-in", tran_ids=[out_tran, in_tran],
+            current_equity=client.wallet, reason="outflow+redeposit", evidence_ref="income rows",
+            now_ms=client.now, account=account, rows_cover_until_ms=client.now,
+        )
+        with self.assertRaisesRegex(ValueError, "contradicts ledger-provable value 5.31768526"):
+            await cfl.attest_flows(**kwargs, pre_flow_equity=22.7986938551, apply=True)
+        out = await cfl.attest_flows(**kwargs, pre_flow_equity=5.31768526, apply=True)
+        self.assertEqual(out["status"], "APPLIED")
+        self.assertAlmostEqual(
+            out["record"]["trading_drawdown_after"], 1.0 - 5.31768526 / 22.7986938551, places=9,
+        )
+        self.assertGreater(out["record"]["trading_drawdown_after"], 0.30)
+
+    async def test_provable_pre_flow_equity_is_none_without_full_evidence(self):
+        client, out_tran, in_tran = await self._emptied_then_redeposited(100.0)
+        account = await client.get_account_state()
+        flows = [cfl._normalize_flow(r, client.now) for r in client.rows
+                 if str(r["tranId"]) in {out_tran, in_tran}]
+        args = (flows, client.rows)
+        self.assertAlmostEqual(cfl.ledger_provable_pre_flow_equity(
+            *args, account, rows_cover_until_ms=client.now, now_ms=client.now), 5.31768526)
+        self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
+            *args, None, rows_cover_until_ms=client.now, now_ms=client.now))
+        self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
+            *args, account, rows_cover_until_ms=client.now - 1, now_ms=client.now))
+        self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
+            *args, {**account, "positionMargin": 1.0}, rows_cover_until_ms=client.now,
+            now_ms=client.now))
+        client.income("COMMISSION", -0.01)
+        self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
+            flows, client.rows, account, rows_cover_until_ms=client.now, now_ms=client.now))
+
     def test_twr_math_identities(self):
         # a flow alone never changes drawdown: 1 - E+/P' == 1 - E-/P
         for peak, pre, amount in ((10.0, 9.0, -4.0), (10.8262, 9.8410, -4.0), (50.0, 40.0, 25.0)):
@@ -611,6 +681,9 @@ class CashFlowAdminCliTests(unittest.IsolatedAsyncioTestCase):
             out = await cash_flow_admin._run(cash_flow_admin._parser().parse_args(base))
             self.assertEqual(out["status"], "DRY_RUN")
             self.assertFalse(attest.await_args.kwargs["apply"])
+            # the exchange account state is always handed to the consistency check
+            self.assertEqual(attest.await_args.kwargs["account"]["walletBalance"], 6.0)
+            self.assertEqual(attest.await_args.kwargs["rows_cover_until_ms"], T0)
             await cash_flow_admin._run(cash_flow_admin._parser().parse_args(
                 base + ["--apply", "--confirm", "ATTEST:op-1"]))
             self.assertTrue(attest.await_args.kwargs["apply"])

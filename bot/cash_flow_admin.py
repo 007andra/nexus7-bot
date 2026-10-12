@@ -83,6 +83,8 @@ async def _run(args) -> dict:
                 evidence_ref=args.evidence_ref,
                 apply=bool(args.apply),
                 now_ms=now_ms,
+                account=account,
+                rows_cover_until_ms=end,
             )
         if args.command == "rebaseline-wallet":
             if args.apply and args.confirm != "REBASELINE-WALLET":
