@@ -113,6 +113,9 @@ jobs:
       - name: PostgreSQL TEMP privilege grant-origin safety contract
         run: python -m unittest -v tests.test_pg_temp_grant_origin
 
+      - name: PostgreSQL TEMP consumer inventory safety contract
+        run: python -m unittest -v tests.test_pg_temp_consumer_inventory
+
       - name: Disposable Railway PostgreSQL role audit worker safety contract
         run: python -m unittest -v tests.test_railway_pg_readonly_audit_once
 
