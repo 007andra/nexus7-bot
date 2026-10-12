@@ -77,6 +77,7 @@ class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
             probe.return_value = TempOrigin(
                 from_public=True, from_direct=False, from_inherited=False,
                 from_owner=False, default_acl=True,
+                other_login_roles_public_dependent=2,
             )
             if origin_error:
                 probe.side_effect = RuntimeError("password=SECRET_URI")
@@ -171,6 +172,7 @@ class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[PG_TEMP_ORIGIN] status=RESOLVED", output)
         self.assertIn("public=true direct=false inherited=false", output)
         self.assertIn("potential_revocation_scope=DATABASE_WIDE", output)
+        self.assertIn("other_login_roles_public_dependent=MULTIPLE", output)
         self.assertIn("READ_ONLY_ROLE_VERIFIED=false", output)
         self.assertNotIn("SECRET_URI", output)
 
