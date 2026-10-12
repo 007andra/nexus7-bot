@@ -97,6 +97,32 @@ class ReadOnlyRoleAuditPostgresTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await conn.close()
 
+    async def test_consumer_inventory_is_catalog_only_even_with_limited_view(self):
+        import asyncpg
+        from scripts.pg_temp_consumer_inventory import collect, log_line
+
+        conn = await asyncpg.connect(_dsn(self.roles["ro"], self.db))
+        try:
+            async with conn.transaction(readonly=True):
+                inventory = await collect(conn, gap_seconds=0)
+        finally:
+            await conn.close()
+
+        self.assertGreaterEqual(inventory.login_roles, 1)
+        self.assertGreaterEqual(inventory.login_connect, 1)
+        self.assertGreaterEqual(inventory.sessions, 1)
+        self.assertGreaterEqual(inventory.distinct_session_roles, 1)
+        self.assertGreaterEqual(inventory.files_delta, 0)
+        self.assertGreaterEqual(inventory.bytes_delta, 0)
+        self.assertIn(inventory.observer_visibility,
+                      ("LIMITED", "FULL_STATS_ROLE"))
+        summary = log_line(inventory)
+        self.assertIn("[PG_TEMP_CONSUMER_INVENTORY] status=OBSERVED", summary)
+        self.assertIn("complete_dependency_proof=false", summary)
+        for role in self.roles.values():
+            self.assertNotIn(role, summary)
+        self.assertNotIn(self.db, summary)
+
     async def test_temp_origin_rejects_absent_effective_privilege(self):
         with self.assertRaises(ValueError):
             await self._temp_origin()
