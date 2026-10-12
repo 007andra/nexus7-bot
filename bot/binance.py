@@ -717,10 +717,19 @@ class BinanceClient:
                 raise ValueError(name)
             return value
 
+        # A missing Binance USD-M account field is UNKNOWN, not a verified
+        # zero. Preserve explicit zero as a legitimate observable balance,
+        # while refusing incomplete payloads before they reach LIVE risk.
+        # Do not log raw account data or make any exchange mutation.
+        if (data.get("totalMarginBalance") is None
+                and data.get("totalWalletBalance") is None):
+            raise RuntimeError("BINANCE_ACCOUNT_EQUITY_UNAVAILABLE")
+        if data.get("availableBalance") is None:
+            raise RuntimeError("BINANCE_ACCOUNT_AVAILABLE_UNAVAILABLE")
         equity = finite(
-            "totalMarginBalance", data.get("totalWalletBalance", 0)
+            "totalMarginBalance", data.get("totalWalletBalance")
         )
-        available = finite("availableBalance", 0)
+        available = finite("availableBalance")
         if equity < 0 or available < 0:
             raise RuntimeError("negative account state")
         return {
