@@ -28,6 +28,27 @@ WITH target_db AS (
       FROM target_db AS d
       CROSS JOIN LATERAL pg_catalog.aclexplode(d.effective_acl) AS grant_entry
      WHERE grant_entry.privilege_type IN ('TEMPORARY', 'TEMP')
+), public_dependent_logins AS (
+    -- Conservative potential blast radius: other LOGIN roles that can
+    -- connect and whose effective TEMP comes only from PUBLIC. This cannot
+    -- prove anyone actually creates temporary tables.
+    SELECT count(*)::int AS possible_affected
+      FROM pg_catalog.pg_roles AS login_role
+      CROSS JOIN target_db AS d
+     WHERE login_role.rolcanlogin
+       AND NOT login_role.rolsuper
+       AND login_role.oid <> d.datdba
+       AND login_role.rolname <> current_user
+       AND pg_catalog.has_database_privilege(
+           login_role.rolname, current_database(), 'CONNECT')
+       AND EXISTS(SELECT 1 FROM temp_acl AS a WHERE a.grantee = 0::oid)
+       AND NOT EXISTS(
+           SELECT 1 FROM temp_acl AS a
+            WHERE a.grantee <> 0::oid
+              AND (a.grantee = login_role.oid
+                   OR pg_catalog.pg_has_role(
+                       login_role.oid, a.grantee, 'USAGE'))
+       )
 )
 SELECT pg_catalog.has_database_privilege(
            current_database(), 'TEMP') AS effective_temp,
@@ -42,7 +63,9 @@ SELECT pg_catalog.has_database_privilege(
        EXISTS(SELECT 1 FROM target_db AS d CROSS JOIN principal AS p
                WHERE d.datdba = p.oid) AS from_owner,
        EXISTS(SELECT 1 FROM target_db AS d WHERE d.raw_acl IS NULL)
-               AS default_acl
+               AS default_acl,
+       (SELECT possible_affected FROM public_dependent_logins)
+               AS other_login_roles_public_dependent
 """
 
 
@@ -53,6 +76,7 @@ class TempOrigin:
     from_inherited: bool
     from_owner: bool
     default_acl: bool
+    other_login_roles_public_dependent: int
 
 
 async def inspect_temp_origin(conn) -> TempOrigin:
@@ -70,6 +94,14 @@ async def inspect_temp_origin(conn) -> TempOrigin:
         raise ValueError("incomplete_catalog_evidence") from exc
     if not all(type(value) is bool for value in values.values()):
         raise ValueError("non_boolean_catalog_evidence")
+    try:
+        other_affected = row["other_login_roles_public_dependent"]
+    except (KeyError, TypeError, IndexError) as exc:
+        raise ValueError("incomplete_dependency_evidence") from exc
+    if type(other_affected) is not int or other_affected < 0:
+        raise ValueError("invalid_dependency_evidence")
+    if not values["from_public"] and other_affected != 0:
+        raise ValueError("contradictory_dependency_evidence")
     # Caller only requests attribution when the main role audit already
     # found TEMP=FAIL, meaning TEMP effective=true. Conflicting evidence is
     # INCONCLUSIVE, never a basis to grant/revoke or bypass the main gate.
@@ -84,6 +116,7 @@ async def inspect_temp_origin(conn) -> TempOrigin:
         from_inherited=values["from_inherited"],
         from_owner=values["from_owner"],
         default_acl=values["default_acl"],
+        other_login_roles_public_dependent=other_affected,
     )
 
 
@@ -101,6 +134,8 @@ def origin_log_line(origin: TempOrigin | None) -> str:
     # PUBLIC grants are database-wide; removal would affect *every* role
     # using this database unless it has an independent TEMP path.
     scope = "DATABASE_WIDE" if origin.from_public else "ROLE_REVIEW_REQUIRED"
+    affected = origin.other_login_roles_public_dependent
+    band = "NONE" if affected == 0 else ("ONE" if affected == 1 else "MULTIPLE")
     return (
         "[PG_TEMP_ORIGIN] status=RESOLVED "
         f"public={flag(origin.from_public)} "
@@ -109,5 +144,6 @@ def origin_log_line(origin: TempOrigin | None) -> str:
         f"owner={flag(origin.from_owner)} "
         f"default_acl={flag(origin.default_acl)} "
         f"potential_revocation_scope={scope} "
+        f"other_login_roles_public_dependent={band} "
         "decision_effect=NONE execution_effect=NONE"
     )
