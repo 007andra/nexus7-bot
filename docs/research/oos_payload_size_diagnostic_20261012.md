@@ -7,10 +7,10 @@ NEXUS-7 Railway production app `ams`, PostgreSQL `sfo`, as verified by authentic
 ## What this change does
 
 Inside the existing candidate and outcome JSON parse loops, sum the UTF-8 length of raw, *already fetched* JSON text, separately by cohort stage. Emit:
-- candidate_payload_utf8_bytes, outcome_payload_utf8_bytes
-- candidate_payload_max_utf8_bytes, outcome_payload_max_utf8_bytes
-- candidate_payload_measured_rows, outcome_payload_measured_rows
-- payload_size_scope=CLIENT_JSON_UTF8_ONLY_NOT_WIRE_OR_PG_EXECUTION
+- candidate_json_utf8_bytes, outcome_json_utf8_bytes
+- candidate_json_max_utf8_bytes, outcome_json_max_utf8_bytes
+- candidate_json_measured_rows, outcome_json_measured_rows
+- json_size_scope=CLIENT_JSON_UTF8_ONLY_NOT_WIRE_OR_PG_EXECUTION
 
 No new SELECTs, indexes, tables, stores, dependencies, thread/async tasks, wire response contents, DB/HTTP credentials, transaction IDs, candidate IDs, trading symbols, account IDs, or private JSON are emitted or persisted. The previously frozen cohort membership and OOS math remain unchanged. No risk gates, orders, dispatch, threshold, timeout or LIVE authority are affected. Results explicitly maintain promotion_allowed=false and live_allowed=false.
 
