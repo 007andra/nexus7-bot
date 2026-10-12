@@ -382,36 +382,21 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(dry["status"], "DRY_RUN")
         self.assertAlmostEqual(await self.peak(), 10.0)  # dry run changes nothing
-        out = await cfl.attest_flows(
-            rows=client.rows, reconciliation_id="op-2026-09-26-w1", tran_ids=[tran],
-            pre_flow_equity=9.8, current_equity=client.wallet, reason="operator withdrawal",
-            evidence_ref="PILOT_LIVE_BALANCE equity=9.8 before transfer", apply=True,
-            now_ms=client.now,
-        )
-        self.assertEqual(out["status"], "APPLIED")
-        record = out["record"]
-        for field in (
-            "reconciliation_id", "net_amount", "direction", "flow_time_first_ms",
-            "pre_flow_equity", "previous_hwm", "adjusted_hwm", "reason", "evidence_ref",
-        ):
-            self.assertIn(field, record)
-        self.assertAlmostEqual(record["net_amount"], -4.0)  # from the exchange row
-        self.assertAlmostEqual(record["adjusted_hwm"], 10.0 * 5.8 / 9.8)
-        again = await cfl.attest_flows(
-            rows=client.rows, reconciliation_id="op-2026-09-26-w1", tran_ids=[tran],
-            pre_flow_equity=9.8, current_equity=client.wallet, reason="operator withdrawal",
-            evidence_ref="x", apply=True, now_ms=client.now,
-        )
-        self.assertEqual(again["status"], "ALREADY_APPLIED")
-
-        # the running process picks the operator record up without restart
-        await self.refresh(engine)
-        expected_peak = 10.0 * 5.8 / 9.8
-        self.assertAlmostEqual(self.drawdown(engine), 1.0 - client.wallet / expected_peak)
-        # trading losses (0.2 unrealized before + 0.11 net at close) stay in the drawdown
-        self.assertAlmostEqual(client.wallet, 5.69)
-        self.assertAlmostEqual(self.drawdown(engine), 1.0 - 5.69 / (10.0 * 5.8 / 9.8))
-        self.assertGreater(self.drawdown(engine), 1.0 - 9.8 / 10.0)
+        # Historical account had open position during withdrawal followed
+        # by REALIZED_PNL and COMMISSION: the ledger alone cannot establish
+        # exact pre-flow equity. A typed value may remain a DRY_RUN estimate,
+        # but must NOT mutate HWM or mark this transfer as reconciled.
+        with self.assertRaisesRegex(ValueError, "pre-flow equity unverified"):
+            await cfl.attest_flows(
+                rows=client.rows, reconciliation_id="op-2026-09-26-w1",
+                tran_ids=[tran], pre_flow_equity=9.8,
+                current_equity=client.wallet, reason="operator withdrawal",
+                evidence_ref="PILOT_LIVE_BALANCE equity=9.8 before transfer",
+                apply=True, now_ms=client.now,
+            )
+        self.assertAlmostEqual(await self.peak(), 10.0)
+        self.assertEqual((await self.ledger())["applied"], [])
+        await self.assert_blocked(engine, "BINANCE_CAPITAL_FLOW_REBASE_UNCONFIRMED")
 
     # 15 ───────────────────────────────────────────────────────────────────────
     async def test_15_multiple_deposits_and_withdrawals(self):
@@ -639,6 +624,71 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
         client.income("COMMISSION", -0.01)
         self.assertIsNone(cfl.ledger_provable_pre_flow_equity(
             flows, client.rows, account, rows_cover_until_ms=client.now, now_ms=client.now))
+
+    async def test_attestation_no_hwm_change_when_exchange_evidence_incomplete(self):
+        client, _, in_tran = await self._emptied_then_redeposited(100.0)
+        original_peak = await self.peak()
+        base = dict(
+            rows=client.rows, reconciliation_id="op-missing-coverage",
+            tran_ids=[in_tran], pre_flow_equity=22.7986938551,
+            current_equity=client.wallet, reason="rebalance",
+            evidence_ref="unconfirmed", apply=True, now_ms=client.now,
+        )
+        account = await client.get_account_state()
+        cases = (
+            {"account": None, "rows_cover_until_ms": client.now},
+            {"account": account, "rows_cover_until_ms": client.now - 1},
+            {"account": {**account, "positionMargin": 1.0},
+             "rows_cover_until_ms": client.now},
+        )
+        for evidence in cases:
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(
+                ValueError, "pre-flow equity unverified"
+            ):
+                await cfl.attest_flows(**{**base, **evidence})
+            self.assertAlmostEqual(await self.peak(), original_peak)
+            self.assertEqual((await self.ledger())["applied"], [])
+
+        # Fresh fully covered input with post-flow commission cannot pretend
+        # that wallet_now - external flows is pre-flow equity.
+        client.income("COMMISSION", -0.01)
+        account = await client.get_account_state()
+        with self.assertRaisesRegex(ValueError, "pre-flow equity unverified"):
+            await cfl.attest_flows(**{
+                **base, "rows": client.rows, "current_equity": client.wallet,
+                "account": account, "rows_cover_until_ms": client.now,
+            })
+        self.assertAlmostEqual(await self.peak(), original_peak)
+        self.assertEqual((await self.ledger())["applied"], [])
+
+    async def test_attestation_rejects_typed_current_equity_inconsistent_with_account(self):
+        client, out_tran, in_tran = await self._emptied_then_redeposited(100.0)
+        account = await client.get_account_state()
+        with self.assertRaisesRegex(ValueError, "current_equity contradicts"):
+            await cfl.attest_flows(
+                rows=client.rows, reconciliation_id="op-forged-current",
+                tran_ids=[out_tran, in_tran],
+                pre_flow_equity=5.31768526,
+                current_equity=client.wallet + 50,
+                reason="forged-current", evidence_ref="income rows",
+                apply=True, now_ms=client.now, account=account,
+                rows_cover_until_ms=client.now,
+            )
+        self.assertAlmostEqual(await self.peak(), 22.7986938551)
+        self.assertEqual((await self.ledger())["applied"], [])
+
+    async def test_attestation_dry_run_remains_non_mutating_without_evidence(self):
+        client, _, in_tran = await self._emptied_then_redeposited(100.0)
+        out = await cfl.attest_flows(
+            rows=client.rows, reconciliation_id="dry-unverified",
+            tran_ids=[in_tran], pre_flow_equity=22.7986938551,
+            current_equity=client.wallet, reason="dry-estimate",
+            evidence_ref="unverified", apply=False, now_ms=client.now,
+            account=None, rows_cover_until_ms=None,
+        )
+        self.assertEqual(out["status"], "DRY_RUN")
+        self.assertAlmostEqual(await self.peak(), 22.7986938551)
+        self.assertEqual((await self.ledger())["applied"], [])
 
     def test_twr_math_identities(self):
         # a flow alone never changes drawdown: 1 - E+/P' == 1 - E-/P
