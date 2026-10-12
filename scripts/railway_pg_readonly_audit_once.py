@@ -127,6 +127,23 @@ async def execute() -> int:
                 # Never print database/driver errors (they may contain DSNs).
                 # A failed provenance query cannot make the main audit PASS.
                 temp_origin = None
+        # Issue #649: additional, separately opt-in consumer evidence. Reuse
+        # the diagnostic connection and existing startup observer. Never infer
+        # permission to REVOKE or readiness for LIVE from aggregate samples.
+        if os.environ.get("PG_TEMP_CONSUMER_PREFLIGHT_ONCE", "") == "true":
+            try:
+                from scripts.pg_temp_consumer_inventory import collect_and_log
+                await asyncio.wait_for(collect_and_log(conn), timeout=90)
+            except asyncio.TimeoutError:
+                # The probe emits an INCONCLUSIVE marker when cancelled.
+                pass
+            except Exception:
+                # No driver/connection/exception strings reach stdout.
+                print(
+                    "[PG_TEMP_CONSUMERS] status=INCONCLUSIVE evidence=UNAVAILABLE "
+                    "visibility=UNKNOWN decision_effect=NONE execution_effect=NONE",
+                    flush=True,
+                )
     except Exception:
         # Do NOT print exception text/traceback: some drivers include DSNs.
         return _emit("INCONCLUSIVE")

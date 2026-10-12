@@ -119,6 +119,14 @@ jobs:
       - name: Startup PostgreSQL role audit observer safety contract
         run: python -m unittest -v tests.test_pg_role_audit_startup_once
 
+      - name: TEMP consumer inventory offline redaction and fail-closed contract
+        run: python -m unittest -v tests.test_pg_temp_consumer_inventory
+
+      - name: TEMP consumer inventory on disposable PostgreSQL
+        run: |
+          test "$TEST_POSTGRES_DSN" = "postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof"
+          python -m unittest -v tests.test_pg_temp_consumer_inventory_postgres
+
       - name: PostgreSQL PUBLIC TEMP revocation compatibility on disposable DB
         run: |
           test "$GITHUB_ACTIONS" = "true"
