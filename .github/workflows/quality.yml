@@ -110,6 +110,9 @@ jobs:
       - name: Full offline test suite
         run: python -m tests.run_offline
 
+      - name: Disposable Railway PostgreSQL role audit worker safety contract
+        run: python -m unittest -v tests.test_railway_pg_readonly_audit_once
+
       - name: P0 CAS real PostgreSQL incident regression (must not skip)
         run: |
           test -n "$TEST_POSTGRES_DSN"
