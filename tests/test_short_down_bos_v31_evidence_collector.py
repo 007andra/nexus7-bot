@@ -123,6 +123,7 @@ class EvidenceTests(unittest.IsolatedAsyncioTestCase):
         for h in (60, 240):
             transport.clock = ENTRY + h * 60_000 - 300
             await col.capture_horizon(client, e, h)
+        transport.clock = ENTRY + 240 * 60_000 + col.BAR_MS
         await col.capture_path(client, e)
         return e
 
@@ -144,6 +145,7 @@ class EvidenceTests(unittest.IsolatedAsyncioTestCase):
         await col.capture_horizon(client, e, 60)
         transport.clock = ENTRY + 240 * 60_000 - 1
         await col.capture_horizon(client, e, 240)
+        transport.clock = ENTRY + 240 * 60_000 + col.BAR_MS
         await col.capture_path(client, e)
         out = ev.evaluate_candidate(CANDIDATE, e, as_of_ms=ENTRY + 10**8)
         self.assertEqual(out, {"status": ev.NOT_PROVEN, "reason": "EXIT_QUOTE_60_FUTURE"})
