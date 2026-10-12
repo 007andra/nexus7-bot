@@ -53,6 +53,7 @@ FORBIDDEN_PERMISSIONS = (
 )
 BAR_MS = 15 * 60_000
 FUNDING_PAGE_LIMIT = 1000
+MAX_BOOK_AGE_MS = 2_000
 
 
 class CollectorRefused(RuntimeError):
@@ -203,21 +204,44 @@ def isolated_margin(quantity: str, bid: str, leverage: int, slippage: str) -> st
 async def capture_entry(client, candidate: dict, *, reference_notional: str, leverage: int,
                         slippage_fraction: str, protection: dict) -> dict:
     symbol = candidate["symbol"]
+    # Evidence at decision time must predate the executable entry quote.
+    # Fetch fee/filter/maintenance tiers first; sampling the quote first and
+    # only then fetching metadata would use data from after the supposed fill.
     server = await client.get(FAPI, "/fapi/v1/time")
     now = int(server["serverTime"])
-    book = normalize_quote(
-        await client.get(FAPI, "/fapi/v1/ticker/bookTicker", {"symbol": symbol}), symbol)
     filters = normalize_filters(await client.get(FAPI, "/fapi/v1/exchangeInfo"), symbol, now)
     fee = normalize_fee(
         await client.get(FAPI, "/fapi/v1/commissionRate", {"symbol": symbol}, now_ms=now),
         symbol, now)
+    brackets = await client.get(
+        FAPI, "/fapi/v1/leverageBracket", {"symbol": symbol}, now_ms=now)
+    book = normalize_quote(
+        await client.get(FAPI, "/fapi/v1/ticker/bookTicker", {"symbol": symbol}), symbol)
+    # A second exchange-time witness proves the book is not stale or
+    # timestamped in the future relative to observation.
+    book_read_ms = int((await client.get(FAPI, "/fapi/v1/time"))["serverTime"])
+    age = book_read_ms - book["observed_ms"]
+    if age < 0 or age > MAX_BOOK_AGE_MS:
+        raise CollectorRefused("ENTRY_BOOK_NOT_FRESH")
+    captured = candidate.get("captured_ms")
+    if captured is None and candidate.get("captured_epoch") is not None:
+        try:
+            if isinstance(candidate["captured_epoch"], bool):
+                raise ValueError()
+            captured = int(Decimal(str(candidate["captured_epoch"])) * 1000)
+        except (ValueError, ArithmeticError, TypeError):
+            raise CollectorRefused("CANDIDATE_TIMESTAMP_INVALID") from None
+    if isinstance(captured, bool) or not isinstance(captured, int) or captured <= 0:
+        raise CollectorRefused("CANDIDATE_TIMESTAMP_INVALID")
+    if book["observed_ms"] < captured:
+        raise CollectorRefused("ENTRY_BOOK_PRECEDES_SIGNAL")
     qty = research_quantity(reference_notional, book["bid"], filters["step_size"])
     mmr = maint_margin_rate(
-        await client.get(FAPI, "/fapi/v1/leverageBracket", {"symbol": symbol}, now_ms=now),
-        symbol, Decimal(qty) * Decimal(book["bid"]))
+        brackets, symbol, Decimal(qty) * Decimal(book["bid"]))
     return {
         "candidate_id": candidate["candidate_id"], "symbol": symbol, "synthetic": False,
         "entry_ms": book["observed_ms"], "entry_quote": book, "fee": fee, "filters": filters,
+        "entry_book_read_ms": book_read_ms, "signal_captured_ms": captured,
         "slippage": {"model": "DECLARED_STRESS_FLOOR", "fraction": slippage_fraction},
         "quantity": qty, "protection": dict(protection),
         "bars_price_type": "MARK_PRICE",  # what capture_path actually collects
