@@ -737,3 +737,67 @@ class CashFlowAdminCliTests(unittest.IsolatedAsyncioTestCase):
             await cash_flow_admin._run(cash_flow_admin._parser().parse_args(
                 base + ["--apply", "--confirm", "ATTEST:op-1"]))
             self.assertTrue(attest.await_args.kwargs["apply"])
+
+    async def test_cli_apply_rejects_income_or_account_changes_during_evidence_read(self):
+        from unittest.mock import AsyncMock
+        from bot import cash_flow_admin
+
+        args = cash_flow_admin._parser().parse_args([
+            "attest", "--reconciliation-id", "op-stable",
+            "--tran-ids", "7", "--pre-flow-equity", "10",
+            "--evidence-ref", "source", "--reason", "reconcile",
+            "--apply", "--confirm", "ATTEST:op-stable",
+        ])
+        stable = {"equity": 6.0, "walletBalance": 6.0}
+        for accounts, incomes, error in (
+            ([stable, stable], [[{"incomeType": "TRANSFER"}], []],
+             "unstable Binance income"),
+            ([stable, {"equity": 7.0, "walletBalance": 7.0}],
+             [[], []], "unstable Binance account"),
+        ):
+            with self.subTest(error=error):
+                client = SimpleNamespace(
+                    _now_ms=lambda: T0,
+                    get_account_state=AsyncMock(side_effect=accounts),
+                    close=AsyncMock(),
+                )
+                with patch("bot.database.init", AsyncMock()), \
+                     patch("bot.database.close", AsyncMock()), \
+                     patch.object(cash_flow_admin, "_client", AsyncMock(return_value=client)), \
+                     patch("bot.binance_accounting_evidence.collect_income",
+                           AsyncMock(side_effect=incomes)), \
+                     patch.object(cash_flow_admin.ledger, "attest_flows",
+                                  AsyncMock()) as attest:
+                    with self.assertRaisesRegex(ValueError, error):
+                        await cash_flow_admin._run(args)
+                    attest.assert_not_awaited()
+
+    async def test_cli_old_since_window_cannot_claim_now_is_covered(self):
+        from unittest.mock import AsyncMock
+        from bot import cash_flow_admin
+
+        client = SimpleNamespace(
+            _now_ms=lambda: T0,
+            get_account_state=AsyncMock(return_value={
+                "equity": 6.0, "walletBalance": 6.0,
+            }),
+            close=AsyncMock(),
+        )
+        too_old = T0 - 9 * 86400 * 1000
+        args = cash_flow_admin._parser().parse_args([
+            "attest", "--reconciliation-id", "op-old-window",
+            "--tran-ids", "7", "--pre-flow-equity", "10",
+            "--evidence-ref", "source", "--reason", "reconcile",
+            "--since-ms", str(too_old), "--apply",
+            "--confirm", "ATTEST:op-old-window",
+        ])
+        with patch("bot.database.init", AsyncMock()), \
+             patch("bot.database.close", AsyncMock()), \
+             patch.object(cash_flow_admin, "_client", AsyncMock(return_value=client)), \
+             patch("bot.binance_accounting_evidence.collect_income",
+                   AsyncMock(return_value=[])), \
+             patch.object(cash_flow_admin.ledger, "attest_flows",
+                          AsyncMock()) as attest:
+            with self.assertRaisesRegex(ValueError, "incomplete Binance income window"):
+                await cash_flow_admin._run(args)
+            attest.assert_not_awaited()
