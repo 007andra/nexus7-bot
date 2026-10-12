@@ -275,6 +275,38 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
             await cfl.capture_zero_equity_pending(client, new_risk(1.0))
         self.assertIsNone(await self.ledger())
 
+    async def test_zero_equity_evidence_outage_never_changes_ledger_or_hwm(self):
+        """An unavailable account ledger cannot be guessed from wallet delta."""
+        client, engine = await self.boot(5.0)
+        peak_before = await self.peak()
+        ledger_before = await self.ledger()
+        client.income("TRANSFER", -5.0)
+        client.fail = True
+        with self.assertRaisesRegex(
+            cfl.CashFlowBlocked, "BINANCE_ZERO_EQUITY_EVIDENCE_UNAVAILABLE"
+        ):
+            await cfl.capture_zero_equity_pending(client, engine.risk, strict=True)
+        self.assertEqual(await self.ledger(), ledger_before)
+        self.assertEqual(await self.peak(), peak_before)
+
+    async def test_zero_equity_unstable_account_snapshots_refuse_write(self):
+        """Two conflicting authenticated account states do not prove a transfer."""
+        from unittest.mock import AsyncMock
+
+        client, engine = await self.boot(5.0)
+        ledger_before = await self.ledger()
+        peak_before = await self.peak()
+        client.income("TRANSFER", -5.0)
+        current = await client.get_account_state()
+        changed = {**current, "walletBalance": 0.1, "equity": 0.1}
+        with patch.object(
+            client, "get_account_state", AsyncMock(side_effect=[current, changed])
+        ):
+            with self.assertRaisesRegex(cfl.CashFlowBlocked, "EVIDENCE_UNSTABLE"):
+                await cfl.capture_zero_equity_pending(client, engine.risk, strict=True)
+        self.assertEqual(await self.ledger(), ledger_before)
+        self.assertEqual(await self.peak(), peak_before)
+
     # 6 ────────────────────────────────────────────────────────────────────────
     async def test_06_realized_loss_after_withdrawal_still_increases_and_blocks(self):
         client, engine = await self.boot(10.0)
