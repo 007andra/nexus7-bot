@@ -22,15 +22,15 @@ class PayloadProbeUnitTests(unittest.TestCase):
         probe.record_payload_size("metadata", "no-metadata-payload")
         probe.record_payload_size("candidates", None)
         fields = probe.fields(status="OK")
-        self.assertEqual(fields["candidate_payload_utf8_bytes"],
+        self.assertEqual(fields["candidate_json_utf8_bytes"],
                          len(private.encode("utf-8")) + len(other))
-        self.assertEqual(fields["candidate_payload_measured_rows"], 2)
-        self.assertEqual(fields["candidate_payload_max_utf8_bytes"],
+        self.assertEqual(fields["candidate_json_measured_rows"], 2)
+        self.assertEqual(fields["candidate_json_max_utf8_bytes"],
                          len(private.encode("utf-8")))
-        self.assertEqual(fields["outcome_payload_measured_rows"], 1)
-        self.assertEqual(fields["outcome_payload_utf8_bytes"],
+        self.assertEqual(fields["outcome_json_measured_rows"], 1)
+        self.assertEqual(fields["outcome_json_utf8_bytes"],
                          len('{"return":0.3}'.encode("utf-8")))
-        self.assertEqual(fields["payload_size_scope"],
+        self.assertEqual(fields["json_size_scope"],
                          "CLIENT_JSON_UTF8_ONLY_NOT_WIRE_OR_PG_EXECUTION")
         recorded = probe.log_line(status="OK")
         self.assertNotIn("SECRET_ID_987", recorded)
@@ -86,12 +86,12 @@ class PayloadProbeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             same_report = await cohort.snapshot(db, timing_probe=timing)
         self.assertEqual(no_probe_report, same_report)
         fields = timing.fields(status="OK")
-        self.assertEqual(fields["candidate_payload_measured_rows"], 3)
-        self.assertEqual(fields["outcome_payload_measured_rows"], 2)
-        self.assertEqual(fields["candidate_payload_utf8_bytes"],
+        self.assertEqual(fields["candidate_json_measured_rows"], 3)
+        self.assertEqual(fields["outcome_json_measured_rows"], 2)
+        self.assertEqual(fields["candidate_json_utf8_bytes"],
                          sum(len(raw.encode("utf-8")) for raw in
                              (private_candidate, utf8_candidate, invalid_candidate)))
-        self.assertEqual(fields["outcome_payload_utf8_bytes"],
+        self.assertEqual(fields["outcome_json_utf8_bytes"],
                          sum(len(raw.encode("utf-8")) for raw in
                              (private_outcome, invalid_outcome)))
         log = timing.log_line(status="OK")
