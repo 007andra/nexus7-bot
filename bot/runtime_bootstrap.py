@@ -39,7 +39,6 @@ def install() -> None:
     from bot import pilot_live_runtime as _pilot_live_runtime
     from bot import pilot_risk_cap_hardening as _pilot_risk_cap_hardening
     from bot import legacy_pretrade_advisory as _legacy_pretrade_advisory
-    from bot import operational_incident_recovery as _operational_incident_recovery
     from bot import liquidation_override_guard as _liquidation_override_guard
     from bot import kucoin_contract_risk_hardening as _kucoin_contract_risk_hardening
     from bot import instrument_readiness_guard as _instrument_readiness_guard
@@ -157,7 +156,11 @@ def install() -> None:
     if _contract.release_authorized:
         _pilot_live_runtime.install(TradingEngine, _log)
         _pilot_risk_cap_hardening.install(TradingEngine, _log)
-        _operational_incident_recovery.install(TradingEngine, _log)
+        # Historical 2026-09-11 incident HWM rebase is deliberately NOT
+        # auto-installed. The old one-shot recovery must never become a
+        # recapitalization path after a later controlled LIVE authorization.
+        # Any legacy incident recovery needs separate signed evidence and
+        # independent review; release authorization alone is insufficient.
         _log.critical(_contract.release_log())
     else:
         _validation_safety_lock.install(_log)
