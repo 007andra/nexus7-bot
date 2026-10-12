@@ -138,7 +138,11 @@ def _quote(raw, at_ms: int, code: str) -> tuple[Decimal, Decimal]:
     if not isinstance(raw, dict):
         raise NotProven(code)
     observed = _ms(raw.get("observed_ms"), code)
-    if abs(observed - at_ms) > MAX_QUOTE_STALENESS_MS:
+    # A quote timestamp after a modelled fill is future information, even
+    # if its distance is inside the ordinary freshness tolerance.
+    if observed > at_ms:
+        raise NotProven(code + "_FUTURE")
+    if at_ms - observed > MAX_QUOTE_STALENESS_MS:
         raise NotProven(code + "_STALE")
     bid, ask = _pos(raw.get("bid"), code), _pos(raw.get("ask"), code)
     if bid >= ask:
@@ -277,6 +281,8 @@ def _evaluate(candidate: dict, ev: dict, as_of_ms: int) -> dict:
         raise NotProven("PROTECTION_PLAN_NOT_CANDIDATE_GEOMETRY")
     if entry_fill >= stop:
         raise NotProven("ENTRY_BEYOND_STOP")
+    if any(price >= entry_fill for price, _, _ in levels):
+        raise NotProven("TP_NOT_BELOW_ACTUAL_ENTRY")
 
     end_ms = entry_ms + max(HORIZONS_MIN) * 60_000
     if as_of_ms < end_ms:
@@ -446,6 +452,8 @@ def evaluate_cohort(enrolled: list[dict], evidence_by_id: dict, *, as_of_ms: int
     blockers = []
     if len(enrolled) < TARGET:
         blockers.append("TARGET_40_NOT_REACHED")
+    if len(enrolled) > TARGET:
+        blockers.append("OVER_TARGET_40")
     if statuses[INDETERMINATE] or statuses[NOT_PROVEN]:
         blockers.append("EVIDENCE_INCOMPLETE")
     if len(symbols) < MIN_SYMBOLS:
