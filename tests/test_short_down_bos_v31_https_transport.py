@@ -1,5 +1,4 @@
 """Offline contract tests for the standalone V3.1 HTTPS GET adapter."""
-import json
 import unittest
 
 from bot.short_down_bos_v31_evidence_collector import CollectorRefused
