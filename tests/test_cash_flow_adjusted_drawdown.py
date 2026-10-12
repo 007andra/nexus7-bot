@@ -738,6 +738,41 @@ class CashFlowAdminCliTests(unittest.IsolatedAsyncioTestCase):
                 base + ["--apply", "--confirm", "ATTEST:op-1"]))
             self.assertTrue(attest.await_args.kwargs["apply"])
 
+    async def test_cli_apply_rebases_default_income_window_after_clock_advances(self):
+        """Two authenticated reads take real time; default window must cover both."""
+        from unittest.mock import AsyncMock
+        from bot import cash_flow_admin
+
+        clock = iter([T0, T0 + 37])
+        account = {"equity": 6.0, "walletBalance": 6.0}
+        client = SimpleNamespace(
+            _now_ms=lambda: next(clock),
+            get_account_state=AsyncMock(return_value=account),
+            close=AsyncMock(),
+        )
+        args = cash_flow_admin._parser().parse_args([
+            "attest", "--reconciliation-id", "op-clock-advance",
+            "--tran-ids", "7", "--pre-flow-equity", "10",
+            "--evidence-ref", "source", "--reason", "reconcile",
+            "--apply", "--confirm", "ATTEST:op-clock-advance",
+        ])
+        with patch("bot.database.init", AsyncMock()), \\
+             patch("bot.database.close", AsyncMock()), \\
+             patch.object(cash_flow_admin, "_client", AsyncMock(return_value=client)), \\
+             patch("bot.binance_accounting_evidence.collect_income",
+                   AsyncMock(return_value=[])) as income, \\
+             patch.object(cash_flow_admin.ledger, "attest_flows",
+                          AsyncMock(return_value={"status": "APPLIED"})) as attest:
+            out = await cash_flow_admin._run(args)
+        self.assertEqual(out["status"], "APPLIED")  # mock only; no durable write
+        self.assertEqual(income.await_count, 2)
+        self.assertEqual(income.await_args_list[0].args,
+                         (client, T0 - cash_flow_admin._WINDOW_MS, T0))
+        self.assertEqual(income.await_args_list[1].args,
+                         (client, T0 + 37 - cash_flow_admin._WINDOW_MS, T0 + 37))
+        self.assertEqual(attest.await_args.kwargs["rows_cover_until_ms"], T0 + 37)
+        self.assertTrue(attest.await_args.kwargs["apply"])
+
     async def test_cli_apply_rejects_income_or_account_changes_during_evidence_read(self):
         from unittest.mock import AsyncMock
         from bot import cash_flow_admin
