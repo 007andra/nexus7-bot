@@ -268,6 +268,52 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len((await self.ledger())["pending"]), 1)
         self.assertEqual(await self.peak(), original_peak)
 
+    async def test_active_nexus_runtime_zero_branch_captures_outflow(self):
+        """Production runs nexus_runtime_engine (pilot runtime not installed):
+        its zero-equity branch must capture too, throttled, never touching HWM."""
+        from bot import nexus_runtime_engine as runtime
+
+        client, boot_engine = await self.boot(22.7986938551)
+        client.income("REALIZED_PNL", 5.31768526 - 22.7986938551)
+        await self.refresh(boot_engine)
+        peak = await self.peak()
+        cursor = await db.load_key_value(cfl.SEEN_CURSOR_KEY)
+        client.income("TRANSFER", -client.wallet)  # exact zero, as Binance reports it
+
+        engine = object.__new__(runtime.TradingEngine)
+        engine.client = client
+        engine.risk = boot_engine.risk
+        engine.paper_trade = False
+        engine._validation_safety_lock_active = False
+
+        async def zero_state(_client):
+            return {"equity": 0.0, "available": 0.0}
+
+        with patch.object(runtime.account_balance_semantics, "read_account_state", zero_state):
+            await engine._update_balance()
+            self.assertEqual(len((await self.ledger())["pending"]), 1)
+            client.income("TRANSFER", 1.0)  # within the throttle interval: not read
+            client.income("TRANSFER", -1.0)
+            await engine._update_balance()
+            self.assertEqual(len((await self.ledger())["pending"]), 1)
+            engine._pilot_last_zero_cashflow_capture -= cfl.ZERO_EQUITY_CAPTURE_INTERVAL_S
+            await engine._update_balance()
+        ledger = await self.ledger()
+        self.assertEqual(len(ledger["pending"]), 3)
+        self.assertEqual(ledger["applied"], [])
+        self.assertEqual(await self.peak(), peak)
+        self.assertEqual(await db.load_key_value(cfl.SEEN_CURSOR_KEY), cursor)
+        self.assertTrue(engine._drawdown_hard_gate_active)
+
+    async def test_zero_equity_throttled_capture_swallows_outage(self):
+        client, engine = await self.boot(5.0)
+        client.income("TRANSFER", -5.0)
+        client.fail = True
+        logger = SimpleNamespace(critical=lambda *a, **k: None)
+        self.assertIsNone(await cfl.capture_zero_equity_pending_throttled(engine, logger))
+        self.assertEqual((await self.ledger())["pending"], [])
+        self.assertAlmostEqual(await self.peak(), 5.0)
+
     async def test_zero_equity_capture_refuses_unbootstrapped_cursor(self):
         """A new empty ledger is not allowed to hide preexisting outflows."""
         client = FakeBinance(0.0)

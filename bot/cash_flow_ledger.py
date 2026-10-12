@@ -706,6 +706,38 @@ async def capture_zero_equity_pending(client, risk, *, strict: bool = True) -> d
             "hwm_changed": False, "applied": 0}
 
 
+ZERO_EQUITY_CAPTURE_INTERVAL_S = 300.0
+_ZERO_CAPTURE_ATTR = "_pilot_last_zero_cashflow_capture"
+
+
+async def capture_zero_equity_pending_throttled(engine, log_) -> dict | None:
+    """Zero-equity balance-refresh hook shared by every LIVE runtime path.
+
+    At most one double-read every ``ZERO_EQUITY_CAPTURE_INTERVAL_S`` (the
+    /fapi/v1/income weight is 30 per read). Any failure is logged and
+    swallowed: the caller already blocks new entries at zero equity, so an
+    evidence outage can only lose telemetry, never open risk.
+    """
+    from bot import capital_flow_reconciliation as capital_flows
+
+    if not capital_flows._is_binance_client(engine.client):
+        return None
+    now = time.time()
+    last = float(getattr(engine, _ZERO_CAPTURE_ATTR, 0.0) or 0.0)
+    if now - last < ZERO_EQUITY_CAPTURE_INTERVAL_S:
+        return None
+    setattr(engine, _ZERO_CAPTURE_ATTR, now)
+    try:
+        return await capture_zero_equity_pending(engine.client, engine.risk, strict=True)
+    except Exception as exc:
+        log_.critical(
+            "[CASH_FLOW_ZERO_EQUITY] status=UNCONFIRMED reason=%s hwm_changed=false "
+            "execution_effect=BLOCK_NEW_ENTRIES",
+            type(exc).__name__,
+        )
+        return None
+
+
 async def reconcile_binance(client, risk, current_equity: float, *, strict: bool = True) -> dict:
     from bot.binance_accounting_evidence import collect_income
 
