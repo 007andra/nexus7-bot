@@ -10,6 +10,7 @@ from scripts.pg_temp_grant_origin import (
 def record(*, effective=True, public=False, direct=False, inherited=False,
            owner=False, default=False):
     return {
+        "other_login_roles_public_dependent": 2 if public else 0,
         "effective_temp": effective,
         "from_public": public,
         "from_direct": direct,
@@ -32,6 +33,7 @@ class TempGrantOriginOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("inherited=false", line)
         self.assertIn("default_acl=true", line)
         self.assertIn("potential_revocation_scope=DATABASE_WIDE", line)
+        self.assertIn("other_login_roles_public_dependent=MULTIPLE", line)
         self.assertIn("execution_effect=NONE", line)
 
     async def test_direct_grant_alone_and_inherited_grant_alone(self):
@@ -63,7 +65,10 @@ class TempGrantOriginOfflineTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_or_contradictory_evidence_fails_closed(self):
         for row in (None, {}, record(effective=False, public=True),
                     record(effective=True), record(public="true"),
-                    record(public=True, direct=None)):
+                    record(public=True, direct=None),
+                    {**record(public=True), "other_login_roles_public_dependent": -1},
+                    {**record(public=True), "other_login_roles_public_dependent": True},
+                    {**record(public=False, direct=True), "other_login_roles_public_dependent": 1}):
             with self.subTest(row=row):
                 conn = AsyncMock()
                 conn.fetchrow.return_value = row
@@ -79,6 +84,16 @@ class TempGrantOriginOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SECRET_URI", line)
         self.assertNotIn("postgres://", line)
         self.assertNotIn("password", line)
+
+    async def test_zero_and_single_potential_dependency_bands(self):
+        for affected, band in ((0, "NONE"), (1, "ONE")):
+            with self.subTest(affected=affected):
+                conn = AsyncMock()
+                row = record(public=True)
+                row["other_login_roles_public_dependent"] = affected
+                conn.fetchrow.return_value = row
+                line = origin_log_line(await inspect_temp_origin(conn))
+                self.assertIn(f"other_login_roles_public_dependent={band}", line)
 
     def test_inconclusive_has_no_identity_or_source_guesses(self):
         line = origin_log_line(None)
