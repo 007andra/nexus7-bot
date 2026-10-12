@@ -29,6 +29,7 @@ from decimal import Decimal, ROUND_FLOOR
 
 from bot import account_balance_semantics as account_semantics
 from bot import capital_flow_reconciliation as capital_flows
+from bot import cash_flow_ledger
 from bot import external_position_performance as external_performance
 from bot import binance_hwm_incident_repair as hwm_incident_repair
 from bot.drawdown_persistence import (
@@ -107,6 +108,21 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
         # capital. Preserve the durable HWM at 100% drawdown so the runtime can
         # continue read-only reconciliation/forensics without ever opening risk.
         await restore_zero_equity_peak_fail_closed(engine.risk, strict=True)
+        # Evidence collection may persist NEW transfer identities as PENDING,
+        # but can never rebase the HWM or clear the zero-capital hard gate.
+        # Data-source outages must not kill zero-equity telemetry or fail open.
+        if capital_flows._is_binance_client(engine.client):
+            try:
+                await cash_flow_ledger.capture_zero_equity_pending(
+                    engine.client, engine.risk, strict=True,
+                )
+            except Exception as exc:
+                log.critical(
+                    "[CASH_FLOW_ZERO_EQUITY] status=UNCONFIRMED "
+                    "reason=%s hwm_changed=false "
+                    "execution_effect=BLOCK_NEW_ENTRIES",
+                    type(exc).__name__,
+                )
         engine._pilot_prev_account_equity = 0.0
         engine._pilot_prev_account_observed_ms = external_performance.server_now_ms(
             engine.client
