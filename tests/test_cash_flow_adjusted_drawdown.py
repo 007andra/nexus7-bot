@@ -240,6 +240,41 @@ class CashFlowAdjustedDrawdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(self.drawdown(engine), 0.05)  # gross would be 50%
         self.assertTrue(self.entry_allowed(engine))
 
+    async def test_zero_equity_outflow_is_captured_pending_without_peak_write(self):
+        """Authenticated full withdrawal must remain pending, never a trading loss."""
+        client, engine = await self.boot(5.31768526)
+        original_peak = await self.peak()
+        client.income("TRANSFER", -5.31768526)
+        await self.refresh(engine)
+        self.assertEqual(client.wallet, 0.0)
+        self.assertEqual(await self.peak(), original_peak)
+        ledger = await self.ledger()
+        self.assertEqual(len(ledger["pending"]), 1)
+        self.assertEqual(len(ledger["applied"]), 0)
+        self.assertAlmostEqual(float(ledger["pending"][0]["amount"]), -5.31768526)
+        self.assertAlmostEqual(self.drawdown(engine), 1.0)
+        self.assertFalse(self.entry_allowed(engine))
+
+        # Repeated polling cannot duplicate the same income identity.
+        engine._pilot_last_zero_cashflow_capture = 0.0
+        await self.refresh(engine)
+        self.assertEqual(len((await self.ledger())["pending"]), 1)
+        self.assertEqual(await self.peak(), original_peak)
+
+        # Detection-window expiry must never purge durable pending evidence.
+        engine._pilot_last_zero_cashflow_capture = 0.0
+        client.advance(cfl.DETECTION_WINDOW_MS + 60_000)
+        await self.refresh(engine)
+        self.assertEqual(len((await self.ledger())["pending"]), 1)
+        self.assertEqual(await self.peak(), original_peak)
+
+    async def test_zero_equity_capture_refuses_unbootstrapped_cursor(self):
+        """A new empty ledger is not allowed to hide preexisting outflows."""
+        client = FakeBinance(0.0)
+        with self.assertRaisesRegex(cfl.CashFlowBlocked, "NOT_BOOTSTRAPPED"):
+            await cfl.capture_zero_equity_pending(client, new_risk(1.0))
+        self.assertIsNone(await self.ledger())
+
     # 6 ────────────────────────────────────────────────────────────────────────
     async def test_06_realized_loss_after_withdrawal_still_increases_and_blocks(self):
         client, engine = await self.boot(10.0)
