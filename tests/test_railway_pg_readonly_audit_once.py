@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from scripts import railway_pg_readonly_audit_once as worker
 from scripts.pg_temp_grant_origin import TempOrigin
+from scripts.pg_temp_consumer_inventory import Inventory
 
 
 class FakeTransaction:
@@ -62,13 +63,14 @@ def report(fail_item=None, drop_item=None, fail_group3=None):
 class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
     async def _call(self, *, dsn="postgresql://user:SECRET_URI@host/db",
                     audit=None, error=None, close_fails=False,
-                    origin_error=None):
+                    origin_error=None, inventory_error=None):
         output = StringIO()
         conn = FakeConnection(close_fails=close_fails)
         with patch.dict(os.environ, {worker.DSN_ENV: dsn} if dsn else {}, clear=True), \
                 patch("asyncpg.connect", new_callable=AsyncMock) as connect, \
                 patch.object(worker, "run", new_callable=AsyncMock) as run, \
                 patch.object(worker, "inspect_temp_origin", new_callable=AsyncMock) as probe, \
+                patch.object(worker, "collect_consumers", new_callable=AsyncMock) as census, \
                 redirect_stdout(output):
             connect.return_value = conn
             if error:
@@ -81,8 +83,17 @@ class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
             )
             if origin_error:
                 probe.side_effect = RuntimeError("password=SECRET_URI")
+            census.return_value = Inventory(
+                login_roles=5, login_connect=4, login_temp=3,
+                login_superusers=1, sessions=2, active_sessions=1,
+                idle_in_tx=0, distinct_session_roles=2,
+                observer_visibility="LIMITED", files_delta=0, bytes_delta=0,
+            )
+            if inventory_error:
+                census.side_effect = RuntimeError("password=SECRET_URI")
             rc = await worker.execute()
             self.last_origin_probe_calls = probe.await_count
+            self.last_inventory_calls = census.await_count
         return rc, output.getvalue(), conn, connect, run
 
     async def test_default_is_inert_without_dsn(self):
@@ -169,6 +180,9 @@ class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rc, 1)
         self.assertTrue(conn.readonly)
         self.assertEqual(self.last_origin_probe_calls, 1)
+        self.assertEqual(self.last_inventory_calls, 1)
+        self.assertIn("[PG_TEMP_CONSUMER_INVENTORY] status=OBSERVED", output)
+        self.assertIn("session_visibility=LIMITED", output)
         self.assertIn("[PG_TEMP_ORIGIN] status=RESOLVED", output)
         self.assertIn("public=true direct=false inherited=false", output)
         self.assertIn("potential_revocation_scope=DATABASE_WIDE", output)
@@ -186,12 +200,25 @@ class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SECRET_URI", output)
         self.assertNotIn("password=", output)
 
+    async def test_consumer_inventory_failure_never_grants_audit_pass(self):
+        rc, output, conn, _, _ = await self._call(
+            audit=report(fail_group3="TEMP"), inventory_error=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.last_inventory_calls, 1)
+        self.assertTrue(conn.readonly)
+        self.assertIn("[PG_TEMP_CONSUMER_INVENTORY] status=INCONCLUSIVE", output)
+        self.assertIn("[PG_ROLE_AUDIT_ONCE] status=FAIL", output)
+        self.assertIn("READ_ONLY_ROLE_VERIFIED=false", output)
+        self.assertNotIn("SECRET_URI", output)
+
     async def test_origin_not_run_when_temp_is_not_failed(self):
         for audit in (report(), report(fail_item=7)):
             with self.subTest(verified=audit.verified):
                 rc, output, _, _, _ = await self._call(audit=audit)
                 self.assertEqual(self.last_origin_probe_calls, 0)
+                self.assertEqual(self.last_inventory_calls, 0)
                 self.assertNotIn("[PG_TEMP_ORIGIN]", output)
+                self.assertNotIn("[PG_TEMP_CONSUMER_INVENTORY]", output)
                 self.assertEqual(rc, 0 if audit.verified else 1)
 
     async def test_origin_not_run_for_invalid_main_audit(self):
@@ -200,7 +227,9 @@ class RailwayReadOnlyAuditOnceTests(unittest.IsolatedAsyncioTestCase):
         rc, output, _, _, _ = await self._call(audit=audit)
         self.assertEqual(rc, 2)
         self.assertEqual(self.last_origin_probe_calls, 0)
+        self.assertEqual(self.last_inventory_calls, 0)
         self.assertNotIn("[PG_TEMP_ORIGIN]", output)
+        self.assertNotIn("[PG_TEMP_CONSUMER_INVENTORY]", output)
 
     async def test_missing_checks_cannot_pass(self):
         rc, output, _, _, _ = await self._call(audit=report(drop_item=6))
