@@ -127,7 +127,8 @@ def propose_roster(candidates, *, authority: EnrollmentAuthority,
         if not (all(math.isfinite(x) and x > 0 for x in (entry, stop, target))
                 and stop > entry > target):
             raise RosterEvidenceError("V31_INVALID_SHORT_PRICE_GEOMETRY")
-        valid.append((t, cid, symbol))
+        # Store immutable decision geometry for duplicate fingerprint checks.
+        valid.append((t, cid, symbol, entry, stop, target))
 
     valid.sort(key=lambda row: (row[0], row[1]))
     # An inconsistent duplicate must stop collection; never silently choose
@@ -136,8 +137,8 @@ def propose_roster(candidates, *, authority: EnrollmentAuthority,
     chosen = []
     counts = Counter()
     cap_excluded = 0
-    for t, cid, symbol in valid:
-        key = (t, symbol)
+    for t, cid, symbol, entry, stop, target in valid:
+        key = (t, symbol, entry, stop, target)
         if cid in seen:
             if seen[cid] != key:
                 raise RosterEvidenceError("V31_CONFLICTING_CANDIDATE_ID")
