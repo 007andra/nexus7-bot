@@ -109,3 +109,26 @@ The collector also requires a candidate capture timestamp, enforces `signal_capt
 5. **Offline-to-real proof:** pass offline tests, then verify the isolated transaction/anchor contract and correct 60m/240m observation schedule without retrospective quotes, using read-only operations only. Any late/stale/missing horizon evidence remains `NOT_PROVEN`, never replaced. Only then may new natural canonical signals be counted toward 40.
 
 **Present research population: 0/40.** All flags `roster_durable`, `net_evidence_ready`, `promotion_allowed`, `live_allowed` remain false. No service, key, bucket, DB, CRON, API call, order or LIVE risk change has been authorized or made by this draft.
+
+## One-shot Binance research-key capability preflight (new; never auto-run)
+
+File: `bot/short_down_bos_v31_api_preflight.py`, offline tests in `tests/test_short_down_bos_v31_api_preflight.py`.
+
+The default command below has **zero network calls and does not read credentials**, even when run from an environment containing LIVE secrets:
+
+```bash
+python -m bot.short_down_bos_v31_api_preflight
+```
+
+After a separate explicit operator authorization, and ONLY from a dedicated research process with a new independent Binance read-only key supplied via secure secret storage, a qualified operator can run this on-demand (not in Railway LIVE):
+
+```bash
+python -m bot.short_down_bos_v31_api_preflight \
+  --probe --i-confirm-readonly-network-only --symbol BTCUSDT
+```
+
+All output is a small redacted Boolean status. The command refuses *any* environment with canonical NEXUS LIVE Binance keys, trading-mode variables or production DATABASE_URL. It requires `V31_RESEARCH_BINANCE_API_KEY` and `V31_RESEARCH_BINANCE_API_SECRET` in the isolated process, does not print their values and refuses the probe unless the user explicitly chose `--probe` plus its acknowledgment. No LIVE key, transaction ID or raw Binance response is imported, printed or stored. The transport only sends HTTPS GET requests to allowed hosts/paths with TLS verification and no redirect following. This is a capability test, **NOT** authorization for prospective sampling.
+
+Required signed/private reads are `/sapi/v1/account/apiRestrictions`, `/fapi/v1/commissionRate` and `/fapi/v1/leverageBracket`. Public endpoints tested: `/fapi/v1/time`, `/fapi/v1/exchangeInfo`, `/fapi/v1/ticker/bookTicker`, `/fapi/v1/markPriceKlines`, `/fapi/v1/fundingRate`. A failed private read means `NOT_PROVEN`: **never** grant futures-trading permissions just to permit the query; do not reuse the LIVE production API key. Binance documentation: https://developers.binance.com/en/docs/catalog/core-trading-wallet/api/rest-api/account .
+
+A passed probe proves only endpoint readability at the time of the probe, not correctness of horizon prices, complete source coverage, immutable prospective enrollment or executable net results. `V31 0/40` remains until a dedicated approved writer, independently authenticated manifest anchor, and a frozen forward capture-start epoch exist. No research scheduler or service has been provisioned. PR #659 remains research-only and outside `migration/binance-usdm`.
