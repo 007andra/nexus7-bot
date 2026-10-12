@@ -42,7 +42,11 @@ def evidence(c, shape=flat, exit60=("99.99", "100.01"), exit240=("99.99", "100.0
             "60": {"observed_ms": e + 3_600_000, "bid": exit60[0], "ask": exit60[1]},
             "240": {"observed_ms": e + 14_400_000, "bid": exit240[0], "ask": exit240[1]},
         },
+        "bars_price_type": "MARK_PRICE",
+        "margin": {"mode": "ISOLATED", "leverage": 3, "maint_margin_rate": "0.004",
+                   "margin_balance": "33"},
         "protection": {"stop": "103", "tp_order_type": "LIMIT", "trailing": None,
+                       "working_type": "MARK_PRICE",
                        "take_profits": [{"price": "94", "fraction": "1"}]},
         "bars": bars(e, shape),
         "funding": {"coverage": {"complete": True, "start_ms": e - 1, "end_ms": e + 14_400_000},
@@ -145,6 +149,10 @@ class CandidateTests(unittest.TestCase):
             "MIN_NOTIONAL_NOT_MET": lambda e: e["filters"].update(min_notional="500"),
             "EVIDENCE_NOT_DECLARED_CAPTURED": lambda e: e.update(synthetic=True),
             "EVIDENCE_IDENTITY_MISMATCH": lambda e: e.update(candidate_id="other"),
+            "TRIGGER_PRICE_SOURCE_MISMATCH": lambda e: e.update(bars_price_type="CONTRACT_PRICE"),
+            "MARGIN_EVIDENCE_MISSING": lambda e: e.pop("margin"),
+            "MARGIN_EVIDENCE_INCONSISTENT": lambda e: e["margin"].update(margin_balance="40"),
+            "LIQUIDATION_BEFORE_STOP": lambda e: e["margin"].update(leverage=50, margin_balance="1.9"),
         }
         for reason, mutate in mutations.items():
             with self.subTest(reason=reason):

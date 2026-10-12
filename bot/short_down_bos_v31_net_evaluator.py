@@ -53,6 +53,10 @@ MAX_FRACTION = Decimal("0.05")  # fee/slippage sanity bound; larger is a data er
 FEE_SOURCE = "BINANCE_USDM_COMMISSION_RATE"
 FUNDING_TYPES = frozenset({"Regular", "Special"})
 TP_TYPES = frozenset({"LIMIT", "TAKE_PROFIT_MARKET"})
+# Binance conditional orders trigger on MARK_PRICE or CONTRACT_PRICE (the live
+# bot uses MARK_PRICE); the bars used to detect triggers must be that series.
+WORKING_TYPES = frozenset({"MARK_PRICE", "CONTRACT_PRICE"})
+MARGIN_MODES = frozenset({"ISOLATED", "CROSS"})
 
 PROVEN = "PROVEN"
 INDETERMINATE = "INDETERMINATE"
@@ -283,6 +287,10 @@ def _evaluate(candidate: dict, ev: dict, as_of_ms: int) -> dict:
         raise NotProven("ENTRY_BEYOND_STOP")
     if any(price >= entry_fill for price, _, _ in levels):
         raise NotProven("TP_NOT_BELOW_ACTUAL_ENTRY")
+    working_type = (ev.get("protection") or {}).get("working_type")
+    if working_type not in WORKING_TYPES or ev.get("bars_price_type") != working_type:
+        raise NotProven("TRIGGER_PRICE_SOURCE_MISMATCH")
+    _require_stop_before_liquidation(ev.get("margin"), qty, entry_fill, stop, floor, tick)
 
     end_ms = entry_ms + max(HORIZONS_MIN) * 60_000
     if as_of_ms < end_ms:
@@ -311,6 +319,28 @@ def _evaluate(candidate: dict, ev: dict, as_of_ms: int) -> dict:
         out[f"mfe_{horizon}"] = path_mfe
         out[f"mae_{horizon}"] = path_mae
     return out
+
+
+def _require_stop_before_liquidation(raw, qty, entry_fill, stop, floor, tick) -> None:
+    """SHORT liquidation bound must lie beyond the worst modelled stop fill.
+
+    liq = (M + qty*entry) / (qty * (1 + mmr)) with M the isolated margin or the
+    cross wallet balance. Omitting Binance's maintenance amount (``cum``)
+    places liq closer to entry, so the check is conservative.
+    """
+    if not isinstance(raw, dict) or raw.get("mode") not in MARGIN_MODES:
+        raise NotProven("MARGIN_EVIDENCE_MISSING")
+    lev = raw.get("leverage")
+    if isinstance(lev, bool) or not isinstance(lev, int) or not 1 <= lev <= 125:
+        raise NotProven("MARGIN_EVIDENCE_MISSING")
+    mmr = _fraction(raw.get("maint_margin_rate"), "MARGIN_EVIDENCE_MISSING")
+    balance = _pos(raw.get("margin_balance"), "MARGIN_EVIDENCE_MISSING")
+    if raw["mode"] == "ISOLATED" and balance > qty * entry_fill / lev:
+        # isolated margin cannot exceed the initial margin of this position
+        raise NotProven("MARGIN_EVIDENCE_INCONSISTENT")
+    liq = (balance + qty * entry_fill) / (qty * (1 + mmr))
+    if _ceil_to(stop * (1 + floor), tick) >= liq:
+        raise NotProven("LIQUIDATION_BEFORE_STOP")
 
 
 def _walk(bars, entry_ms, h_end, qty, stop, levels, tp_type, floor, tick, entry_fill):

@@ -81,3 +81,16 @@ Pure implementation of the #658 execution contract and frozen statistics, over c
 - Cohort: duplicate IDs fail closed. Rows are never dropped or replaced. Any `INDETERMINATE`/`NOT_PROVEN` row makes the cohort `NOT_PROVEN`. PASS criteria are exactly #658's: mean diff > 0.001; lower 2.5th percentile (nearest rank 250/10,000, seed 59031012, UTC 4h clusters, ≥ 10 clusters) > 0; mean net60 > 0; share net60 > 0 ≥ 0.60; every LOSO > 0; ≥ 6 symbols; ≤ 10 per symbol. A PASS is only `EVIDENCE_READY_FOR_MANUAL_REVIEW`. `live_allowed=false` and `promotion_allowed=false` always.
 
 Still missing before any real V3.1 number exists: an authenticated external anchor, a reviewed and authorized research-only collector that captures the above evidence prospectively (commissionRate, bookTicker at entry and both horizons, closed bars, funding with coverage), and 40 real post-cutoff enrollments. Valid V3.1 sample: **0/40**.
+
+## Trigger source, liquidation and read-only collector (12/10/2026)
+
+- The live bot installs SL and TP as `closePosition` conditional algo orders with `workingType=MARK_PRICE` (`bot/binance.py`). The evaluator now requires `protection.working_type` and refuses bars of a different price series (`TRIGGER_PRICE_SOURCE_MISMATCH`). The live TP is therefore `TAKE_PROFIT_MARKET` with no partials, and evidence must encode exactly that.
+- Liquidation feasibility (#658 item 2): `liq = (M + qty*entry)/(qty*(1+mmr))`. Binance's maintenance amount is omitted, which is conservative. The worst modelled stop fill must lie below `liq`, otherwise `LIQUIDATION_BEFORE_STOP`. Missing margin evidence → `MARGIN_EVIDENCE_MISSING`.
+- `bot/short_down_bos_v31_evidence_collector.py`:
+  - GET-only allowlist, with no order/leverage/marginType/account endpoints.
+  - Separate `V31_RESEARCH_BINANCE_API_KEY/SECRET`. A key equal to the LIVE key is refused.
+  - Mandatory `apiRestrictions` preflight: must read, must not trade, withdraw or transfer.
+  - No database, scheduler or bot imports.
+  - Capture steps: `capture_entry` (serverTime, bookTicker with exchange time, exchangeInfo `MARKET_LOT_SIZE`, commissionRate, leverageBracket), `capture_horizon` (bookTicker inside `[h-2s, h]`; a late quote is kept and rejected by the evaluator) and `capture_path` (mark-price 15m klines, funding with a non-full page as coverage proof).
+  - An offline test proves its output is accepted end to end by the evaluator.
+- Not done and not authorized: creating the research API key, any network call to Binance, a scheduler, persistence wiring to the research PostgreSQL, and the capture start. V3.1 sample: **0/40**.
