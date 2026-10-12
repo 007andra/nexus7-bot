@@ -131,11 +131,15 @@ class SnapshotTimingProbe:
         """
         if stage not in self.payload_utf8_bytes_by_stage:
             return
-        if isinstance(raw, str):
-            byte_count = len(raw.encode("utf-8"))
-        elif isinstance(raw, bytes):
-            byte_count = len(raw)
-        else:
+        try:
+            if isinstance(raw, str):
+                byte_count = len(raw.encode("utf-8"))
+            elif isinstance(raw, bytes):
+                byte_count = len(raw)
+            else:
+                return
+        except (UnicodeError, TypeError, ValueError):
+            # Invalid research payload must not change the snapshot result.
             return
         self.payload_utf8_bytes_by_stage[stage] += byte_count
         self.payload_max_utf8_bytes_by_stage[stage] = max(
