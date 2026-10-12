@@ -1340,9 +1340,18 @@ async def _maybe_emit_prospective_oos_cohort(db):
     from bot import oos_readonly_connection_v1 as dedicated
     _use_dedicated = dedicated.enabled()
     try:
-        snapshot_db = await dedicated.acquire() if _use_dedicated else _research(db)
-        report = await asyncio.wait_for(
-            oos.snapshot(snapshot_db, timing_probe=_timing), timeout=3.0
+        from bot import oos_total_deadline_v1 as budget
+
+        async def _acquire_snapshot_db():
+            return await dedicated.acquire() if _use_dedicated else _research(db)
+
+        async def _read_snapshot(snapshot_db):
+            return await oos.snapshot(snapshot_db, timing_probe=_timing)
+
+        # One fail-closed 3s deadline includes a fresh read-only PG connection,
+        # not just the subsequent SELECTs. No DB/strategy/authority changes.
+        report = await budget.run(
+            _acquire_snapshot_db, _read_snapshot, timeout_s=3.0,
         )
         _timing_status = "OK"
         log.warning("%s", oos.format_summary(report))
