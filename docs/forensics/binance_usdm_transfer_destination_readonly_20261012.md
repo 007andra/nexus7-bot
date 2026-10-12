@@ -24,3 +24,20 @@ No raw transaction IDs, account identifiers, incoming wallet addresses, credenti
 Completion of this lookup does not authorize LIVE trading. Maintain hard drawdown gate, existing HWM, OOS FAIL evidence and separate manual release controls.
 
 Source: https://developers.binance.com/en/docs/catalog/core-trading-wallet/api/rest-api/asset#query-user-universal-transfer-history
+
+## Safe completion and authentication failures
+
+The CLI prints a redacted JSON status. Exit code 0 is reserved for a UNIQUE
+exact SAPI/FAPI transaction-ID, asset, amount, and time match in a complete
+four-route query. All weaker observations (including a single amount/time
+candidate), missing permissions, partial pages, unavailable income, or
+network/API failure exit nonzero or fail closed, without traceback/raw API body.
+
+The route identifies the Binance internal wallet *category*, not proof
+that the amount currently remains credited there. A recent successful
+transfer can subsequently have been spent, withdrawn, or moved again.
+The operator must independently review receiving-wallet transactions,
+current balance and whether the transfer was authorized.
+
+Official schema checked 2026-10-12:
+https://developers.binance.com/en/docs/catalog/core-trading-wallet/api/rest-api/asset#query-user-universal-transfer-history
