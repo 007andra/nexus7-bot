@@ -66,3 +66,18 @@ The research writer is not authorized to connect to or create the NEXUS producti
 ### Additional true PostgreSQL proof (disposable CI only)
 
 `tests/test_short_down_bos_v31_postgres_real_disposable.py` runs **only** when `GITHUB_ACTIONS=true` and `TEST_POSTGRES_DSN` matches the exact isolated GitHub Quality Check PostgreSQL fixture `postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof`. It creates a unique ephemeral `nexus7_research_ci_*` database, provisions the non-login `nexus_v31_writer` role inside this disposable fixture, executes the unshipped DDL there, verifies a committed append, stale-witness refusal, event UPDATE denial, header mutation denial, and concurrent SERIALIZABLE writer race (one winner). The test drops its disposable database after completion. This **does not touch Railway** or prove an independent external signing service exists.
+
+## NET evaluator (`bot/short_down_bos_v31_net_evaluator.py`)
+
+Pure implementation of the #658 execution contract and frozen statistics, over caller-supplied captured evidence. It does not collect anything: no Binance, database, clock or scheduler.
+
+- Per candidate, ONE shared closed-bar path drives both horizons, so pre-60m stops/TPs/partials are identical by construction. The result is `PROVEN` only if both horizons are proven.
+- Decimal only; floats are refused for exchange evidence. Candidate geometry from captured JSON uses its shortest repr. Adverse tick/step rounding.
+- Fee: `BINANCE_USDM_COMMISSION_RATE` taker rate observed at or before entry, applied on each leg's own notional. Filters (tick/step/minNotional) as-of entry.
+- Entry sells at a fresh bid (|Δt| ≤ 2 s) minus the declared `DECLARED_STRESS_FLOOR` slippage. A time exit buys at a fresh ask exactly at entry+60m/240m plus the floor. Stops fill at max(stop, gap open) plus the floor. LIMIT TPs need trade-through, and an exact touch is `INDETERMINATE`.
+- The protection plan must equal the frozen candidate stop and final target. Partial TPs may move the stop from the next bar only. Trailing is `NOT_PROVEN` (`TRAILING_NOT_MODELED`) until a reviewed model exists.
+- `INDETERMINATE` covers: stop+TP in one bar, a TP inside the entry bar or a horizon-straddling bar, a stop inside a horizon-straddling bar, and a funding settlement inside a fill window.
+- Funding is taken only from Regular/Special settlement events with a complete coverage proof of the exposure interval. A SHORT receives positive rates.
+- Cohort: duplicate IDs fail closed. Rows are never dropped or replaced. Any `INDETERMINATE`/`NOT_PROVEN` row makes the cohort `NOT_PROVEN`. PASS criteria are exactly #658's: mean diff > 0.001; lower 2.5th percentile (nearest rank 250/10,000, seed 59031012, UTC 4h clusters, ≥ 10 clusters) > 0; mean net60 > 0; share net60 > 0 ≥ 0.60; every LOSO > 0; ≥ 6 symbols; ≤ 10 per symbol. A PASS is only `EVIDENCE_READY_FOR_MANUAL_REVIEW`. `live_allowed=false` and `promotion_allowed=false` always.
+
+Still missing before any real V3.1 number exists: an authenticated external anchor, a reviewed and authorized research-only collector that captures the above evidence prospectively (commissionRate, bookTicker at entry and both horizons, closed bars, funding with coverage), and 40 real post-cutoff enrollments. Valid V3.1 sample: **0/40**.
