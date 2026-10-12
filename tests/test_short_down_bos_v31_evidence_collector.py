@@ -10,8 +10,7 @@ ENTRY = 1_791_900_000_000 - (1_791_900_000_000 % M15) + 1_000
 SYM = "AAAUSDT"
 ENV = {col.RESEARCH_KEY_ENV: "research-key", col.RESEARCH_SECRET_ENV: "research-secret",
        col.LIVE_KEY_ENV: "live-key"}
-READ_ONLY = {"enableReading": True, "enableFutures": False, "enableWithdrawals": False,
-             "enableInternalTransfer": False, "enableSpotAndMarginTrading": False}
+READ_ONLY = {"enableReading": True, **{key: False for key in col.FORBIDDEN_PERMISSIONS}}
 
 
 class FakeTransport:
@@ -75,6 +74,18 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(perm=perm):
                 client = col.ReadOnlyBinanceResearchClient(
                     FakeTransport({**READ_ONLY, perm: True}), environ=ENV)
+                with self.assertRaisesRegex(col.CollectorRefused, "WRITE_PERMISSION"):
+                    await client.preflight()
+                self.assertFalse(client.verified_read_only)
+
+    async def test_missing_permission_fields_refuse_readonly_approval(self):
+        # An omitted capability flag is UNKNOWN, not proof it is disabled.
+        for perm in col.FORBIDDEN_PERMISSIONS:
+            with self.subTest(perm=perm):
+                restrictions = dict(READ_ONLY)
+                restrictions.pop(perm)
+                client = col.ReadOnlyBinanceResearchClient(
+                    FakeTransport(restrictions), environ=ENV)
                 with self.assertRaisesRegex(col.CollectorRefused, "WRITE_PERMISSION"):
                     await client.preflight()
                 self.assertFalse(client.verified_read_only)
