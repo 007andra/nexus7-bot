@@ -213,7 +213,7 @@ class BinanceMigrationTests(unittest.TestCase):
             ({}, "BINANCE_ACCOUNT_EQUITY_UNAVAILABLE"),
             ({"availableBalance": "0"}, "BINANCE_ACCOUNT_EQUITY_UNAVAILABLE"),
             ({"totalMarginBalance": "0"}, "BINANCE_ACCOUNT_AVAILABLE_UNAVAILABLE"),
-            ({"totalWalletBalance": "0"}, "BINANCE_ACCOUNT_AVAILABLE_UNAVAILABLE"),
+            ({"totalWalletBalance": "0"}, "BINANCE_ACCOUNT_EQUITY_UNAVAILABLE"),
             ({"totalMarginBalance": "9", "availableBalance": None},
              "BINANCE_ACCOUNT_AVAILABLE_UNAVAILABLE"),
             # Wallet balance alone can differ from equity by unrealized PnL.
