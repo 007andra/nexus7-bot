@@ -1,10 +1,12 @@
 """Research-only self-chained aggTrade archive integrity tests (no network)."""
+import asyncio
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from bot import short_down_bos_event_archive_v1 as archive
+from scripts import short_down_bos_public_aggtrade_capture_v1 as collector
 
 SYMBOL = "BTCUSDT"
 SID = "research-20261012-0001"
@@ -197,6 +199,46 @@ class ArchiveTests(unittest.TestCase):
         self.assertFalse(archive.AUTHORITY["durable_remote_copy_proven"])
         self.assertFalse(archive.AUTHORITY["real_exchange_fills_proven"])
         self.assertFalse(archive.AUTHORITY["candidate_approval_proven"])
+
+
+class PublicCaptureDeadlineTests(unittest.TestCase):
+    """No network: the terminal short wait must not invalidate a healthy tape."""
+
+    class _Stub:
+        def recv(self):
+            return "no actual websocket; wait_for is mocked"
+
+    def test_deadline_timeout_after_recent_event_finishes_cleanly(self):
+        with patch.object(collector, "_now", side_effect=[99.9, 100.001]):
+            with patch.object(collector.asyncio, "wait_for",
+                              side_effect=asyncio.TimeoutError):
+                output = asyncio.run(collector._receive_or_expire(
+                    self._Stub(), deadline=100.0, last_received_at=99.5))
+        self.assertIsNone(output)
+
+    def test_full_silence_timeout_must_still_fail_closed(self):
+        with patch.object(collector, "_now", side_effect=[85.0, 100.0]):
+            with patch.object(collector.asyncio, "wait_for",
+                              side_effect=asyncio.TimeoutError):
+                with self.assertRaises(asyncio.TimeoutError):
+                    asyncio.run(collector._receive_or_expire(
+                        self._Stub(), deadline=105.0, last_received_at=85.0))
+
+    def test_stale_terminal_timeout_cannot_be_mislabeled_complete(self):
+        with patch.object(collector, "_now", side_effect=[99.9, 100.001]):
+            with patch.object(collector.asyncio, "wait_for",
+                              side_effect=asyncio.TimeoutError):
+                with self.assertRaises(asyncio.TimeoutError):
+                    asyncio.run(collector._receive_or_expire(
+                        self._Stub(), deadline=100.0, last_received_at=84.0))
+
+    def test_already_expired_recent_session_finishes_without_recv(self):
+        with patch.object(collector, "_now", return_value=101.0):
+            with patch.object(collector.asyncio, "wait_for") as waiting:
+                output = asyncio.run(collector._receive_or_expire(
+                    self._Stub(), deadline=100.0, last_received_at=100.5))
+        waiting.assert_not_called()
+        self.assertIsNone(output)
 
 
 if __name__ == "__main__":
