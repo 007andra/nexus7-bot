@@ -34,6 +34,9 @@ def default_state(symbols=DEFAULT_SYMBOLS, *, price=100.0, wallet=100.0):
         "brackets": [{"bracket": 1, "initialLeverage": 75, "notionalFloor": 0,
                       "notionalCap": 1_000_000, "maintMarginRatio": 0.005,
                       "cum": 0}],
+        "income": [],                    # raw /fapi/v1/income rows
+        "orders": {},                    # orderId -> raw /fapi/v1/order row
+        "taker_fee": "0.0005", "maker_fee": "0.0002",
         "calls": [],
     }
 
@@ -177,6 +180,35 @@ class FakeBinance:
         return [[now - (limit - i) * period, str(p), str(p * 1.001), str(p * 0.999),
                  str(p), "1000", now - (limit - i - 1) * period - 1, "0", 1, "0",
                  "0", "0"] for i in range(limit)]
+
+    def accept_market_order(self, *, symbol, side, qty, order_id, client_oid,
+                            status="FILLED", fill_price=None):
+        """Record what the exchange would hold after a MARKET order."""
+        price = float(fill_price if fill_price is not None
+                      else self.state["prices"].get(symbol, 100.0))
+        executed = qty if status in ("FILLED", "PARTIALLY_FILLED") else 0.0
+        self.state["orders"][str(order_id)] = {
+            "orderId": int(order_id) if str(order_id).isdigit() else order_id,
+            "symbol": symbol, "status": status, "clientOrderId": client_oid,
+            "side": side, "type": "MARKET", "origQty": str(qty),
+            "executedQty": str(executed), "avgPrice": str(price),
+            "cumQuote": str(executed * price), "reduceOnly": False,
+            "updateTime": 0,
+        }
+
+    def _fapi_v1_order(self, q):
+        row = self.state["orders"].get(str(q.get("orderId")))
+        return copy.deepcopy(row) if row else {"code": -2013, "msg": "Order does not exist."}
+
+    def _fapi_v1_income(self, q):
+        rows = self.state["income"]
+        kind = q.get("incomeType")
+        return copy.deepcopy([r for r in rows if not kind or r.get("incomeType") == kind])
+
+    def _fapi_v1_commissionRate(self, q):
+        return {"symbol": q.get("symbol"),
+                "makerCommissionRate": self.state["maker_fee"],
+                "takerCommissionRate": self.state["taker_fee"]}
 
     def _fapi_v1_listenKey(self, q):
         return {"listenKey": "fake-listen-key"}
