@@ -482,12 +482,76 @@ def format_concentration(report):
     )
 
 
+def _setup_partition_public_suffix(report, *, horizon):
+    """Safe aggregate counts/sums; never candidate IDs or untrusted setup names.
+
+    These are exact source aggregates (subject to original float rounding),
+    NOT recomputed or filtered rows. A missing/invalid arm stays NOT_PROVEN.
+    The existing worst-groups line already runs in production so there is no
+    extra SQL, timer, observer, trade authority or order-path wiring.
+    """
+    if horizon not in (60, 240):
+        return "setup_partition=NOT_PROVEN"
+    matched = report.get(f"dimensions_{horizon}m") or {}
+    groups = matched.get("setup") if isinstance(matched, dict) else None
+    a = report.get(f"allowed_{horizon}m")
+    r = report.get(f"rejected_{horizon}m")
+    if not isinstance(groups, list) or not isinstance(a, dict) or not isinstance(r, dict):
+        return "setup_partition=NOT_PROVEN"
+    recognized = ("MOMENTUM", "BOS_BREAK", "PULLBACK", "OTHER")
+    sums = {name: {"a_n": 0, "r_n": 0, "a_sum": 0.0, "r_sum": 0.0}
+            for name in recognized}
+    try:
+        for item in groups:
+            if not isinstance(item, dict) or item.get("dimension") != "setup":
+                raise ValueError("invalid row")
+            name = str(item.get("value") or "").upper()
+            name = name if name in recognized else "OTHER"
+            an, rn = item.get("allowed_n"), item.get("rejected_n")
+            if type(an) is not int or type(rn) is not int or min(an, rn) < 0:
+                raise ValueError("invalid sample count")
+            av, rv = _finite(item.get("allowed_avg_return")), _finite(
+                item.get("rejected_avg_return"))
+            if (an > 0 and av is None) or (rn > 0 and rv is None):
+                raise ValueError("missing mean")
+            group = sums[name]
+            group["a_n"] += an
+            group["r_n"] += rn
+            group["a_sum"] += an * av if an else 0.0
+            group["r_sum"] += rn * rv if rn else 0.0
+        for arm, key in ((a, "a_n"), (r, "r_n")):
+            count = arm.get("n")
+            if type(count) is not int or count != sum(g[key] for g in sums.values()):
+                raise ValueError("unpartitioned sample")
+        # Comparison to source full-arm means avoids certifying inconsistent
+        # partitions. Approximate error tolerance accounts for float arithmetic.
+        for arm, sum_key in ((a, "a_sum"), (r, "r_sum")):
+            n = arm["n"]
+            mean = _finite(arm.get("avg_return"))
+            total = math.fsum(g[sum_key] for g in sums.values())
+            if n and (mean is None or not math.isclose(
+                    total, n * mean, rel_tol=1e-8, abs_tol=1e-10)):
+                raise ValueError("mean mismatch")
+    except (TypeError, ValueError, OverflowError):
+        return "setup_partition=NOT_PROVEN"
+    return "setup_partition=" + "|".join(
+        f"{name}:an={sums[name]['a_n']}:rn={sums[name]['r_n']}"
+        f":asum={sums[name]['a_sum']:.12f}"
+        f":rsum={sums[name]['r_sum']:.12f}"
+        for name in recognized
+    )
+
+
 def format_worst_groups(report, *, horizon=60, limit=10):
     dims = report["dimensions_60m"] if horizon == 60 else report["dimensions_240m"]
     rows = []
     for dimension, groups in dims.items():
         for row in groups:
-            if row["allowed_n"] < MIN_GROUP_N or row["allowed_avg_return"] is None:
+            if not isinstance(row, dict):
+                continue
+            allowed_n = row.get("allowed_n")
+            if (type(allowed_n) is not int or allowed_n < MIN_GROUP_N
+                    or _finite(row.get("allowed_avg_return")) is None):
                 continue
             rows.append(row)
     rows.sort(
@@ -507,7 +571,8 @@ def format_worst_groups(report, *, horizon=60, limit=10):
     return (
         f"[COUNTERFACTUAL_APPROVAL_FAILURE_WORST_GROUPS_{horizon}M_V1] "
         + ("|".join(parts) if parts else "NONE")
-        + " small_n_guard=true association_not_causation=true execution_effect=NONE"
+        + " small_n_guard=true association_not_causation=true execution_effect=NONE "
+        + _setup_partition_public_suffix(report, horizon=horizon)
     )
 
 
