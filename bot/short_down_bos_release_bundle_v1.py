@@ -7,7 +7,6 @@ Source consistency ≠ independent Binance authentication or durable storage.
 from __future__ import annotations
 
 import hashlib
-import os
 from pathlib import Path
 import tempfile
 import zipfile
