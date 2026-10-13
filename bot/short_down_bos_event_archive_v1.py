@@ -21,6 +21,8 @@ VERSION = "RESEARCH_AGGTRADE_ARCHIVE_V1"
 PER_SEGMENT = 5_000
 MAX_SEGMENTS = 500
 MAX_BYTES_PER_LINE = 4096
+# Hard local disk ceiling per opt-in session. Exceeding it INVALIDATES the run.
+MAX_SESSION_BYTES = 16 * 1024 * 1024
 _NAME = re.compile(r"[a-z0-9_-]{12,64}\Z")
 _SYMBOL = re.compile(r"[A-Z0-9]{2,20}USDT\Z")
 AUTHORITY = {
@@ -104,6 +106,7 @@ class Archive:
         self._segment_events = 0
         self._last_id = None
         self._last_stamp = None
+        self._bytes_written = 0
         self._dead = False
         self._sealed = False
         # Fail at start on duplicate session, including orphaned segments.
@@ -140,7 +143,10 @@ class Archive:
                 self._open_segment()
             new_hash = _hash(self._anchor, item)
             line = _canonical({"prev": self._anchor, "hash": new_hash, **item}) + b"\n"
+            if self._bytes_written + len(line) > MAX_SESSION_BYTES:
+                raise ValueError("LOCAL_DISK_BUDGET_EXCEEDED")
             self._segment.write(line)
+            self._bytes_written += len(line)
             self._anchor = new_hash
             self._index += 1
             self._segment_events += 1
@@ -168,6 +174,8 @@ class Archive:
             "segments": self._segments, "final_hash": self._anchor,
             "last_agg_id": self._last_id,
             "last_trade_ms": self._last_stamp,
+            "archive_data_bytes": self._bytes_written,
+            "local_disk_budget_bytes": MAX_SESSION_BYTES,
             **AUTHORITY, "status": "SELF_HASH_CHAIN_SEALED_UNATTESTED",
         }
         with _open_exclusive(
@@ -213,6 +221,7 @@ def verify(directory, *, session_id):
         )}
         anchor = hashlib.sha256(_canonical(header)).hexdigest()
         count = 0
+        total_bytes = 0
         last_id = last_stamp = None
         for idx, info in enumerate(segments):
             name = f"{session_id}.{idx:04d}.jsonl"
@@ -225,6 +234,9 @@ def verify(directory, *, session_id):
             with path.open("rb") as stream:
                 found = 0
                 for line in stream:
+                    total_bytes += len(line)
+                    if total_bytes > MAX_SESSION_BYTES:
+                        return reject("LOCAL_DISK_BUDGET_EXCEEDED")
                     if len(line) > MAX_BYTES_PER_LINE + 200:
                         return reject("OVERSIZED_EVENT")
                     record = json.loads(line)
@@ -248,6 +260,8 @@ def verify(directory, *, session_id):
                 if found != info["count"]:
                     return reject("TRUNCATED_SEGMENT")
         if (count < 2 or count != meta["event_count"]
+                or meta.get("archive_data_bytes") != total_bytes
+                or meta.get("local_disk_budget_bytes") != MAX_SESSION_BYTES
                 or anchor != meta["final_hash"]
                 or last_id != meta["last_agg_id"]
                 or last_stamp != meta["last_trade_ms"]):
