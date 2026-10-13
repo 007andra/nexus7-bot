@@ -43,6 +43,35 @@ class ArchiveTests(unittest.TestCase):
                 archive.Archive(d, symbol=SYMBOL, session_id=SID,
                                 generation=1, started_ms=BASE_MS)
 
+    def test_prepared_anchor_digest_is_not_a_published_external_proof(self):
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as d:
+            writer = archive.Archive(
+                d, symbol=SYMBOL, session_id=SID,
+                generation=1, started_ms=BASE_MS)
+            writer.append(trade(0), received_ms=BASE_MS + 2)
+            writer.append(trade(1), received_ms=BASE_MS + 12)
+            writer.seal()
+            expected = hashlib.sha256(
+                (Path(d) / (SID + ".manifest.json")).read_bytes()
+            ).hexdigest()
+            receipt = archive.prepare_anchor_receipt(d, session_id=SID)
+            self.assertEqual(receipt["status"],
+                             "ANCHOR_PREPARED_NOT_PUBLISHED")
+            self.assertEqual(receipt["manifest_sha256"], expected)
+            self.assertFalse(receipt["github_anchor_published"])
+            self.assertFalse(receipt["independent_source_attestation"])
+            self.assertFalse(receipt["durable_remote_copy_proven"])
+            self.assertFalse(receipt["live_allowed"])
+            self.assertNotIn("candidate_id", receipt)
+
+    def test_incomplete_session_cannot_generate_anchor(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = archive.prepare_anchor_receipt(d, session_id=SID)
+            self.assertEqual(result["status"], "ANCHOR_REFUSED")
+            self.assertFalse(result["github_anchor_published"])
+
     def test_modified_event_is_detected_after_seal(self):
         with tempfile.TemporaryDirectory() as d:
             writer = archive.Archive(d, symbol=SYMBOL, session_id=SID,
