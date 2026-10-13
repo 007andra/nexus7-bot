@@ -106,6 +106,23 @@ class SetupCostCoverageTests(unittest.TestCase):
         self.assertEqual(audit._format_setup_cost_coverage({}, horizon=60),
                          "setup_cost_proxy=NOT_PROVEN")
 
+    def test_negative_cost_components_cannot_cancel_into_valid_proxy(self):
+        base = {"taker_fee": 0.001, "entry_slippage": 0.002,
+                "exit_slippage": 0.002}
+        self.assertAlmostEqual(
+            audit._cost_fraction({"cost_snapshot": base}), 0.006)
+        cases = [
+            {**base, "entry_slippage": -0.001},
+            {**base, "taker_fee": -0.001},
+            {**base, "exit_slippage": float("nan")},
+            {**base, "exit_slippage": 0.5},
+            {**base, "taker_fee": 0.3},
+        ]
+        for snapshot in cases:
+            with self.subTest(snapshot=snapshot):
+                self.assertIsNone(
+                    audit._cost_fraction({"cost_snapshot": snapshot}))
+
     def test_bad_spread_does_not_pass_book_coverage(self):
         r = audit._setup_cost_coverage([
             matched(cost=0.01, spread=float("nan")),
