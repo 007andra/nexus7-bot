@@ -143,10 +143,12 @@ def prepare_bundle(directory, *, session_id, destination):
         raise ValueError("NO_PACKAGE_IN_SOURCE_DIRECTORY")
     if not destination.parent.is_dir() or destination.is_symlink():
         raise ValueError("DESTINATION_DIRECTORY_UNAVAILABLE")
+    created = False
     try:
         # 'x' refuses overwrite: no mutation to existing tapes/bundles.
         with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED,
                              compresslevel=6, allowZip64=False) as out:
+            created = True
             for name in names:
                 member = root / name
                 if member.is_symlink() or not member.is_file():
@@ -162,7 +164,7 @@ def prepare_bundle(directory, *, session_id, destination):
             raise ValueError("PACKAGE_RECEIPT_CHANGED")
         return evidence
     except BaseException:
-        # Only remove our own attempt; never remove an existing target.
-        if destination.exists() and destination.is_file():
+        # Never unlink a pre-existing target when exclusive creation fails.
+        if created and destination.exists() and destination.is_file():
             destination.unlink()
         raise
