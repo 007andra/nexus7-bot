@@ -17,6 +17,18 @@ MAX_MANIFEST_BYTES = 250_000
 MAX_RAW_BYTES = tape.MAX_SESSION_BYTES + MAX_MANIFEST_BYTES
 MAX_ZIP_BYTES = MAX_RAW_BYTES + 1_000_000
 
+# PUBLIC disclosure gate: only market trades and the recorder's own technical
+# integrity metadata may be exported. Reject even a self-consistent rehashed
+# ZIP if it embeds private/account/strategy/order attributes.
+PUBLIC_EVENT_KEYS = frozenset(("e", "E", "s", "a", "p", "q", "f", "l", "T", "m"))
+PUBLIC_LINE_KEYS = frozenset(("prev", "hash", "seq", "received_ms", "event"))
+PUBLIC_MANIFEST_KEYS = frozenset((
+    "version", "source", "symbol", "session_id", "generation", "started_ms",
+    "event_count", "segments", "final_hash", "last_agg_id", "last_trade_ms",
+    "archive_data_bytes", "local_disk_budget_bytes", "status",
+)) | frozenset(tape.AUTHORITY)
+PUBLIC_SEGMENT_KEYS = frozenset(("file", "count"))
+
 AUTHORITY = {
     "research_only": True,
     "public_repository": True,
@@ -57,6 +69,41 @@ def _member_names(session_id: str, metadata: dict):
             raise ValueError("INVALID_SEGMENT_PATH")
         expected.append(name)
     return expected
+
+
+def _public_only(z, *, manifest_name, meta):
+    """Allow only Binance public event attributes and known recorder metadata.
+
+    Integrity checks alone cannot prevent accidental publication of private
+    fields when a whole archive+manifest has been regenerated consistently.
+    """
+    if not isinstance(meta, dict) or frozenset(meta) != PUBLIC_MANIFEST_KEYS:
+        return False
+    if any(meta.get(k) != value for k, value in tape.AUTHORITY.items()):
+        return False
+    if not isinstance(meta.get("segments"), list):
+        return False
+    for segment in meta["segments"]:
+        if not isinstance(segment, dict) or frozenset(segment) != PUBLIC_SEGMENT_KEYS:
+            return False
+    import json
+    try:
+        for name in z.namelist():
+            if name == manifest_name:
+                continue
+            with z.open(name, "r") as stream:
+                for raw_line in stream:
+                    if len(raw_line) > tape.MAX_BYTES_PER_LINE + 200:
+                        return False
+                    line = json.loads(raw_line)
+                    if (not isinstance(line, dict)
+                            or frozenset(line) != PUBLIC_LINE_KEYS
+                            or not isinstance(line["event"], dict)
+                            or frozenset(line["event"]) != PUBLIC_EVENT_KEYS):
+                        return False
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return False
+    return True
 
 
 def verify_bundle(bundle):
@@ -100,6 +147,8 @@ def verify_bundle(bundle):
             expected = _member_names(session, metadata)
             if names != expected:
                 return deny("MISSING_OR_REORDERED_SEGMENTS")
+            if not _public_only(z, manifest_name=manifest, meta=metadata):
+                return deny("PRIVATE_OR_UNEXPECTED_FIELD_IN_PUBLIC_TAPE")
             with tempfile.TemporaryDirectory(prefix="nexus-proof-") as temp:
                 directory = Path(temp)
                 for item in z.infolist():
