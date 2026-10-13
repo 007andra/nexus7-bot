@@ -9,12 +9,14 @@ import inspect
 
 from bot import backtest
 from bot import missed_opportunity_audit as opportunity
-from bot.kucoin_execution_model import (
+from bot.execution_model import (
     adverse_fill,
     fee_return_fraction,
+    funding_return_fraction,
+)
+from bot.kucoin_execution_model import (
     fetch_actual_taker_fee,
     fetch_public_funding_history,
-    funding_return_fraction,
 )
 
 

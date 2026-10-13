@@ -20,7 +20,7 @@ import functools
 from dataclasses import dataclass
 
 from bot import execution_cost
-from bot.kucoin_execution_model import (
+from bot.execution_model import (
     DEFAULT_SLIPPAGE,
     DEFAULT_TAKER_FEE,
 )

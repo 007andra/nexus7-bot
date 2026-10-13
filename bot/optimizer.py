@@ -28,10 +28,10 @@ except ImportError:
 
 from bot import database as _db
 from bot.backtest import _calc_metrics, _ts_ms, fetch_history, run_strategy_public
+from bot.execution_model import slippage_rate_for_symbol
 from bot.kucoin_execution_model import (
     fetch_actual_taker_fee,
     fetch_public_funding_history,
-    slippage_rate_for_symbol,
 )
 from bot.logger import log
 
