@@ -80,10 +80,15 @@ class BinanceLiveAIGateTests(BinanceEngineFixture):
                 await self.attempt(decision)
                 self.client.place_order.assert_not_awaited()
 
-    async def test_no_exchange_mutation_ever_reaches_fake_exchange(self):
+    async def test_rejected_decision_causes_zero_exchange_mutations(self):
+        await self.attempt(approval(allowed=False))
+        self.assertEqual(self.mutations(), [])
+
+    async def test_approved_decision_mutates_only_entry_and_its_protection(self):
         await self.attempt(approval())
-        mutations = [c for c in self.fake.state["calls"] if c[0] != "GET"]
-        self.assertEqual(mutations, [])
+        paths = sorted(c[1] for c in self.mutations())
+        self.assertEqual(paths, ["/fapi/v1/algoOrder", "/fapi/v1/algoOrder",
+                                 "/fapi/v1/order"])
 
 
 if __name__ == "__main__":

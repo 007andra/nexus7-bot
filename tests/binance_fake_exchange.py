@@ -1,10 +1,10 @@
 """Loopback fake of the Binance USD-M REST surface the engine reads.
 
 Serves realistic, configurable payloads on 127.0.0.1 so the production
-``BinanceClient`` runs unmodified (signing, parsing, validation). Every
-mutation (POST/PUT/DELETE except listenKey) is refused with a Binance-style
-error: tests that expect dispatch spy ``place_order`` at the client
-boundary, exactly like the legacy KuCoin engine fixtures.
+``BinanceClient`` runs unmodified (signing, parsing, validation). Mutations
+are refused unless ``state["accept_mutations"]`` is true; then MARKET orders
+fill at the book, positions update, and conditional (algo) protection orders
+are stored, served back and cancellable, like a minimal matching venue.
 """
 from __future__ import annotations
 
@@ -36,6 +36,11 @@ def default_state(symbols=DEFAULT_SYMBOLS, *, price=100.0, wallet=100.0):
                       "cum": 0}],
         "income": [],                    # raw /fapi/v1/income rows
         "orders": {},                    # orderId -> raw /fapi/v1/order row
+        "algos": {},                     # algoId -> raw algo row
+        "accept_mutations": False,
+        "order_fill": "FILLED",          # or "NEW": accepted, never fills
+        "lose_next_order_response": False,  # execute, then answer HTTP 503
+        "next_id": 5000,
         "taker_fee": "0.0005", "maker_fee": "0.0002",
         "calls": [],
     }
@@ -66,9 +71,21 @@ class FakeBinance:
         path, method = request.path, request.method
         self.state["calls"].append((method, path, dict(request.query)))
         if method != "GET" and path != "/fapi/v1/listenKey":
-            return web.json_response(
-                {"code": -2015, "msg": "fake exchange refuses mutations"},
-                status=403)
+            if not self.state["accept_mutations"]:
+                return web.json_response(
+                    {"code": -2015, "msg": "fake exchange refuses mutations"},
+                    status=403)
+            name = f"_{method.lower()}_" + path.strip("/").replace("/", "_")
+            handler = getattr(self, name, None)
+            if handler is None:
+                return web.json_response({"code": -1000, "msg": f"unmapped {method} {path}"},
+                                         status=404)
+            body, status = handler(dict(request.query))
+            if (path == "/fapi/v1/order" and status == 200
+                    and self.state["lose_next_order_response"]):
+                self.state["lose_next_order_response"] = False
+                return web.json_response({"code": -1001, "msg": "lost"}, status=503)
+            return web.json_response(body, status=status)
         handler = getattr(self, "_" + path.strip("/").replace("/", "_"), None)
         if handler is None:
             return web.json_response({"code": -1000, "msg": f"unmapped {path}"},
@@ -142,7 +159,10 @@ class FakeBinance:
         return copy.deepcopy(self.state["open_orders"])
 
     def _fapi_v1_openAlgoOrders(self, q):
-        return copy.deepcopy(self.state["algo_orders"])
+        live = [r for r in self.state["algos"].values()
+                if r["algoStatus"] == "NEW"
+                and (not q.get("symbol") or r["symbol"] == q.get("symbol"))]
+        return copy.deepcopy(self.state["algo_orders"] + live)
 
     _fapi_v1_algoOpenOrders = _fapi_v1_openAlgoOrders
 
@@ -197,8 +217,98 @@ class FakeBinance:
         }
 
     def _fapi_v1_order(self, q):
-        row = self.state["orders"].get(str(q.get("orderId")))
+        key = q.get("orderId")
+        row = self.state["orders"].get(str(key)) if key else None
+        if row is None and q.get("origClientOrderId"):
+            row = next((r for r in self.state["orders"].values()
+                        if r["clientOrderId"] == q["origClientOrderId"]), None)
         return copy.deepcopy(row) if row else {"code": -2013, "msg": "Order does not exist."}
+
+    # ── mutations (only with accept_mutations) ─────────────────────
+    def _new_id(self):
+        self.state["next_id"] += 1
+        return self.state["next_id"]
+
+    def _position(self, symbol):
+        for row in self.state["positions"]:
+            if row["symbol"] == symbol:
+                return row
+        return None
+
+    def _post_fapi_v1_order(self, q):
+        symbol, side = q.get("symbol"), q.get("side")
+        qty = float(q.get("quantity", 0))
+        if q.get("type") != "MARKET" or qty <= 0 or side not in ("BUY", "SELL"):
+            return {"code": -1102, "msg": "fake supports MARKET only"}, 400
+        mid = float(self.state["prices"].get(symbol, 100.0))
+        price = mid * (1.0001 if side == "BUY" else 0.9999)
+        if self.state["order_fill"] == "NEW":
+            order_id = self._new_id()
+            row = {"orderId": order_id, "symbol": symbol, "status": "NEW",
+                   "clientOrderId": q.get("newClientOrderId", ""), "side": side,
+                   "type": "MARKET", "origQty": str(qty), "executedQty": "0",
+                   "avgPrice": "0", "cumQuote": "0", "reduceOnly": False,
+                   "updateTime": 0}
+            self.state["orders"][str(order_id)] = row
+            return copy.deepcopy(row), 200
+        signed = qty if side == "BUY" else -qty
+        pos = self._position(symbol)
+        reduce_only = str(q.get("reduceOnly", "")).lower() == "true"
+        if pos is None:
+            if reduce_only:
+                return {"code": -2022, "msg": "ReduceOnly Order is rejected."}, 400
+            pos = {"symbol": symbol, "positionAmt": "0", "entryPrice": "0",
+                   "markPrice": str(mid), "unRealizedProfit": "0",
+                   "leverage": str(self.state["leverage"]), "liquidationPrice": "0",
+                   "marginType": "cross", "isolatedMargin": "0",
+                   "positionSide": "BOTH"}
+            self.state["positions"].append(pos)
+        new_amt = float(pos["positionAmt"]) + signed
+        if abs(new_amt) < 1e-12:
+            self.state["positions"].remove(pos)
+        else:
+            if float(pos["positionAmt"]) == 0:
+                pos["entryPrice"] = str(price)
+            pos["positionAmt"] = str(new_amt)
+        order_id = self._new_id()
+        row = {"orderId": order_id, "symbol": symbol, "status": "FILLED",
+               "clientOrderId": q.get("newClientOrderId", ""), "side": side,
+               "type": "MARKET", "origQty": str(qty), "executedQty": str(qty),
+               "avgPrice": str(price), "cumQuote": str(qty * price),
+               "reduceOnly": reduce_only, "updateTime": 0}
+        self.state["orders"][str(order_id)] = row
+        return copy.deepcopy(row), 200
+
+    def _post_fapi_v1_algoOrder(self, q):
+        algo_id = self._new_id()
+        row = {"algoId": algo_id, "clientAlgoId": q.get("clientAlgoId", ""),
+               "symbol": q.get("symbol"), "side": q.get("side"),
+               "orderType": q.get("type"), "triggerPrice": q.get("triggerPrice"),
+               "closePosition": str(q.get("closePosition")).lower() == "true",
+               "reduceOnly": False, "algoStatus": "NEW", "quantity": "0"}
+        self.state["algos"][str(algo_id)] = row
+        return copy.deepcopy(row), 200
+
+    def _delete_fapi_v1_algoOrder(self, q):
+        for row in self.state["algos"].values():
+            if (str(row["algoId"]) == str(q.get("algoId"))
+                    or (q.get("clientAlgoId") and row["clientAlgoId"] == q["clientAlgoId"])):
+                row["algoStatus"] = "CANCELED"
+                return {"algoId": row["algoId"], "code": "200"}, 200
+        return {"code": -2011, "msg": "Unknown order sent."}, 400
+
+    def _delete_fapi_v1_algoOpenOrders(self, q):
+        for row in self.state["algos"].values():
+            if row["symbol"] == q.get("symbol"):
+                row["algoStatus"] = "CANCELED"
+        return {"code": 200, "msg": "success"}, 200
+
+    def _delete_fapi_v1_allOpenOrders(self, q):
+        return {"code": 200, "msg": "success"}, 200
+
+    def _post_fapi_v1_leverage(self, q):
+        self.state["leverage"] = int(q.get("leverage", self.state["leverage"]))
+        return {"symbol": q.get("symbol"), "leverage": self.state["leverage"]}, 200
 
     def _fapi_v1_income(self, q):
         rows = self.state["income"]

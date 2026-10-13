@@ -1,11 +1,13 @@
 """Engine fixture on the PRODUCTION venue: Binance USD-M, LIVE pilot path.
 
 Mirrors how production runs: ``runtime_bootstrap`` installed, the real
-``BinanceClient`` talking to a loopback fake exchange (reads only), pilot
-enabled with its release/account gates, healthy public and private streams.
-``place_order`` is a spy at the client boundary, as in the legacy KuCoin
-fixtures, so nothing can reach an exchange and the execution lease/DB layer
-below the client stays out of scope (covered by its own PostgreSQL suites).
+``BinanceClient`` talking to a loopback fake exchange that fills MARKET orders
+and stores protection, pilot enabled with its release/account gates, healthy
+public and private streams, durable state restored into a disposable
+PostgreSQL database. The REAL ``place_order`` runs (wrapped only to count
+calls): execution ownership lease, durable dispatch provenance, the pilot
+submission budget at the HTTP boundary and SL/TP installation are all
+exercised. Nothing leaves 127.0.0.1.
 
 Import this module before any ``bot`` module in a test file: it pins the
 process environment the production venue reads at import time.
@@ -23,6 +25,7 @@ os.environ.update(
     BINANCE_LIVE_MIGRATION_READY="true",
     BINANCE_API_KEY="offline-key", BINANCE_API_SECRET="offline-secret",
     BINANCE_SIGNING_METHOD="hmac", NEXUS_TELEGRAM="false",
+    EXECUTION_CAPABILITY="LIVE",
     # Same seven release acknowledgements production runs with, so the
     # LIVE pilot runtime (not the validation SHADOW lock) is installed.
     REAL_TRADING_PILOT="true", PILOT_ACCOUNT_CONFIRMED="true",
@@ -147,8 +150,16 @@ class BinanceEngineFixture(unittest.IsolatedAsyncioTestCase):
         self.engine._pilot_available_balance = 100.0
         self.client.get_cached_klines = lambda *a, **k: [
             {"c": 100., "h": 101., "l": 99., "v": 1000.}] * 200
-        self.client.place_order = AsyncMock(side_effect=self._accept_order)
-        self._order_seq = itertools.count(1001)
+        self.fake.state["accept_mutations"] = True
+        from bot import durable_execution
+        await durable_execution.restore_engine_state(self.engine)
+        # Startup facts production establishes in _connect.
+        self.engine.connected = True
+        self.engine._financial_state_sane = True
+        self.engine._initial_reconciliation_complete = True
+        self.engine._market_data_ready = True
+        self.engine._protection_system_ready = True
+        self.client.place_order = AsyncMock(wraps=self.client.place_order)
         # Keep the production _nexus_validate (it registers the RiskManagerV3
         # stop plan); only the pure decision function is substituted.
         self.decide = self.replace("bot.nexus_ai.decide", Mock(return_value=approval()))
@@ -156,20 +167,9 @@ class BinanceEngineFixture(unittest.IsolatedAsyncioTestCase):
         self.sig = Signal("TESTUSDT", "LONG", 100., 99., 103., 80., "offline", 90)
         self.logs = self.replace("bot.engine.log", Mock())
 
-    async def _accept_order(self, symbol, side, qty, *args, **kwargs):
-        """Spy at the client boundary; the fake exchange records the fill so
-        the real wait_for_fill / order normalization run unmodified."""
-        order_id = str(next(self._order_seq))
-        oid = f"spy-{order_id}"
-        self.client._order_id_symbol[order_id] = symbol
-        self.client._client_oid_symbol[oid] = symbol
-        self.fake.accept_market_order(
-            symbol=symbol, side="BUY" if str(side).lower() == "buy" else "SELL",
-            qty=float(qty), order_id=order_id, client_oid=oid,
-            status=self.fill_status)
-        return {"orderId": order_id, "clientOid": oid, "sl_tp_failed": False}
-
-    fill_status = "FILLED"
+    def mutations(self, path=None):
+        return [c for c in self.fake.state["calls"]
+                if c[0] != "GET" and (path is None or c[1] == path)]
 
     def _healthy_streams(self):
         market = self.client.market_data_health
