@@ -142,6 +142,13 @@ def paired_market_observations(selection, outcome_map):
             or selection.get("reason") !=
                "OFFLINE_FROZEN_SELECTION_NEEDS_SOURCE_AUDIT"
             or selection.get("cohort_membership_proven") is not False
+            or selection.get("source_attested") is not False
+            or selection.get("market_only") is not True
+            or selection.get("eligible_for_609_enrollment") is not False
+            or type(selection.get("effective_cutoff_ms")) is not int
+            or not isinstance(selection.get("selected"), tuple)
+            or any(not _eligible(r, selection["effective_cutoff_ms"])
+                   for r in selection["selected"])
             or not isinstance(outcome_map, dict)):
         return _status("INVALID_SELECTION_OR_OUTCOMES", pairs=(),
                        paired_count=0)
