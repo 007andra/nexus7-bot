@@ -3,22 +3,17 @@
 Port of tests/test_pilot_counter.py + test_pilot_minimum.py, which ran on the
 KuCoin core engine with the code default of 2 submissions. Production runs
 PILOT_MAX_NEW_ORDER_SUBMISSIONS=1 and PILOT_MAX_CONCURRENT_POSITIONS=1 (see
-the [CONTROLLED_PILOT_RELEASE] startup log); this suite pins exactly those.
+the [CONTROLLED_PILOT_RELEASE] startup log); the fixture pins exactly those.
 """
-import os
-
-os.environ.update(PILOT_MAX_NEW_ORDER_SUBMISSIONS="1",
-                  PILOT_MAX_CONCURRENT_POSITIONS="1")
-
-from tests.binance_engine_fixture import (  # noqa: E402
+from tests.binance_engine_fixture import (  # noqa: I001  (sets env first)
     BinanceEngineFixture, Signal, approval,
 )
 
-import asyncio  # noqa: E402
-import unittest  # noqa: E402
+import asyncio
+import unittest
 
-from bot import pilot  # noqa: E402
-from bot.order_state import OrderState  # noqa: E402
+from bot import pilot
+from bot.order_state import OrderState
 
 
 class BinanceLivePilotLimitTests(BinanceEngineFixture):

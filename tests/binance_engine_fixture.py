@@ -31,6 +31,10 @@ os.environ.update(
     REAL_TRADING_PILOT="true", PILOT_ACCOUNT_CONFIRMED="true",
     PILOT_RELEASE_APPROVED="I_APPROVE_TWO_LIVE_PILOT_ORDERS",
     VALIDATION_LOCK_RELEASE_APPROVED="I_APPROVE_CONTROLLED_LIVE_PILOT_EXECUTION",
+    # Production pilot limits ([CONTROLLED_PILOT_RELEASE] startup log). Read
+    # once at import by bot.pilot and copied by several modules, so they are
+    # pinned here for every suite sharing this process.
+    PILOT_MAX_NEW_ORDER_SUBMISSIONS="1", PILOT_MAX_CONCURRENT_POSITIONS="1",
 )
 
 from bot.runtime_bootstrap import install as _install_runtime  # noqa: E402
@@ -152,6 +156,9 @@ class BinanceEngineFixture(unittest.IsolatedAsyncioTestCase):
             {"c": 100., "h": 101., "l": 99., "v": 1000.}] * 200
         self.fake.state["accept_mutations"] = True
         from bot import durable_execution
+        # run() enables durable enforcement right after db.init(); without it
+        # the before_dispatch persistence of the SUBMITTING intent is skipped.
+        self.engine._durable_state_enforced = True
         await durable_execution.restore_engine_state(self.engine)
         # Startup facts production establishes in _connect.
         self.engine.connected = True
