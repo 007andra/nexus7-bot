@@ -32,3 +32,15 @@ Using counts/rounded log means:
 4. Pre-register an **unchanged** prospective policy challenger using future canonical signals if a falsifiable hypothesis survives. Frozen V2/V4/V1 cohorts remain immutable and cannot be promoted retrospectively. Current production selection, scoring, R:R, MAX_DRAWDOWN and HWM remain untouched.
 
 **RELEASE:** `promotion_allowed=false`, `live_allowed=false`, `execution_effect=NONE`. Deployment remains `05913de7`, equity 0 USDT and risk hard gate. No claim that excluding MOMENTUM makes the bot ready to trade.
+
+
+## Two-arm R3 logging contract prepared (not deployed)
+
+PR #663 now also updates the EXISTING `COUNTERFACTUAL_APPROVAL_FAILURE_WORST_GROUPS_{60,240}M_V1` formatter. This is a bounded diagnostic append: `setup_partition=MOMENTUM:an=...:rn=...:asum=...:rsum=...|BOS_BREAK:...|PULLBACK:...|OTHER:...`.
+
+- `an`, `rn` are counts from existing matched source rows within that horizon; `asum`, `rsum` are the original gross return sums at 12 decimal places, not speculative fee-adjusted PnL.
+- Unknown setup names are combined into `OTHER`, never included verbatim in the appended partition. Malformed/nonfinite groups, omitted arms, unpartitioned counts or mean/sum disagreements report `setup_partition=NOT_PROVEN`. They are never silently promoted.
+- The original existing diagnostic logger already calls `format_worst_groups` for both horizons. This is **no new query**, no key, no external API, no scheduler, no instrumented LIVE dispatch, no risk gate change.
+- The formatter's new output will only appear after a **separately authorized, reviewed merge and a Railway deployment**, followed by explicit postdeploy read-only checks. The current 2026-10-13 logs **do not yet contain** these complete two-arm group aggregates, and the PR does not itself obtain any production DB data.
+
+A full exclusion-effect estimate must use the same cohort, horizon, and matched-arm denominators, with no outcome-dependent filtering or mixing the older 651-member general OOS cohort with R3. Future authenticated row-level cost/stop-path evidence remains necessary before considering any strategy change. The exit condition is that the same frozen 493-member R3 source reveals unrounded grouped counts/sums for BOTH arms and both horizons, without `NOT_PROVEN` fallback.
