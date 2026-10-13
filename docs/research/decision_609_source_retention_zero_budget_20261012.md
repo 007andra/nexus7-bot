@@ -165,3 +165,80 @@ The verifier's github_release_created=false flag is deliberately static: an
 offline ZIP cannot attest that GitHub actually accepted its upload.
 Public trades alone still do not prove protected order fills, fees/funding,
 independent provenance, 60 prospective canonical approvals or LIVE readiness.
+
+
+## WebSocket-license retention decision — 2026-10-13
+
+**Status: RAW TAPE PUBLIC RELEASE = HOLD; one verified metadata-only Release = DONE.**
+This updates/supersedes the raw-ZIP publishing instructions above until scope-specific
+redistribution rights have been documented. Operator authorization to publish
+public data is recorded, but operator consent does not substitute for source
+data provider redistribution rights.
+
+### Checked official sources and exact scope
+
+- Binance's [Vision Dataset Terms (version 1.0, 2026-08-26)](https://github.com/binance/binance-public-data/blob/master/TERMS_AND_CONDITIONS.md)
+  define datasets as files available through data.binance.vision and associated
+  endpoints. They restrict commercial exploitation and hosting of datasets and
+  related market-data feeds. Their terms **do not expressly establish** a
+  redistribution license for an independently captured USD-M Futures public
+  WebSocket event stream at fstream.binance.com.
+- Conversely, a public WebSocket endpoint, no-key access and the word PUBLIC
+  on an event do **not establish** permission to mirror its raw events as a
+  public GitHub Release. Treat the applicability/licensing as **UNRESOLVED**,
+  not as proven prohibited or freely redistributable. Obtain authoritative
+  scope-specific permission/terms before public raw ZIP publication.
+- GitHub's [public-repository artifact and log retention policy](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository)
+  defaults to 90 days and cannot exceed 90 days for public repositories.
+  GitHub Actions artifacts are therefore **not a permanent proof archive**;
+  do not upload raw events under the assumption that this is confidential,
+  rights-cleared, independently attested, or indefinitely retained.
+
+### What the pilot really achieved (verified GitHub)
+
+- Existing PR #610 is still DRAFT, research-only, and has no production merge.
+  The original Gitleaks false positive was cleared without ignore rules.
+- First isolated runner proof, [run 38396423778](https://github.com/007andra/nexus7-bot/actions/runs/38396423778):
+  879 public BTCUSDT aggTrade events, locally validated; no persisted ZIP.
+- Second isolated runner proof, [run 38397577283](https://github.com/007andra/nexus7-bot/actions/runs/38397577283):
+  **1,714 actual public BTCUSDT aggregate trade events** during a bounded
+  60-second capture, local JSONL verification and local release-bundle
+  allowlist/integrity checks passed. The **unpublished** ZIP's SHA-256 was
+  3ae0e558e3ae1be9e6c6b6618c3ef1d6bab16d6bb25ca363c0d5ca1b7eb56a20.
+- Exactly one [public metadata-only prerelease](https://github.com/007andra/nexus7-bot/releases/tag/research-aggtrade-609-receipt-20261013-38397577283)
+  with an **824-byte** public-integrity-receipt.json asset has been created.
+  Its SHA-256 is
+  abd3f23ca3bef949ec60e8e00a34e40ea482dbc3ce547e3eb14970e60c681354.
+  GitHub returned the same asset digest and the runner re-downloaded and
+  compared that receipt byte-for-byte. **The raw tape was NOT published or
+  retained remotely; the hash proves only the receipt's byte identity.**
+- The one-shot publishing workflow at
+  .github/workflows/research_609_public_receipt_release_once.yml on
+  research/aggtrade-public-pilot-609-20261013 has been **HARD DISABLED**
+  after that success: no push trigger, and its job has an explicit false gate.
+  No new automatically published Release is authorized by its presence.
+
+### Explicit retention and execution decision table
+
+| Path | Raw events remotely retrievable? | Present decision |
+|---|---|---|
+| Ephemeral GitHub Actions runner | No, temporary filesystem | Allowed one-off format feasibility; never durable proof |
+| Public GitHub Release containing raw Binance WebSocket ZIP | Yes, publicly redistributed | **HOLD** until applicable rights confirmed; never infer from public feed |
+| GitHub Actions artifact with raw tape | Potentially retrievable; time-limited; access/rights unresolved | **HOLD**; not a replacement for licensing or permanent retention |
+| Production Postgres or LIVE bot filesystem | Interferes with execution resources / ephemeral storage | **DENY** per operator's production isolation rule |
+| Paid bucket / new worker / additional key | Would change authorized budget and system scope | **DENY** |
+| Public Release with minimal non-sensitive receipt only | Receipt retrievable; raw tape not recoverable | **DONE** for integrity of publication metadata only |
+
+**Next unblocked work:** document a provider-authoritative answer on USD-M
+WebSocket raw-data archival and redistribution. If rights permit, rerun a
+bounded isolated capture and verify a retrievable remote copy against the
+fresh receipt; do not claim the prior temporary ZIP can be recovered.
+Separately, the original #609 cohort demands **60 natural canonical
+NEXUS-approved shadow signals**, not public trades. At zero negotiable equity,
+production reported symbols_scanned=0, and a public tape cannot count as
+even one eligible cohort member. Do not bypass capital/risk gates, invent
+a new cohort membership rule or treat synthetic evaluation as execution proof.
+
+**Safety authority:** live_allowed=false, promotion_allowed=false;
+preserve 30% historical drawdown limit/HWM, risk gates, strategy vetoes,
+orders and production deployment unchanged.
