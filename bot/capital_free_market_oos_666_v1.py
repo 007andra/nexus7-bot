@@ -76,7 +76,7 @@ def _eligible(r, cutoff):
             r.get("snapshot_complete") is not True
             or r.get("no_future_inputs") is not True
             or type(r.get("observed_ms")) is not int
-            or r["observed_ms"] < ms
+            or not ms <= r["observed_ms"] < ms + INTERVAL_MS
             or not isinstance(r.get("source_sha256"), str)
             or not _SHA256.fullmatch(r["source_sha256"])
             or not isinstance(r.get("implementation_sha"), str)
@@ -115,7 +115,7 @@ def freeze_offline(rows, *, effective_cutoff_ms, source_complete=False):
             continue
         seen[candidate_id] = r
         if len(selected) >= TARGET:
-            break
+            continue  # still detect conflicting duplicate identities in the entire source
         if counts[r["symbol"]] >= MAX_PER_SYMBOL:
             excluded_cap += 1
             continue
@@ -158,6 +158,8 @@ def paired_market_observations(selection, outcome_map):
                     or outcome.get("horizon_minutes") != horizon
                     or type(outcome.get("close_ms")) is not int
                     or outcome["close_ms"] != expected_ms
+                    or type(outcome.get("observed_ms")) is not int
+                    or not expected_ms <= outcome["observed_ms"] < expected_ms + INTERVAL_MS
                     or outcome.get("complete_candle") is not True
                     or outcome.get("no_interpolation") is not True
                     or not isinstance(outcome.get("source_sha256"), str)
