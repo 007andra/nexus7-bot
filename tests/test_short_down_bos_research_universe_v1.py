@@ -100,5 +100,116 @@ class ResearchMarketUniverseTests(unittest.TestCase):
         self.assertNotIn("nexus_allowed", result)
 
 
+class Cohort609ScannerBoundaryTests(unittest.TestCase):
+    """Market observations and counterfactuals never become #609 approvals."""
+
+    def scanner(self, **changes):
+        snapshot = {
+            "shadow_scan_enabled": True,
+            "shadow_only": True,
+            "live_entries_blocked": True,
+            "population": "HARD_GATE_SHADOW",
+            "live_eligible": False,
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+            "symbols_scanned": 0,
+            "strategy_signals": 0,
+            "fresh_candidates": 0,
+            "nexus_evaluated": 0,
+            "nexus_approved": 0,
+            "counterfactual_nexus_allowed": 0,
+        }
+        snapshot.update(changes)
+        return snapshot
+
+    def test_public_cache_ready_does_not_repair_zero_viable_live_scan(self):
+        market = universe.qualify(["BTCUSDT"], populated(), now_ms=NOW_MS)
+        scanner = self.scanner()
+        old_market, old_scanner = copy.deepcopy(market), copy.deepcopy(scanner)
+        output = universe.diagnose_609_scan_boundary(market, scanner)
+        self.assertEqual(output["status"],
+                         "RESEARCH_BOUNDARY_DIAGNOSED_UNATTESTED")
+        self.assertEqual(output["reason"],
+                         "ZERO_CANONICAL_SCAN_WITH_MARKET_OBSERVABLE")
+        self.assertEqual(output["market_ready_symbols"], ("BTCUSDT",))
+        self.assertEqual(output["observed_new_nexus_approvals"], 0)
+        self.assertIsNone(output["enrollment_count"])
+        self.assertFalse(output["cohort_membership_proven"])
+        self.assertFalse(output["eligible_for_609_enrollment"])
+        self.assertFalse(output["live_tradable"])
+        self.assertFalse(output["live_allowed"])
+        self.assertEqual(output["execution_effect"], "NONE")
+        self.assertEqual(market, old_market)
+        self.assertEqual(scanner, old_scanner)
+
+    def test_counterfactual_nexus_cannot_be_counted_as_canonical(self):
+        market = universe.qualify(["BTCUSDT"], populated(), now_ms=NOW_MS)
+        scanner = self.scanner(
+            symbols_scanned=1, strategy_signals=1, fresh_candidates=1,
+            nexus_evaluated=0, nexus_approved=0,
+            counterfactual_nexus_allowed=1,
+        )
+        out = universe.diagnose_609_scan_boundary(market, scanner)
+        self.assertEqual(out["reason"], "CANONICAL_NEXUS_NOT_CALLED")
+        self.assertEqual(out["counterfactual_allowed_excluded"], 1)
+        self.assertEqual(out["observed_new_nexus_approvals"], 0)
+        self.assertFalse(out["cohort_membership_proven"])
+
+    def test_even_reported_canonical_approvals_not_durable_cohort_proof(self):
+        market = universe.qualify(["BTCUSDT"], populated(), now_ms=NOW_MS)
+        scanner = self.scanner(
+            symbols_scanned=1, strategy_signals=2, fresh_candidates=2,
+            nexus_evaluated=1, nexus_approved=1,
+        )
+        out = universe.diagnose_609_scan_boundary(market, scanner)
+        self.assertEqual(out["reason"],
+                         "APPROVAL_COUNTERS_NEED_DURABLE_CANDIDATE_PROOF")
+        self.assertEqual(out["observed_new_nexus_approvals"], 1)
+        self.assertIsNone(out["enrollment_count"])
+        self.assertFalse(out["cohort_membership_proven"])
+        self.assertFalse(out["promotion_allowed"])
+
+    def test_invalid_authority_or_counter_spoofing_fails_closed(self):
+        market = universe.qualify(["BTCUSDT"], populated(), now_ms=NOW_MS)
+        for override in (
+            {"live_entries_blocked": False},
+            {"shadow_only": False},
+            {"execution_effect": "OPEN_ORDER"},
+            {"population": "COUNTERFACTUAL"},
+            {"nexus_approved": True},
+            {"nexus_approved": 1},
+            {"symbols_scanned": 0, "strategy_signals": 1},
+        ):
+            with self.subTest(override=override):
+                out = universe.diagnose_609_scan_boundary(
+                    market, self.scanner(**override))
+                self.assertEqual(out["status"], "BOUNDARY_NOT_PROVEN")
+                self.assertIsNone(out["observed_new_nexus_approvals"])
+                self.assertFalse(out["live_allowed"])
+
+    def test_invalid_market_only_claim_is_not_accepted_as_proof(self):
+        market = universe.qualify(["BTCUSDT"], populated(), now_ms=NOW_MS)
+        for mutation in (
+            {"eligible_for_609_enrollment": True},
+            {"live_allowed": True},
+            {"market_data_only": False},
+            {"market_ready_symbols": ("BTCUSDT", "BTCUSDT")},
+        ):
+            with self.subTest(mutation=mutation):
+                bad = {**market, **mutation}
+                out = universe.diagnose_609_scan_boundary(
+                    bad, self.scanner())
+                self.assertEqual(out["status"], "BOUNDARY_NOT_PROVEN")
+                self.assertFalse(out["cohort_membership_proven"])
+
+    def test_empty_market_and_empty_scan_do_not_invent_feed(self):
+        empty = universe.qualify([], {}, now_ms=NOW_MS)
+        out = universe.diagnose_609_scan_boundary(empty, self.scanner())
+        self.assertEqual(out["reason"],
+                         "ZERO_CANONICAL_SCAN_MARKET_UNPROVEN")
+        self.assertEqual(out["market_ready_symbols"], ())
+        self.assertIsNone(out["enrollment_count"])
+
+
 if __name__ == "__main__":
     unittest.main()
