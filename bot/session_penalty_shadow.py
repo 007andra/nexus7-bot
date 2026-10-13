@@ -15,7 +15,7 @@ import threading
 import time
 from collections import Counter
 
-from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+from bot.execution_model import estimated_round_trip_cost_pct
 from bot.nexus_decision_consistency import closed_mtf
 from bot import session_penalty_persistence as persistence
 

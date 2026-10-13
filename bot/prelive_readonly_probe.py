@@ -10,8 +10,6 @@ import json
 import sys
 import time
 
-from bot.kucoin import KuCoinClient, REST_BASE as KUCOIN_REST_BASE, to_kucoin
-
 
 def _active_orders(data):
     if isinstance(data, list):
@@ -28,6 +26,8 @@ def _active_orders(data):
 async def _kucoin_private_ws_probe(client, symbol: str) -> bool:
     """Authenticate KuCoin bullet-private and receive subscription ack."""
     import websockets
+
+    from bot.kucoin import REST_BASE as KUCOIN_REST_BASE, to_kucoin
 
     await client._ensure_session()
     endpoint = "/api/v1/bullet-private"
@@ -123,6 +123,8 @@ async def _private_ws_probe(client, symbol: str) -> bool:
 
 
 async def run_probe() -> int:
+    from bot.kucoin import KuCoinClient
+
     client = KuCoinClient()
     try:
         if not await client.sync_time():

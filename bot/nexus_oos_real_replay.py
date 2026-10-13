@@ -23,14 +23,14 @@ import aiohttp
 
 from bot.backtest import _closed_window_by_ts, _timestamp_index, fetch_history
 from bot.config import cfg
-from bot.kucoin_execution_model import (
+from bot.execution_model import (
     adverse_fill,
     configured_taker_fee,
     fee_return_fraction,
-    fetch_public_funding_history,
     funding_return_fraction,
     slippage_rate_for_symbol,
 )
+from bot.kucoin_execution_model import fetch_public_funding_history
 from bot.nexus_oos_edge_gate import CandidateOutcome, build_edge_report, edge_promotion_decision
 
 

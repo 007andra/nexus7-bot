@@ -18,7 +18,7 @@ from collections import Counter
 
 import numpy as np
 
-from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+from bot.execution_model import estimated_round_trip_cost_pct
 from bot.nexus_decision_consistency import closed_mtf
 from bot import score_floor_shadow_persistence as persistence
 
