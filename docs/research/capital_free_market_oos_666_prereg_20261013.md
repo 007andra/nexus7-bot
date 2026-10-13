@@ -62,3 +62,53 @@ green CI; never interpret an offline PASS as economic or LIVE readiness.
 Rollback (research branch only): close the draft PR and delete its branch
 after preserving the prereg issue and commit SHAs for audit. Production
 branch and Railway remain unchanged.
+
+## Addendum A — implementation added before any capture (2026-10-13)
+
+Added on this draft branch; still **zero real candidates**, no capture run.
+
+1. `bot/capital_free_market_observer_666_v1.py`. Audit finding: production
+   never runs the bare `strategy.Analyzer.analyze_mtf`. `runtime_bootstrap`
+   (also loaded by `sitecustomize.py`) replaces `strategy.score_tf` and wraps
+   `analyze_mtf` with adaptive entry, pullback confirmation, entry-type and
+   volume overlays. The observer therefore installs the same bootstrap in a
+   **separate interpreter**: credentials/DB/Telegram variables stripped,
+   `EXCHANGE=binance`, `PAPER_TRADE=true`, all non-loopback sockets blocked by
+   an audit hook, analysis inside `hard_gate_shadow_context.scope()` (no score
+   log, no shadow observers, no NEXUS) and `sig or context.signal` exactly as
+   the production `HARD_GATE_SHADOW` scan. Production code must hash to the
+   pinned digest of `45ebd59` or nothing runs. Candle windows are the
+   shadow-scan windows (200/100/120, minimum 60/40/20 closed). The bar still
+   forming at `t`, which the strategy discards, is a zero-elapsed placeholder;
+   a regression shows its contents do not change any result.
+2. Frozen parameters are the **code defaults** at `45ebd59`:
+   `MIN_ENTRY_SCORE=60, FEE_MULTIPLIER=2.0, MIN_VOLUME_MULT=0.5,
+   MIN_RR_RATIO=2.0, TAKER_FEE=0.0006`. Whether Railway overrides any of them
+   was **not verified**; the operator must confirm or amend before `effective_t0`.
+3. `bot/capital_free_market_stats_666_v1.py` implements the gate. Readings
+   fixed here before data and flagged for confirmation: both distinct UTC 4h
+   buckets and distinct `(symbol, 4h)` clusters must be >= 10; leave-one-
+   symbol-out must stay > 0 for every symbol; lower bound is the 0-based
+   500th of 10,000 sorted replicate means; one `Random(609202613)` per horizon;
+   an empty replicate scores `-inf` (cannot occur with non-empty clusters).
+4. `bot/capital_free_market_manifest_666_v1.py`: exclusive header freezing
+   `effective_t0` (refused if recorded after it), append-only self-chained
+   entries holding only allowlisted capture-time fields, every enrolled /
+   cap / duplicate / invalid / post-target decision recorded in order, and a
+   replay that must agree with `freeze_offline`. A local chain is not an
+   external witness: post `anchor_receipt` head digests on issue #666 within
+   the same 15m bar.
+
+### Remaining blockers before the first real candidate
+- Network: this session's sandbox denies `fapi.binance.com` and
+  `data.binance.vision`; the GitHub-hosted runner previously saw HTTP 451.
+  Railway (region `ams`) reaches Binance but running a collector there is a
+  new deployment needing separate authorization and a cost check.
+- Proposed zero-cost verifiable source: Binance public archive
+  `data.binance.vision/data/futures/um/daily/klines/<SYM>/15m/` is documented
+  to publish daily ZIPs with `.CHECKSUM` files, which could independently
+  re-verify every captured candle and 60m/240m outcome after the fact. NOT
+  tested: the host was unreachable from this sandbox (proxy 403). Usage rights for
+  redistribution still need review; nothing raw is published.
+- Operator confirmation of items 2 and 3; frozen `effective_t0` comment on
+  #666 before the first capture; human review of this branch.
