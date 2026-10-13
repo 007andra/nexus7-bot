@@ -150,6 +150,49 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(bundle.verify_bundle(altered)["reason"],
                              "PRIVATE_OR_UNEXPECTED_FIELD_IN_PUBLIC_TAPE")
 
+    def test_full_rehashed_private_event_is_rejected_by_public_export_gate(self):
+        # A malicious producer can rehash the complete local chain. The public
+        # release gate must reject the private field independently of hashes.
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            origin = root / "raw"
+            origin.mkdir()
+            sealed(origin)
+            segment = origin / f"{SID}.0000.jsonl"
+            rows = [json.loads(line) for line in segment.read_bytes().splitlines()]
+            previous = rows[0]["prev"]
+            for index, row in enumerate(rows):
+                row["prev"] = previous
+                if index == 0:
+                    row["event"]["private_order_id"] = "NEVER_PUBLISH"
+                item = {key: row[key] for key in ("seq", "received_ms", "event")}
+                row["hash"] = tape._hash(previous, item)
+                previous = row["hash"]
+            new_segment = b"".join(tape._canonical(row) + b"\\n" for row in rows)
+            segment.write_bytes(new_segment)
+            manifest = origin / f"{SID}.manifest.json"
+            metadata = json.loads(manifest.read_bytes())
+            metadata["final_hash"] = previous
+            metadata["archive_data_bytes"] = len(new_segment)
+            manifest.write_bytes(tape._canonical(metadata) + b"\\n")
+            # This is a valid recomputed chain: digest verification alone
+            # cannot protect confidential fields.
+            self.assertEqual(
+                tape.verify(origin, session_id=SID)["status"],
+                "SELF_CHAIN_VERIFIED_UNATTESTED",
+            )
+            candidate = root / "rehash-private.zip"
+            with zipfile.ZipFile(candidate, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                z.write(manifest, arcname=manifest.name)
+                z.write(segment, arcname=segment.name)
+            proof = bundle.verify_bundle(candidate)
+            self.assertEqual(proof["status"], "BUNDLE_NOT_PROVEN")
+            self.assertEqual(
+                proof["reason"], "PRIVATE_OR_UNEXPECTED_FIELD_IN_PUBLIC_TAPE"
+            )
+            self.assertFalse(proof["github_asset_uploaded"])
+            self.assertFalse(proof["live_allowed"])
+
     def test_missing_manifest_or_symlink_refused(self):
         with tempfile.TemporaryDirectory() as parent:
             dest = Path(parent) / "bad.zip"
