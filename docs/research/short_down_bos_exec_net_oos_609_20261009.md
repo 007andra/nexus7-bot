@@ -72,3 +72,66 @@ The #609 research branch now includes:
 **Security limitation:** The hash chain is only **locally tamper-evident**, not a tamper-proof trusted external record. Anyone with directory write access can rewrite all files and the final manifest. Files on an ephemeral environment may disappear. Neither this script nor a successful verification constitutes immutable external anchoring, independently authenticated Binance prints, protected SL/TP simulation, actual fills or funding. Never mark `real_executable_net_proven`, `source_independently_authenticated`, `promotion_allowed` or `live_allowed` true from these files. Do not count market-only symbols as capital-feasible canonical approvals.
 
 **Controlled activation prerequisites (not yet met):** independently reviewed restricted source identity, durability/retention and tamper-resistant anchoring design; written cost/quota assessment within the operator's approved spending limits (no assumed bucket/paid service); explicit operator decision on launching a separate capture process; evidence of sequence completeness under reconnect/timeout; timestamp alignment to prospectively frozen candidate IDs and separate fees/funding/marketability/stop protection proof. A short local trial can validate file-format/collector behavior but not a 60/240-minute research outcome nor the #609 preregistered sample size.
+
+
+## #609 zero-capital scanner boundary proof — 13/10/2026
+
+**VERIFIED, production read-only (Railway, production SHA
+45ebd59d4ca54072e1233ce0667085d92b70ab1d):**
+
+- The fresh 2026-10-13 13:07:16 UTC HARD_GATE_SHADOW_SCAN row reported
+  symbols_scanned=0, strategy_signals=0, fresh_candidates=0,
+  nexus_evaluated=0, nexus_approved=0. These are counts **for that scan**,
+  not an exhaustive audit of stored candidate enrollment.
+- The concurrent historical hard gate reported display drawdown=100.00%,
+  limit=30.00%, override=false, entries_blocked=true. The exchange
+  balance was externally withdrawn; this display must not be treated as proof
+  of a 100% trading loss. Preserve the adjusted-financial ledger and HWM.
+- In production bot/engine.py::_filter_viable_symbols, buying_power is
+  risk.balance multiplied by configured leverage; if it cannot cover
+  minimum instrument cost with the existing factor, viable_symbols becomes
+  empty. That list also protects the LIVE scanner/dispatch.
+- In bot/hard_gate_shadow_scan.py::scan, the actual analysis universe is
+  tuple(engine.viable_symbols or ()). Therefore **no viable symbols means
+  no canonical shadow scan**, despite the separate public WebSocket fallback
+  used to observe market prices. Changing viable_symbols or assigning
+  source-ready symbols to the canonical scanner would change the #609
+  selection process, not repair missing evidence.
+
+**New offline-only proof within existing PR #610:**
+bot/short_down_bos_research_universe_v1.py::diagnose_609_scan_boundary
+consumes caller-provided market-only qualification and one shadow scan
+summary. It classifies the boundary WITHOUT importing the bot engine,
+account, Redis, SQL, exchange credentials or order execution. Its outputs
+always mark cohort_membership_proven=false, market_source_attested=false,
+eligible_for_609_enrollment=false, live_allowed=false, enrollment_count=null.
+Even a source report with positive counters does not verify individual
+canonical decisions or durably frozen cohort membership. Six synthetic
+regressions exercise empty-viable/live scan with public market candles,
+counterfactual-versus-canonical distinction, spoofed authority, inconsistent
+counters and reported-but-unattested approvals.
+
+**What does and does not unblock research:**
+
+1. A complete public-market cache can be inspected as MARKET_OBSERVATION_READY
+   without balance, but it cannot produce authentic #609 canonical approvals.
+2. An offline counterfactual NEXUS evaluation, including hypothetical capital
+   feasibility, cannot be counted as a natural canonical NEXUS approval.
+3. With the current account at zero negotiable equity, the original #609
+   scanner is structurally unable to generate new canonical approvals.
+   Neither research code nor a consented public-market Release changes this.
+4. Restoring viable trading capacity does NOT automatically clear the 30%
+   historical DD hard gate, failing general OOS edge, exact order protection
+   checks, or one-shot LIVE authorization. No capital deposit is requested
+   as a research fix.
+5. A balance-independent research signal scorer would require a **separate,
+   prospectively registered cohort**, with its own cutoff and a clear
+   observation-only non-LIVE methodology. It must not silently change or
+   replenish the frozen first-60 population of #609.
+
+**Next evidence decision:** the original #609 remains
+COLLECTING_PROSPECTIVE_SAMPLE / INSUFFICIENT_EVIDENCE unless a separately
+authenticated future set of **natural canonical** candidate rows is found.
+No database read through these current connector actions has established
+the complete existing #609 enrollment count. A new independent research
+cohort requires explicit preregistration, not contamination of #609.
