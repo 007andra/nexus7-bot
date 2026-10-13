@@ -1,5 +1,4 @@
 """Matched BBO cost audit: strict candidate identity, age, no LIVE authority."""
-import math
 import unittest
 
 from bot import rca594_matched_bbo_v1 as audit
