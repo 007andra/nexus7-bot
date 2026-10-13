@@ -244,6 +244,96 @@ def _dimension_groups(rows, dimension):
     return result
 
 
+def _setup_cost_coverage(rows):
+    """Observed matched *snapshot-only* cost coverage by setup and arm.
+
+    No market fills, funding, exact stop/TP paths, or independently verified
+    BBO are available in this frozen R3 source. A proxy never becomes PnL.
+    Every unpriced member remains in the denominator (never imputed to zero).
+    """
+    names = ("MOMENTUM", "BOS_BREAK", "PULLBACK", "OTHER")
+    groups = {
+        name: {
+            arm: {"n": 0, "cost_n": 0, "spread_n": 0,
+                  "cost_sum": 0.0, "proxy_sum": 0.0}
+            for arm in ("approved", "rejected")
+        }
+        for name in names
+    }
+    for row in rows:
+        if not isinstance(row, dict) or type(row.get("allowed")) is not bool:
+            continue
+        name = str(row.get("setup") or "").upper()
+        name = name if name in groups else "OTHER"
+        arm = "approved" if row["allowed"] else "rejected"
+        item = groups[name][arm]
+        item["n"] += 1
+        cost = _finite(row.get("cost_fraction"))
+        ret = _finite(row.get("future_return"))
+        # Gross future returns are always present on _matched rows. The
+        # optional cost snapshot can be missing or invalid and then NEVER
+        # contributes to a net-like proxy.
+        if cost is None or ret is None or not 0.0 <= cost <= 0.1:
+            continue
+        item["cost_n"] += 1
+        item["cost_sum"] += cost
+        item["proxy_sum"] += ret - cost
+        spread = _finite(row.get("spread_bps"))
+        if spread is not None and 0.0 <= spread <= 10000.0:
+            item["spread_n"] += 1
+    return groups
+
+
+def _format_setup_cost_coverage(report, *, horizon):
+    """Fixed-vocabulary output for existing research log, never client data."""
+    if horizon not in (60, 240):
+        return "setup_cost_proxy=NOT_PROVEN"
+    groups = report.get(f"setup_cost_coverage_{horizon}m")
+    dims = report.get(f"dimensions_{horizon}m")
+    dims = dims.get("setup") if isinstance(dims, dict) else None
+    if not isinstance(groups, dict) or not isinstance(dims, list):
+        return "setup_cost_proxy=NOT_PROVEN"
+    labels = ("MOMENTUM", "BOS_BREAK", "PULLBACK", "OTHER")
+    expected = {name: {"approved": 0, "rejected": 0} for name in labels}
+    try:
+        for row in dims:
+            name = str(row.get("value") or "").upper()
+            name = name if name in expected else "OTHER"
+            expected[name]["approved"] += row["allowed_n"]
+            expected[name]["rejected"] += row["rejected_n"]
+        parts = []
+        for name in labels:
+            arms = groups[name]
+            columns = []
+            for side, prefix in (("approved", "a"), ("rejected", "r")):
+                block = arms[side]
+                n = block["n"]
+                cost_n = block["cost_n"]
+                spr_n = block["spread_n"]
+                if (type(n) is not int or type(cost_n) is not int
+                        or type(spr_n) is not int
+                        or n != expected[name][side]
+                        or not 0 <= spr_n <= cost_n <= n):
+                    raise ValueError("setup coverage inconsistent")
+                cost_sum = _finite(block["cost_sum"])
+                proxy_sum = _finite(block["proxy_sum"])
+                if cost_sum is None or proxy_sum is None or cost_sum < 0:
+                    raise ValueError("setup cost invalid")
+                # Mean is always conditioned on covered records only. No
+                # "zero fees" assumption for uncovered R3 members.
+                proxy_mean = proxy_sum / cost_n if cost_n else None
+                columns.append(
+                    f"{prefix}n={n}:{prefix}cn={cost_n}:{prefix}spn={spr_n}"
+                    f":{prefix}pmean={_fmt(proxy_mean)}"
+                )
+            parts.append(name + ":" + ":".join(columns))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return "setup_cost_proxy=NOT_PROVEN"
+    return ("setup_cost_proxy=" + "|".join(parts)
+            + " proxy_only=true real_executable_net_proven=false"
+            + " funding_proven=false protected_stop_tp_proven=false")
+
+
 def _concentration(records):
     allowed = [r for r in records.values() if r["allowed"] and r.get("status") != "ERROR"]
     total = len(allowed)
@@ -370,6 +460,8 @@ def build_report(payloads, outcomes60=(), outcomes240=(), *, epoch_id="UNKNOWN",
         "approval_concentration": _concentration(records),
         "dimensions_60m": dimensions60,
         "dimensions_240m": dimensions240,
+        "setup_cost_coverage_60m": _setup_cost_coverage(m60),
+        "setup_cost_coverage_240m": _setup_cost_coverage(m240),
         "selection_strata_60m": strata60,
         "selection_strata_240m": strata240,
         "minimum_group_n_for_interpretation": MIN_GROUP_N,
@@ -573,6 +665,7 @@ def format_worst_groups(report, *, horizon=60, limit=10):
         + ("|".join(parts) if parts else "NONE")
         + " small_n_guard=true association_not_causation=true execution_effect=NONE "
         + _setup_partition_public_suffix(report, horizon=horizon)
+        + " " + _format_setup_cost_coverage(report, horizon=horizon)
     )
 
 
