@@ -85,6 +85,14 @@ class SetupSensitivityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "RCA_INVALID_MEAN"):
             audit.evaluate(bad)
 
+    def test_group_weighted_means_must_match_frozen_source(self):
+        bad = report()
+        groups = [dict(v) for v in bad["dimensions_60m"]["setup"]]
+        groups[0]["allowed_avg_return"] = 0.50
+        bad["dimensions_60m"] = {"setup": groups}
+        with self.assertRaisesRegex(ValueError, "RCA_GROUP_MEANS_NOT_CONSISTENT"):
+            audit.evaluate(bad)
+
     def test_malformed_minimum_and_duplicate_aggregates_are_refused(self):
         for v in (0, 1, -2, True, 2.0):
             with self.subTest(minimum=v), self.assertRaisesRegex(ValueError, "RCA_INVALID_MINIMUM"):
