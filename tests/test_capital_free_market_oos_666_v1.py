@@ -33,6 +33,7 @@ def exit_row(row, horizon, close):
         "candidate_id": row["candidate_id"], "symbol": row["symbol"],
         "horizon_minutes": horizon,
         "close_ms": row["captured_ms"] + horizon * 60_000,
+        "observed_ms": row["captured_ms"] + horizon * 60_000 + 1000,
         "complete_candle": True, "no_interpolation": True,
         "source_sha256": FAKE_SOURCE, "exit_close": close,
     }
@@ -88,6 +89,7 @@ class CapitalFreeProtocolTests(unittest.TestCase):
             {"entry_close": 0},
             {"captured_ms": float(BASE)},
             {"observed_ms": BASE-1},
+            {"observed_ms": BASE + study.INTERVAL_MS},
             {"source_sha256": "redacted"},
         ):
             with self.subTest(mutation=mutation):
@@ -126,6 +128,15 @@ class CapitalFreeProtocolTests(unittest.TestCase):
         self.assertEqual(conflict["reason"], "CONFLICTING_DUPLICATE_ID")
         self.assertEqual(conflict["selected_count"], 0)
 
+    def test_conflict_after_sixtieth_is_detected_without_replacement(self):
+        rows = [signal(i//10, symbol=study.UNIVERSE[i % 10])
+                for i in range(60)]
+        conflict = copy.deepcopy(rows[0])
+        conflict["entry_close"] = 101.0
+        result = freeze(rows + [conflict])
+        self.assertEqual(result["reason"], "CONFLICTING_DUPLICATE_ID")
+        self.assertEqual(result["selected_count"], 0)
+
     def test_exact_60_240_pair_and_adverse_short_return(self):
         row = signal(0)
         sel = freeze([row])
@@ -154,6 +165,8 @@ class CapitalFreeProtocolTests(unittest.TestCase):
         }
         for mutation in (
             {"close_ms": row["captured_ms"] + 241*60_000},
+            {"observed_ms": row["captured_ms"] + 240*60_000 - 1},
+            {"observed_ms": row["captured_ms"] + 240*60_000 + study.INTERVAL_MS},
             {"complete_candle": False},
             {"no_interpolation": False},
             {"source_sha256": "BAD"},
