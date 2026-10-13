@@ -31,3 +31,18 @@ Do **not** merge or activate the capture process on production merely because CI
 Original cutoff and target of #609 cannot be changed; historical R3 and BBO V3 samples may not be re-enrolled. Real trading remains separately blocked by equity=0, historical drawdown and failing prospective economic evidence.
 
 Official public stream envelope reference: https://developers.binance.info/docs/derivatives/usds-margined-futures/websocket-market-streams/All-Market-Mini-Tickers-Stream
+
+
+## Existing infrastructure and potential zero-price GitHub release retention
+
+**Verified current infrastructure:** Railway `BGX CAPITAL` production has exactly the `nexus7-bot` and `Postgres` services, no buckets and no extra unattached volumes; the ONLY persistent volume is a 500 MB Postgres mount at `/var/lib/postgresql/data`, which must not be used to ingest raw trade tapes. Bot has no persistent mount. GitHub `007andra/nexus7-bot` is **PUBLIC**, so ANY uploaded GitHub release asset is publicly readable.
+
+As documented by GitHub (checked October 2026), GitHub Actions artifacts/logs on public repos default to **90-day expiration**, max 90 days, so they are not a permanent raw event archive:
+https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository
+
+GitHub Releases have per-asset limit **under 2 GiB**, up to 1,000 assets per release, and no published total-release size/bandwidth limit. They MAY be a no-added-product-cost manual archive for public market-event-only data, but this is **not** proof of account-specific zero billing, long-term retention SLA, source authenticity, privacy acceptance or immutable third-party anchoring:
+https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases
+
+**New offline, no-publish preparation:** `bot/short_down_bos_release_bundle_v1.py` packages one locally verified 16 MiB-limited trade session in a compressed ZIP with exact session manifest and segments only. It validates ZIP member safety (no path traversal, symlinks, duplicates, unbounded expansion), replays the hash chain after extraction into an isolated temporary directory, and returns a SHA-256 for the compressed bundle. Failures are `BUNDLE_NOT_PROVEN`; an existing target path is never deleted. Every successful package explicitly carries `github_release_created=false, github_asset_uploaded=false, source_independently_attested=false, durable_remote_copy_proven=false, storage_cost_verified_zero=false, live_allowed=false`.
+
+**Go/no-go for publishing:** PUBLIC market data only (review all contents for IP/account/candidate/keys and sensitive metadata), separately authorized named release/tag, account quota/cost verified, independent raw-byte retention/second copy or external hash anchor accepted, verified download-and-replay proof, and validated source lineage. No real-session package or GitHub release has been created/uploaded in this implementation. The owner declined new API keys and has not authorized an open-ended external research archive.
