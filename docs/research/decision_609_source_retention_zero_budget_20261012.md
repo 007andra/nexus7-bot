@@ -46,3 +46,22 @@ https://docs.github.com/en/repositories/releasing-projects-on-github/about-relea
 **New offline, no-publish preparation:** `bot/short_down_bos_release_bundle_v1.py` packages one locally verified 16 MiB-limited trade session in a compressed ZIP with exact session manifest and segments only. It validates ZIP member safety (no path traversal, symlinks, duplicates, unbounded expansion), replays the hash chain after extraction into an isolated temporary directory, and returns a SHA-256 for the compressed bundle. Failures are `BUNDLE_NOT_PROVEN`; an existing target path is never deleted. Every successful package explicitly carries `github_release_created=false, github_asset_uploaded=false, source_independently_attested=false, durable_remote_copy_proven=false, storage_cost_verified_zero=false, live_allowed=false`.
 
 **Go/no-go for publishing:** PUBLIC market data only (review all contents for IP/account/candidate/keys and sensitive metadata), separately authorized named release/tag, account quota/cost verified, independent raw-byte retention/second copy or external hash anchor accepted, verified download-and-replay proof, and validated source lineage. No real-session package or GitHub release has been created/uploaded in this implementation. The owner declined new API keys and has not authorized an open-ended external research archive.
+
+
+## Operator approval D4 — public Binance-trades-only GitHub Release
+
+**Approved by the operator in ChatGPT on 2026-10-13 BRT:** publication through a **PUBLIC GitHub Release** for the future bounded pilot, **only** when the ZIP contains already-public Binance USD-M `aggTrade` fields and non-sensitive technical integrity metadata. This satisfies the *permission to disclose that restricted class of public data*; it does not prove that a real capture exists or that the storage destination has accepted the bytes.
+
+### Exact authorized scope
+
+- Allowed public trade event fields: `e, E, s, a, p, q, f, l, T, m`. Outer archive-line fields: `prev, hash, seq, received_ms, event`; manifest fields are strictly limited to the recorder's fixed public identity and integrity metadata, with no user account or strategy data.
+- **DENY publication** if any unrecognized manifest/event/record/segment key exists, even if local hashes are self-consistent. `bot/short_down_bos_release_bundle_v1.py::verify_bundle` now rejects with `PRIVATE_OR_UNEXPECTED_FIELD_IN_PUBLIC_TAPE`; tests cover unexpected `private_account_key` and `orderId` fields.
+- No Binance secret, API token, wallet balance, trade order, execution report, exchange account ID, candidate ID, proprietary signal, source code secrets, or risk/position parameters may be included.
+- Original archive cap stays **16 MiB per recording session**; malformed or incomplete sessions must not be published as complete. The archive's source and durability limitations remain explicit.
+- The operator **did not** authorize a paid service, bucket/volume, automatic long-running Railway collector, changing `viable_symbols`, bypassing DD, opening positions, or promoting an OOS strategy.
+
+### What is still NOT done
+
+No session has been captured/archived in the current project workflow; GitHub API reports zero Releases at time of authorization. The connected GitHub toolset in this ChatGPT session can review repository metadata and edit code/issues but does **not** expose an action to create a Release or upload binary assets. **No Release, tag or asset has been created, and no cost or successful download-and-reverify has been claimed.**
+
+Next acceptable operational sequence: (a) exact-head CI and security PASS on this privacy-gate patch; (b) source-only pilot capture outside the live bot, with bounded quota and a source-consistency check; (c) verify the public-only ZIP locally; (d) use a GitHub Release publishing workflow with separately checked billing/quota and explicit visibility, then re-download and compare ZIP SHA-256 and contents; (e) only then record archive persistence as demonstrated. Missing independently anchored, source-authenticated, funding/fee/stop/fill path evidence keeps financial OOS `NOT_PROVEN` and LIVE `NO_GO`.
