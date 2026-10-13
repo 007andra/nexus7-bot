@@ -1,0 +1,137 @@
+# #609 — Independent SHORT / TRENDING_DOWN / BOS_BREAK executable-net OOS V1
+
+## Audit boundary
+
+Registered GitHub issue #609 at **2026-10-09T00:58:10Z / epoch 1791507490**. This branch is **not** wired into the trading engine or Railway scanner: it implements a **pure, offline evaluator**. It does not create candidates, access Binance, access PostgreSQL or retroactively mark approval. CI passing is not evidence of enrollment, durable freeze, authenticated source data or profitable trading.
+
+Frozen 10-member SHORT_DOWN_BOS_PROSPECTIVE_V1_20261006 stays unchanged, including the 41 later ignored observations; general CALIBRATION_GENERALIZATION_V1 EVIDENCE_FAIL is never revised. Avoid reusing past members to inflate independent sample.
+
+## Inputs and cohort semantics
+
+Use function bot.short_down_bos_exec_net_oos_v1.evaluate(payloads, evidence_by_id_and_horizon, now_epoch=...). Inputs must be independently sourced from immutable existing HARD_GATE_SHADOW research tables via a separately authorized read-only export, with captured_epoch strictly > 2026-10-09T00:58:10Z. Do not generate or manipulate captured IDs, times or original canonical NEXUS decision. Require SHORT, TRENDING_DOWN, BOS_BREAK, actual natural nexus_called/nexus_allowed, shadow_only and non-LIVE authority, and original production net RR >= 1.60.
+
+Deterministic chronological enrollment depends **only on capture fields**, not matured outcomes. First 60 approved (max 12 per symbol), at least 8 symbols, <=20% top-symbol concentration. Report duplicate/cap skips before outcomes. The reconstructed set has membership_durable=false; a verified durable capture manifest must be independently audited before an evidentiary READY status can exist. Missing/truncated sources fail closed.
+
+## Net evidence requirements
+
+The pure evaluator accepts a proof keyed by (original candidate_id, horizon) with exact candidate identity, cost-source provenance, source reference, capture-time fees/spread/slippage, explicit quantity/tick/step/min notional and nonnegative funding cost. For a capture exactly on the 15-minute grid, require full contiguous closed 15-minute OHLC bars for each 60m or 240m horizon. For the usual **off-grid** capture, require a timestamp-matched **post-capture entry_partial_window** from capture to the next grid boundary, contiguous complete 15-minute OHLC bars, and a timestamp-matched **exit_partial_window** ending at capture plus exactly 60m or 240m. Missing, misaligned, or malformed partial-window proof returns **NET_PROOF_MISSING**, never a fabricated winner; do not use full entry or exit candles that contain pre-entry or post-horizon price action. Such partial windows must be independently substantiated with time-appropriate market data and cannot be invented from a surrounding OHLC bar.
+
+The first strict model supports hypothetical MARKET entries only. A STOP_MARKET entry is conditional on trigger/activation and cannot be treated as a market fill: **NET_PROOF_MISSING** until a separately reviewed triggering and price-path model exists. Stop/TP simulation for hypothetical SHORT MARKET paths uses STOP first on intrabar collision, adverse-stop gap worse than stop if necessary, conservative tick rounding, adverse entry sell and exit buy slippage/spread, fees and funding. Stress doubles fee/spread/slippage/funding inputs, keeping original position and entry/SL/TP. Every result is a **hypothetical** protected path, never a fill. Missing, mismatched, expired, invalid, synthetic-labelled or unaudited cost/bar evidence cannot be represented as verified net profitability.
+
+With 60 fully evidenced candidates, report base/stress average NET fraction per notional and hypothetical USDT per candidate, positive fraction, stop first count, deterministic cluster-bootstrap 5th percentile grouped by symbol and time bucket, and leave-top-symbol-out. Real capital-normalized equity returns, net fills with funding, basis/mark trigger, partial fills and price-path certification require additional authenticated information/review. Source evidence references alone are not independent certification; the evaluator always reports independently_verified_source=false and does not grant LIVE.
+
+## Test/rollout gates
+
+- Synthetic tests exercise strict post-cutoff inclusion, immutable selection, quota, duplicate/censorship handling, fee/funding/quantization/market-price path, time gaps, collision STOP-first, stress non-optimism and fail-closed authority. Fixtures are not actual trades.
+- All required CI: offline suite, ephemeral real PostgreSQL CAS, release proof pack and security must PASS before a human review of any deployment.
+- Do not merge or deploy a runtime hook from this PR. Independent future PR may build a bounded read-only export and durable membership attestations, with no production authorization and no new market-data calls.
+- All risk, historical HWM, 30% limit, existing OOS, 3s timeout, trading config, region and order execution remain unchanged.
+
+## Financial-gate connection
+
+On the verified runtime, [ADJUSTED_EQUITY] status RECONCILED shows equity 5.3177 USDT, performance_hwm 22.7987 USDT, historical trading drawdown 76.68%, external_flows_applied 2, net +7.7808 USDT, pending 0. Those are summaries, not an independently recovered exchange income history or complete stored provenance chain. Do not reset/change HWM or rebase from the summary. #601 records separate required capital-flow provenance audit.
+## Static audit hardening — 09/10/2026
+
+The reviewed draft PR #610 was tightened without deployment: (1) reject STOP_MARKET profitability without exact trigger/activation evidence; (2) require exact post-capture and pre-horizon partial windows for off-grid event times rather than silently skipping the dangerous first minutes; (3) report `NET_EVIDENCE_INCOMPLETE_OR_FAILED` when **even one** economic or source criterion fails, reserving `MANUAL_AUDIT_REQUIRED` for a fully shaped hypothetical sample that still lacks an independently attested durable freeze and authenticated source proof. Tests for intrabar stop, misaligned timestamps, unproven STOP_MARKET and one-horizon failure added. These changes do **not** change the immutable 60-candidate selection rule, actual NEXUS score, approved sample, historical evidence or LIVE authority. The quality of time-bounded partial-window data cannot be inferred from the input labels alone; independent authenticity, slippage and fill plausibility review remain required, and this draft cannot enable real orders.
+
+## Public USD-M aggTrade source feasibility — 12/10/2026 (draft only)
+
+**Confirmed production gap:** `binance.py::start_websocket` defaults to 15m, 60m and 240m OHLC. `hard_gate_shadow_scan.py::outcome_from_cache` observes only closed 15m bars, starting at the *next* 15-minute boundary after `captured_epoch`. Existing BBO `@bookTicker` is a bid/ask quote, **not** the continuous executed-trade path between an exact signal time and its 60/240-minute exit.
+
+**Public feed option:** Binance USD-M public WebSocket `<symbol>@aggTrade` (no private API key) may supply millisecond event timestamps, aggregate IDs and market trade prices. Official subscription docs: https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/websocket-market-streams/Live-Subscribing-Unsubscribing-to-streams . This is *only a proposed source*; no new subscription, collector or paid storage was provisioned, and no raw event feed was captured by this PR.
+
+Added `bot/short_down_bos_public_trade_path_v1.py` as a **pure offline shape validator** to reuse on a future *read-only, independent* captured public stream. It does not call Binance, SQL or the LIVE trading client:
+- Requires the frozen #609 cohort ID and exact candidate ID/symbol, stream generation/connection, a source manifest covering from capture to exact 60m/240m end, and strictly increasing consecutive aggregate IDs with monotonic milliseconds. Reject missing boundary witnesses, gaps, invalid prices, incorrect source or fabricated full 15m bars.
+- Constructs OHLC from actual trade observations only and preserves both sub-15-minute partial windows for off-grid signals. Missing a single relevant price interval produces `NET_SOURCE_INCOMPLETE`, never an invented flat candle or early favorable profit.
+- Even with a path-shape PASS, always returns `SHAPE_VALID_SOURCE_UNATTESTED`, `source_independently_authenticated=false`, and `evaluator_evidence=None`. No synthetic fixture, mutable input flag, fabricated source reference or self-computed digest can convert such a result into genuine independently attested #610 cost/stop execution proof.
+- **Hard prerequisite:** an independently reviewed, append-only, externally anchored forward event archive; capture-start before signal, all trades through each exact exit, bounded continuity evidence across reconnects, source-observed funding and fee data, and original candidate-time executable qty/stop/TP/order filters. An event path can help estimate price movement but cannot prove passive depth or exact simulated fill, stop market trigger/mark basis or order ACK.
+
+As of implementation, research evidence has **zero independent timepath/funding/fill source proofs** from this added adapter. No new candidate has been enrolled or counted. The #609 exact cutoff and first-60 rule are unchanged. Economic decision remains `INSUFFICIENT_EVIDENCE`, with `live_allowed=false`. Review source integrity *before* any deployment, additional public-feed subscription, resource creation, strategy promotion or capital allocation.
+
+
+## Market observation-only universe — 12/10/2026, after zero-balance scan RCA
+
+Production evidence on `45ebd59d` / Railway `15924111`: the 2026-10-13T01:34Z `[HARD_GATE_SHADOW_SCAN]` reported `symbols_scanned=0`, `fresh_candidates=0`, `nexus_approved=0`. The engine's initial symbol filter requires `buying_power=risk.balance*cfg.LEVERAGE` and uses that to set `engine.viable_symbols`; the bot has zero account equity after the operator's withdrawal. Existing research scanner iterates `tuple(engine.viable_symbols or ())`, so no cash means no new scanner candidates. The market WS can still subscribe to `cfg.SYMBOLS` as fallback; **this is not approval or tradability evidence**.
+
+Added pure offline `bot/short_down_bos_research_universe_v1.py` and tests to distinguish an **observed closed-candle market universe** from LIVE-eligible symbols. Input is a caller-supplied snapshot of existing 15/60/240-minute cached prices, without any account balance, leverage, order or risk object. Require 60/40/20 contiguous, valid, timestamp-aligned, recent **closed** candles for each configured symbol. The open candle is excluded; gaps/staleness/invalid OHLC are typed research exclusions. Emits `market_ready_symbols` only, and explicitly `canonical_nexus_approval_proven=false`, `eligible_for_609_enrollment=false`, `live_tradable=false`, `promotion_allowed=false`, `execution_effect=NONE`.
+
+This module is **not wired to the engine** and makes no extra market calls. It must not be used to change `engine.viable_symbols`, call the LIVE analyzer, change the min-order gate, invent a funded brokerage account, manufacture NEXUS-approved candidates, or count previously blocked signals toward the first 60 in #609. A distinct, prospectively preregistered research signal universe (with source/identity and cash-independent *analytical* scoring rules disclosed in advance) would be a **different cohort** and cannot silently replace the natural canonical #609 approvals. That methodology and any event archive/deployment require separate review. A public market feed alone does not prove complete protected stop execution, source integrity, fees or funding.
+
+**Current readiness gates:** Offline market-universe implementation ready for CI; prospective #609 canonical enrollments still **0 verified**, durable membership NOT_PROVEN, executed net proof NOT_PROVEN, LIVE NO_GO. No new Binance API key is required to run these offline validations. No separate service, bucket or paid infrastructure was created.
+
+
+## Manual public event archive, isolated from LIVE (12/10/2026, PR #610)
+
+The #609 research branch now includes:
+- `bot/short_down_bos_event_archive_v1.py`: chunked, append-exclusive JSONL session archive with a SHA-256 hash chain, strict aggregate-ID continuity, monotonic trade timestamps, positive prices/quantities, normalized public event payloads, 5,000-event segments and an explicit final self-seal manifest. A missing manifest, bad sequence, truncated file, changed payload, incorrect hash or reconnect abort is **NOT_PROVEN**. The module requires an **already-existing** directory; no bucket, database or paid resource is created.
+- `scripts/short_down_bos_public_aggtrade_capture_v1.py`: a **manual CLI only** using the public Binance USD-M `wss://fstream.binance.com/market/ws/<symbol>@aggTrade` endpoint, without API keys. Run requires explicit symbol, local directory, bounded duration and `--ack-local-not-durable`. No automatic reconnect or silent backfill; transport silence/disconnection/invalid events invalidate the session. No secret is read from Railway or the LIVE engine.
+- `tests/test_short_down_bos_event_archive_v1.py`: test tampering, truncation, duplicate-session refusal, missing seal, invalid price/ID/symbol/time and chunk boundary chain verification.
+
+**Strict separation:** These components are in draft PR #610 only. They are not imported by bot startup, are not invoked by Railway, do not call an order API, and do not change `viable_symbols`, scoring, financial equity, risk, exchanges, approvals or #609 population membership.
+
+**Security limitation:** The hash chain is only **locally tamper-evident**, not a tamper-proof trusted external record. Anyone with directory write access can rewrite all files and the final manifest. Files on an ephemeral environment may disappear. Neither this script nor a successful verification constitutes immutable external anchoring, independently authenticated Binance prints, protected SL/TP simulation, actual fills or funding. Never mark `real_executable_net_proven`, `source_independently_authenticated`, `promotion_allowed` or `live_allowed` true from these files. Do not count market-only symbols as capital-feasible canonical approvals.
+
+**Controlled activation prerequisites (not yet met):** independently reviewed restricted source identity, durability/retention and tamper-resistant anchoring design; written cost/quota assessment within the operator's approved spending limits (no assumed bucket/paid service); explicit operator decision on launching a separate capture process; evidence of sequence completeness under reconnect/timeout; timestamp alignment to prospectively frozen candidate IDs and separate fees/funding/marketability/stop protection proof. A short local trial can validate file-format/collector behavior but not a 60/240-minute research outcome nor the #609 preregistered sample size.
+
+
+## #609 zero-capital scanner boundary proof — 13/10/2026
+
+**VERIFIED, production read-only (Railway, production SHA
+45ebd59d4ca54072e1233ce0667085d92b70ab1d):**
+
+- The fresh 2026-10-13 13:07:16 UTC HARD_GATE_SHADOW_SCAN row reported
+  symbols_scanned=0, strategy_signals=0, fresh_candidates=0,
+  nexus_evaluated=0, nexus_approved=0. These are counts **for that scan**,
+  not an exhaustive audit of stored candidate enrollment.
+- The concurrent historical hard gate reported display drawdown=100.00%,
+  limit=30.00%, override=false, entries_blocked=true. The exchange
+  balance was externally withdrawn; this display must not be treated as proof
+  of a 100% trading loss. Preserve the adjusted-financial ledger and HWM.
+- In production bot/engine.py::_filter_viable_symbols, buying_power is
+  risk.balance multiplied by configured leverage; if it cannot cover
+  minimum instrument cost with the existing factor, viable_symbols becomes
+  empty. That list also protects the LIVE scanner/dispatch.
+- In bot/hard_gate_shadow_scan.py::scan, the actual analysis universe is
+  tuple(engine.viable_symbols or ()). Therefore **no viable symbols means
+  no canonical shadow scan**, despite the separate public WebSocket fallback
+  used to observe market prices. Changing viable_symbols or assigning
+  source-ready symbols to the canonical scanner would change the #609
+  selection process, not repair missing evidence.
+
+**New offline-only proof within existing PR #610:**
+bot/short_down_bos_research_universe_v1.py::diagnose_609_scan_boundary
+consumes caller-provided market-only qualification and one shadow scan
+summary. It classifies the boundary WITHOUT importing the bot engine,
+account, Redis, SQL, exchange credentials or order execution. Its outputs
+always mark cohort_membership_proven=false, market_source_attested=false,
+eligible_for_609_enrollment=false, live_allowed=false, enrollment_count=null.
+Even a source report with positive counters does not verify individual
+canonical decisions or durably frozen cohort membership. Six synthetic
+regressions exercise empty-viable/live scan with public market candles,
+counterfactual-versus-canonical distinction, spoofed authority, inconsistent
+counters and reported-but-unattested approvals.
+
+**What does and does not unblock research:**
+
+1. A complete public-market cache can be inspected as MARKET_OBSERVATION_READY
+   without balance, but it cannot produce authentic #609 canonical approvals.
+2. An offline counterfactual NEXUS evaluation, including hypothetical capital
+   feasibility, cannot be counted as a natural canonical NEXUS approval.
+3. With the current account at zero negotiable equity, the original #609
+   scanner is structurally unable to generate new canonical approvals.
+   Neither research code nor a consented public-market Release changes this.
+4. Restoring viable trading capacity does NOT automatically clear the 30%
+   historical DD hard gate, failing general OOS edge, exact order protection
+   checks, or one-shot LIVE authorization. No capital deposit is requested
+   as a research fix.
+5. A balance-independent research signal scorer would require a **separate,
+   prospectively registered cohort**, with its own cutoff and a clear
+   observation-only non-LIVE methodology. It must not silently change or
+   replenish the frozen first-60 population of #609.
+
+**Next evidence decision:** the original #609 remains
+COLLECTING_PROSPECTIVE_SAMPLE / INSUFFICIENT_EVIDENCE unless a separately
+authenticated future set of **natural canonical** candidate rows is found.
+No database read through these current connector actions has established
+the complete existing #609 enrollment count. A new independent research
+cohort requires explicit preregistration, not contamination of #609.
