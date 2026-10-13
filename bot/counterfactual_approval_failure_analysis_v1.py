@@ -525,9 +525,7 @@ def _setup_partition_public_suffix(report, *, horizon):
                 raise ValueError("unpartitioned sample")
         # Comparison to source full-arm means avoids certifying inconsistent
         # partitions. Approximate error tolerance accounts for float arithmetic.
-        for arm, count_key, sum_key in (
-            (a, "a_n", "a_sum"), (r, "r_n", "r_sum")
-        ):
+        for arm, sum_key in ((a, "a_sum"), (r, "r_sum")):
             n = arm["n"]
             mean = _finite(arm.get("avg_return"))
             total = math.fsum(g[sum_key] for g in sums.values())
