@@ -1,11 +1,9 @@
-# Isolated one-shot PUBLIC market transport consistency diagnostic.
+# ARCHIVED/HARD-DISABLED: one-shot WS capture succeeded, public REST returned HTTP 451.
 # Raw events remain on ephemeral runner only. No export, Release or live effect.
 name: Research 609 WS REST Crosscheck One Shot
 
 on:
-  push:
-    branches: [research/aggtrade-public-pilot-609-20261013]
-    paths: [.github/workflows/research_609_rest_crosscheck_once.yml]
+  workflow_dispatch: # Archived and disabled after HTTP 451 REST result on 2026-10-13
 
 permissions:
   contents: read
@@ -16,7 +14,7 @@ concurrency:
 
 jobs:
   public-crosscheck:
-    if: github.repository == '007andra/nexus7-bot'
+    if: ${{ false }} # No rerun: REST returned HTTP 451 from runner
     runs-on: ubuntu-latest
     timeout-minutes: 9
     permissions:
