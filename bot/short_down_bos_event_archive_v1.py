@@ -273,3 +273,39 @@ def verify(directory, *, session_id):
         }
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return reject("ARCHIVE_MISSING_OR_CORRUPT")
+
+
+def prepare_anchor_receipt(directory, *, session_id):
+    """Metadata-only local digest to be independently posted after review.
+
+    Creating this record neither publishes an anchor nor proves storage
+    durability, Binance authenticity, source completeness or actual fills.
+    """
+    checked = verify(directory, session_id=session_id)
+    if checked.get("status") != "SELF_CHAIN_VERIFIED_UNATTESTED":
+        return {
+            **AUTHORITY, "status": "ANCHOR_REFUSED",
+            "reason": checked.get("reason", "ARCHIVE_UNVERIFIED"),
+            "github_anchor_published": False,
+            "independent_source_attestation": False,
+        }
+    raw = (Path(directory) / (session_id + ".manifest.json")).read_bytes()
+    if len(raw) > 250_000:
+        return {**AUTHORITY, "status": "ANCHOR_REFUSED",
+                "reason": "OVERSIZED_MANIFEST",
+                "github_anchor_published": False}
+    meta = json.loads(raw)
+    return {
+        **AUTHORITY,
+        "status": "ANCHOR_PREPARED_NOT_PUBLISHED",
+        "version": VERSION,
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "final_event_chain_sha256": meta["final_hash"],
+        "event_count": checked["event_count"],
+        "data_bytes": meta["archive_data_bytes"],
+        "github_anchor_published": False,
+        "durable_remote_copy_proven": False,
+        "independent_source_attestation": False,
+        "real_exchange_fills_proven": False,
+        "live_allowed": False,
+    }
