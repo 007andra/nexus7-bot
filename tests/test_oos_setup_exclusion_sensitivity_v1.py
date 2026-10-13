@@ -30,6 +30,36 @@ def report():
 
 
 class SetupSensitivityTests(unittest.TestCase):
+    def test_real_rounded_log_approved_only_remainder_is_not_net_proof(self):
+        cases = [
+            (60, -0.000951, -0.006443, 0.001357231884),
+            (240, -0.018586, -0.032932, -0.012556521739),
+        ]
+        for horizon, baseline, excluded, expected in cases:
+            with self.subTest(horizon=horizon):
+                r = audit.approved_only_remainder(
+                    horizon_min=horizon, approved_n=98,
+                    approved_avg_return=baseline, excluded_approved_n=29,
+                    excluded_approved_avg_return=excluded)
+                self.assertEqual(r["remaining_approved_n"], 69)
+                self.assertAlmostEqual(r["remaining_approved_avg_return"], expected)
+                self.assertFalse(r["selection_lift_proven"])
+                self.assertFalse(r["net_return_proven"])
+                self.assertFalse(r["live_allowed"])
+                self.assertTrue(r["historical_rounding_uncertainty"])
+
+    def test_approved_only_invalid_scope_refused(self):
+        with self.assertRaisesRegex(ValueError, "RCA_INVALID_HORIZON"):
+            audit.approved_only_remainder(
+                horizon_min=5, approved_n=98,
+                approved_avg_return=0.0, excluded_approved_n=29,
+                excluded_approved_avg_return=-0.01)
+        with self.assertRaisesRegex(ValueError, "RCA_INVALID_APPROVED_EXCLUSION"):
+            audit.approved_only_remainder(
+                horizon_min=60, approved_n=10,
+                approved_avg_return=0.0, excluded_approved_n=10,
+                excluded_approved_avg_return=-0.01)
+
     def test_momentum_exclusion_is_only_a_retrospective_hypothesis(self):
         x = audit.evaluate(report())
         self.assertEqual(x["status"], "HISTORICAL_SETUP_SENSITIVITY_ONLY")
