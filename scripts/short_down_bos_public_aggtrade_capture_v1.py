@@ -38,6 +38,33 @@ def _args(argv=None):
     return args
 
 
+def _now():
+    """Monotonic clock, kept separate for deterministic deadline regression."""
+    return time.monotonic()
+
+
+async def _receive_or_expire(connection, *, deadline, last_received_at):
+    """Finish a healthy timed session without hiding an actual 15s stall.
+
+    The final wait is bounded by remaining capture time. Expiration of
+    that shorter wait is a normal end, provided a recent trade was seen.
+    The full 15s silence timeout always fails closed.
+    """
+    now = _now()
+    remaining = deadline - now
+    if remaining <= 0:
+        if now - last_received_at >= 15.0:
+            raise asyncio.TimeoutError("STREAM_STALE_AT_DEADLINE")
+        return None
+    try:
+        return await asyncio.wait_for(connection.recv(), timeout=min(15.0, remaining))
+    except asyncio.TimeoutError:
+        now = _now()
+        if remaining < 15.0 and now >= deadline and now - last_received_at < 15.0:
+            return None
+        raise
+
+
 async def capture(args):
     # No imports/connection until manual CLI activation, separate from live.
     import websockets
@@ -58,19 +85,20 @@ async def capture(args):
             url, ping_interval=20, ping_timeout=20, close_timeout=5,
             max_queue=2048, max_size=4096,
         ) as connection:
+            last_received_at = _now()
             while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                # A silent market-feed stalls fail closed; no reconnect or
-                # artificial restitch of epochs, and no claim about no trades.
-                received = await asyncio.wait_for(
-                    connection.recv(), timeout=min(15.0, remaining)
+                # A full 15s feed stall still invalidates this session;
+                # the final shorter deadline expiry is an ordinary stop.
+                received = await _receive_or_expire(
+                    connection, deadline=deadline, last_received_at=last_received_at
                 )
+                if received is None:
+                    break
                 payload = json.loads(received)
                 if not isinstance(payload, dict):
                     raise ValueError("UNEXPECTED_WS_PAYLOAD")
                 writer.append(payload, received_ms=time.time_ns() // 1_000_000)
+                last_received_at = _now()
         sealed = writer.seal()
     except Exception:
         writer.abort()
