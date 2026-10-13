@@ -547,7 +547,11 @@ def format_worst_groups(report, *, horizon=60, limit=10):
     rows = []
     for dimension, groups in dims.items():
         for row in groups:
-            if row["allowed_n"] < MIN_GROUP_N or row["allowed_avg_return"] is None:
+            if not isinstance(row, dict):
+                continue
+            allowed_n = row.get("allowed_n")
+            if (type(allowed_n) is not int or allowed_n < MIN_GROUP_N
+                    or _finite(row.get("allowed_avg_return")) is None):
                 continue
             rows.append(row)
     rows.sort(
