@@ -182,7 +182,8 @@ async def _fail_predispatch(client, symbol: str, side: str, qty, idem_key, reaso
 
 
 async def _mark_dispatch_attempted(client, body: dict) -> None:
-    oid = str(body.get("clientOid") or "") if isinstance(body, dict) else ""
+    # KuCoin names the idempotency key clientOid, Binance newClientOrderId.
+    oid = str(body.get("clientOid") or body.get("newClientOrderId") or "") if isinstance(body, dict) else ""
     if not oid.startswith("bgx7-"): return
     order = _managed_order_by_oid(client, oid)
     if order is None: raise RuntimeError("managed order missing at dispatch boundary")
