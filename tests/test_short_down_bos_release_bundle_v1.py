@@ -168,13 +168,13 @@ class BundleTests(unittest.TestCase):
                 item = {key: row[key] for key in ("seq", "received_ms", "event")}
                 row["hash"] = tape._hash(previous, item)
                 previous = row["hash"]
-            new_segment = b"".join(tape._canonical(row) + b"\\n" for row in rows)
+            new_segment = b"".join(tape._canonical(row) + b"\n" for row in rows)
             segment.write_bytes(new_segment)
             manifest = origin / f"{SID}.manifest.json"
             metadata = json.loads(manifest.read_bytes())
             metadata["final_hash"] = previous
             metadata["archive_data_bytes"] = len(new_segment)
-            manifest.write_bytes(tape._canonical(metadata) + b"\\n")
+            manifest.write_bytes(tape._canonical(metadata) + b"\n")
             # This is a valid recomputed chain: digest verification alone
             # cannot protect confidential fields.
             self.assertEqual(
