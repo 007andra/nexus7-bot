@@ -1,11 +1,10 @@
-# One-time, research-only PUBLIC METADATA receipt. Raw Binance trades never uploaded.
+# ARCHIVED, HARD-DISABLED 2026-10-13 after successful public receipt pilot.
+# No future release publishing or capture from this workflow; retain for audit.
 # This is NOT a raw event tape Release or a #609 NEXUS cohort approval.
 name: Research 609 Public Integrity Receipt
 
 on:
-  push:
-    branches: [research/aggtrade-public-pilot-609-20261013]
-    paths: [.github/workflows/research_609_public_receipt_release_once.yml]
+  workflow_dispatch: # Archived for audit only: job hard-disabled after the successful pilot
 
 permissions:
   contents: read
@@ -16,7 +15,7 @@ concurrency:
 
 jobs:
   public-metadata-only:
-    if: github.repository == '007andra/nexus7-bot'
+    if: ${{ false }} # One-shot publication completed 2026-10-13; never rerun
     runs-on: ubuntu-latest
     timeout-minutes: 9
     permissions:
