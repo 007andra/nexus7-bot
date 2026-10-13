@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from bot import short_down_bos_event_archive_v1 as archive
 
@@ -101,6 +102,40 @@ class ArchiveTests(unittest.TestCase):
                         writer.append(trade(2), received_ms=BASE_MS + 22)
                     self.assertEqual(
                         archive.verify(d, session_id=SID)["status"], "NOT_PROVEN")
+
+    def test_strict_disk_ceiling_aborts_without_a_sealed_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Apply the actual local-disk safety mechanism on tiny fixtures.
+            with patch.object(archive, "MAX_SESSION_BYTES", 400):
+                writer = archive.Archive(
+                    d, symbol=SYMBOL, session_id=SID,
+                    generation=1, started_ms=BASE_MS)
+                writer.append(trade(0), received_ms=BASE_MS + 2)
+                with self.assertRaisesRegex(
+                    ValueError, "LOCAL_DISK_BUDGET_EXCEEDED"
+                ):
+                    writer.append(trade(1), received_ms=BASE_MS + 12)
+                self.assertEqual(
+                    archive.verify(d, session_id=SID)["status"],
+                    "NOT_PROVEN")
+                with self.assertRaises(ValueError):
+                    writer.seal()
+
+    def test_byte_accounting_matches_sealed_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            writer = archive.Archive(
+                d, symbol=SYMBOL, session_id=SID,
+                generation=1, started_ms=BASE_MS)
+            for i in range(3):
+                writer.append(trade(i), received_ms=BASE_MS + 10 * i + 2)
+            manifest = writer.seal()
+            data = (Path(d) / (SID + ".0000.jsonl")).read_bytes()
+            self.assertEqual(manifest["archive_data_bytes"], len(data))
+            self.assertEqual(
+                manifest["local_disk_budget_bytes"], archive.MAX_SESSION_BYTES)
+            self.assertEqual(
+                archive.verify(d, session_id=SID)["status"],
+                "SELF_CHAIN_VERIFIED_UNATTESTED")
 
     def test_rolling_segments_preserves_order_and_hash_chain(self):
         with tempfile.TemporaryDirectory() as d:
