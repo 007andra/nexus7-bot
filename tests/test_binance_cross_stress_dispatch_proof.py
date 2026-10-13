@@ -70,6 +70,9 @@ class DispatchProof(unittest.IsolatedAsyncioTestCase):
         self.requests = []
         self.client = BinanceClient()
         self.engine = RuntimeTradingEngine(self.client)
+        # Production attaches the registry in start_private_websocket; the
+        # dispatch provenance mark looks the managed order up there.
+        self.client._order_registry = self.engine.orders
         self.engine.paper_trade = False
         self.engine._durable_state_enforced = True
         self.engine._durable_state_ok = True
