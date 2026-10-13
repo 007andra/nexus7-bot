@@ -106,6 +106,17 @@ def evaluate(report: dict, *, min_remainder=MIN_REMAINDER_PER_ARM) -> dict:
         if (sum(arms[0][0] for arms in groups.values()) != a_n
                 or sum(arms[1][0] for arms in groups.values()) != r_n):
             raise ValueError("RCA_GROUP_COUNTS_DO_NOT_PARTITION")
+        # An inconsistent aggregate source can otherwise manufacture any
+        # desired exclusion result even while preserving total sample counts.
+        for arm_idx, n, mean in ((0, a_n, a_m), (1, r_n, r_m)):
+            expected_sum = math.fsum(
+                arms[arm_idx][0] * (arms[arm_idx][1] or 0.0)
+                for arms in groups.values()
+            )
+            actual_sum = n * mean
+            tolerance = max(1e-10, abs(actual_sum) * 1e-8)
+            if abs(expected_sum - actual_sum) > tolerance:
+                raise ValueError("RCA_GROUP_MEANS_NOT_CONSISTENT")
         for setup in SETUPS:
             if setup not in groups:
                 results.append({
