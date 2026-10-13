@@ -95,7 +95,7 @@ jobs:
               'real_exchange_fills_proven': False,
               'live_allowed': False,
           }
-          assert len(receipt) == 16
+          assert len(receipt) == 17
           out = root / 'proof' / 'public-integrity-receipt.json'
           out.write_text(json.dumps(receipt, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
           assert out.stat().st_size < 4096
