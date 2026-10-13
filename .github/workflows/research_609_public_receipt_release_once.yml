@@ -1,0 +1,177 @@
+# One-time, research-only PUBLIC METADATA receipt. Raw Binance trades never uploaded.
+# This is NOT a raw event tape Release or a #609 NEXUS cohort approval.
+name: Research 609 Public Integrity Receipt
+
+on:
+  push:
+    branches: [research/aggtrade-public-pilot-609-20261013]
+    paths: [.github/workflows/research_609_public_receipt_release_once.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-609-public-receipt-once
+  cancel-in-progress: false
+
+jobs:
+  public-metadata-only:
+    if: github.repository == '007andra/nexus7-bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout isolated source with no persisted credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify isolated ref and SHA; do not touch production
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/research/aggtrade-public-pilot-609-20261013'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo 'Isolated public research ref verified'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install public WebSocket client only
+        run: python -m pip install --disable-pip-version-check --no-input websockets==12.0
+      - name: Record a new real 60-second PUBLIC BTCUSDT market session
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nexus609/raw" "$RUNNER_TEMP/nexus609/proof"
+          python -I - "$RUNNER_TEMP/nexus609/raw" > "$RUNNER_TEMP/nexus609/capture.json" <<'PY'
+          import runpy, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          sys.argv = ['scripts/short_down_bos_public_aggtrade_capture_v1.py',
+                      '--symbol', 'BTCUSDT', '--directory', sys.argv[1],
+                      '--duration-seconds', '60', '--ack-local-not-durable']
+          runpy.run_path('scripts/short_down_bos_public_aggtrade_capture_v1.py', run_name='__main__')
+          PY
+          echo 'Raw capture local only; no raw stream printed or exported'
+      - name: Strictly verify raw and ZIP locally; emit a public METADATA-ONLY receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, os.environ['GITHUB_WORKSPACE'])
+          from bot.short_down_bos_event_archive_v1 import verify
+          from bot.short_down_bos_release_bundle_v1 import prepare_bundle, verify_bundle
+          root = Path(os.environ['RUNNER_TEMP']) / 'nexus609'
+          captured = json.loads((root / 'capture.json').read_text())
+          sid = captured['session_id']
+          assert captured['status'] == 'SELF_CHAIN_VERIFIED_UNATTESTED'
+          assert captured['symbol'] == 'BTCUSDT'
+          assert verify(root / 'raw', session_id=sid)['status'] == 'SELF_CHAIN_VERIFIED_UNATTESTED'
+          archive = root / 'proof' / (sid + '.zip')
+          proof = prepare_bundle(root / 'raw', session_id=sid, destination=archive)
+          assert proof['status'] == 'BUNDLE_SELF_VERIFIED_NOT_UPLOADED'
+          assert proof['event_count'] >= 2
+          assert verify_bundle(archive)['bundle_sha256'] == proof['bundle_sha256']
+          assert proof['github_asset_uploaded'] is False and proof['live_allowed'] is False
+          assert archive.stat().st_size < 16 * 1024 * 1024 + 1_000_000
+          receipt = {
+              'schema': 'NEXUS_PUBLIC_AGGTRADE_INTEGRITY_RECEIPT_V1',
+              'source': 'BINANCE_USDM_PUBLIC_AGGTRADE_WS',
+              'symbol': 'BTCUSDT',
+              'session_id': sid,
+              'event_count': proof['event_count'],
+              'zip_bytes_local_unpublished': proof['compressed_bytes'],
+              'zip_sha256_local_unpublished': proof['bundle_sha256'],
+              'manifest_sha256_local_unpublished': proof['manifest_sha256'],
+              'event_chain_sha256_local_unpublished': proof['final_event_chain_sha256'],
+              'runner_sha': os.environ['GITHUB_SHA'],
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'raw_event_data_included': False,
+              'public_fields_only_validated': True,
+              'independent_market_provenance': False,
+              'remote_raw_archive_retained': False,
+              'real_exchange_fills_proven': False,
+              'live_allowed': False,
+          }
+          assert len(receipt) == 16
+          out = root / 'proof' / 'public-integrity-receipt.json'
+          out.write_text(json.dumps(receipt, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
+          assert out.stat().st_size < 4096
+          print('REAL_SESSION_SELF_VERIFIED_NOT_ATTESTED')
+          print('event_count=' + str(proof['event_count']))
+          print('unpublished_zip_sha256=' + proof['bundle_sha256'])
+          print('receipt_bytes=' + str(out.stat().st_size))
+          print('raw_archive_publication=false')
+          PY
+      - name: Publish exactly the PUBLIC integrity receipt; never publish raw ZIP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: 45ebd59d4ca54072e1233ce0667085d92b70ab1d
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = false
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          tag="research-aggtrade-609-receipt-20261013-${GITHUB_RUN_ID}"
+          asset="$RUNNER_TEMP/nexus609/proof/public-integrity-receipt.json"
+          test -s "$asset"
+          test "$(stat -c %s "$asset")" -lt 4096
+          python -I - "$asset" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert x['raw_event_data_included'] is False
+          assert x['remote_raw_archive_retained'] is False
+          assert x['live_allowed'] is False
+          assert x['symbol'] == 'BTCUSDT'
+          assert set(x)=={'schema','source','symbol','session_id','event_count',
+             'zip_bytes_local_unpublished','zip_sha256_local_unpublished',
+             'manifest_sha256_local_unpublished','event_chain_sha256_local_unpublished',
+             'runner_sha','workflow_run_id','raw_event_data_included',
+             'public_fields_only_validated','independent_market_provenance',
+             'remote_raw_archive_retained','real_exchange_fills_proven','live_allowed'}
+          PY
+          cat > "$RUNNER_TEMP/nexus609/proof/RELEASE_NOTES.txt" <<'TXT'
+          Research-only public metadata receipt for one manually bounded USD-M public aggTrade capture.
+          Contains only source identification, event counts and cryptographic hashes.
+          NO RAW TRADE ROWS, NO MARKET-DATA RESALE OR REDISTRIBUTION, NO ACCOUNT DATA,
+          NO BINANCE API KEY, NO PRIVATE ORDERS, NO STRATEGY SIGNALS.
+          Original raw archive is NOT attached or remotely retained.
+          Event origin independently attested: NO.  NEXUS-7 LIVE allowed: NO.
+          This release does NOT promote, deploy or merge any NEXUS-7 research code.
+          TXT
+          gh release create "$tag" "$asset" \
+            --repo "$GITHUB_REPOSITORY" --target "$BASE_SHA" --prerelease \
+            --title "Research #609 public market integrity receipt $GITHUB_RUN_ID" \
+            --notes-file "$RUNNER_TEMP/nexus609/proof/RELEASE_NOTES.txt"
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo 'Published metadata-only prerelease, raw archive remains unpublished'
+      - name: Download asset anonymously from GitHub Releases and byte-verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG"
+          url="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[0].url')"
+          case "$url" in
+            https://github.com/007andra/nexus7-bot/releases/download/*) ;;
+            *) echo 'Unsafe or absent public release asset URL'; exit 1;;
+          esac
+          curl --fail --location --retry 2 --silent --show-error --output "$RUNNER_TEMP/nexus609/downloaded-receipt.json" "$url"
+          cmp "$RUNNER_TEMP/nexus609/proof/public-integrity-receipt.json" "$RUNNER_TEMP/nexus609/downloaded-receipt.json"
+          sha256sum "$RUNNER_TEMP/nexus609/downloaded-receipt.json"
+          python -I - "$RUNNER_TEMP/nexus609/downloaded-receipt.json" <<'PY'
+          import json,sys
+          r=json.load(open(sys.argv[1], encoding='utf-8'))
+          assert r['raw_event_data_included'] is False and r['remote_raw_archive_retained'] is False
+          assert r['public_fields_only_validated'] is True and r['live_allowed'] is False
+          print('PUBLIC_METADATA_RELEASE_DOWNLOADED_AND_BYTE_VERIFIED')
+          print('verified_event_count=' + str(r['event_count']))
+          print('unpublished_zip_sha256=' + r['zip_sha256_local_unpublished'])
+          PY
+          echo "VERIFIED_RELEASE_TAG=$RELEASE_TAG"
+
+# No actions/upload-artifact, no caches, no raw archive publication.
+# This workflow intentionally never connects to Binance account/private endpoints.
