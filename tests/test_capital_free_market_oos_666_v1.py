@@ -210,6 +210,19 @@ class CapitalFreeProtocolTests(unittest.TestCase):
         out = study.paired_market_observations(bad, {})
         self.assertEqual(out["reason"], "INVALID_SELECTION_OR_OUTCOMES")
         self.assertEqual(out["paired_count"], 0)
+        valid = freeze([signal(0)])
+        for mutation in (
+            {"selected": None},
+            {"selected": []},
+            {"source_attested": True},
+            {"eligible_for_609_enrollment": True},
+        ):
+            with self.subTest(mutation=mutation):
+                forged = {**valid, **mutation}
+                blocked = study.paired_market_observations(forged, {})
+                self.assertEqual(blocked["reason"],
+                                 "INVALID_SELECTION_OR_OUTCOMES")
+                self.assertFalse(blocked["live_allowed"])
 
 
 if __name__ == "__main__":
