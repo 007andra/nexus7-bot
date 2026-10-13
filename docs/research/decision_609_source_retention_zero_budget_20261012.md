@@ -242,3 +242,37 @@ a new cohort membership rule or treat synthetic evaluation as execution proof.
 **Safety authority:** live_allowed=false, promotion_allowed=false;
 preserve 30% historical drawdown limit/HWM, risk gates, strategy vetoes,
 orders and production deployment unchanged.
+
+
+### Independent REST consistency feasibility — HTTP 451, 2026-10-13
+
+Binance's official [USD-M REST aggregate trades reference](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data)
+documents GET /fapi/v1/aggTrades, no account key, records from the past
+48 hours only, maximum 1,000 rows per response, request weight 20, and a
+less-than-one-hour start/end interval if both timestamps are supplied.
+This might support short-window source consistency *where permitted*;
+it cannot reconstruct a permanent historical tape after 48 hours or prove
+the protected order price path and exchange fills.
+
+One bounded, read-only feasibility run on a separate research-only GitHub
+Actions branch:
+https://github.com/007andra/nexus7-bot/actions/runs/38400667184
+
+- The public 60-second BTCUSDT WebSocket capture completed, and no raw trade
+  events were uploaded. No API key, LIVE account, database or order interaction.
+- A subsequent direct TLS GET to fapi.binance.com/fapi/v1/aggTrades failed
+  with **HTTP 451** from that hosted runner. Its cause and applicability to
+  other networks were NOT independently determined; do not silently switch
+  jurisdictions, hosts or proxies to bypass access restrictions.
+- Therefore WS-vs-REST matching was **NOT PROVEN**. No eligible #609 natural
+  candidate, archive durability, independent source attestation, market
+  execution proof, or LIVE authority can be credited.
+- The one-shot REST crosscheck workflow was disabled after the negative
+  result, including removal of its push trigger and a hard-false job gate.
+  No further probe or publishing action is planned via that workflow.
+
+**Current next decision:** await authoritative rights clarity before raw
+public redistribution; if permitted, design bounded, permissible retention
+and re-download for a future real capture, never claim to recover the runner's
+ephemeral old tape. Do not substitute a restricted REST endpoint or the
+public receipt alone for the original #609 economic evidence requirements.
