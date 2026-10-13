@@ -1,0 +1,117 @@
+# Isolated one-shot PUBLIC market transport consistency diagnostic.
+# Raw events remain on ephemeral runner only. No export, Release or live effect.
+name: Research 609 WS REST Crosscheck One Shot
+
+on:
+  push:
+    branches: [research/aggtrade-public-pilot-609-20261013]
+    paths: [.github/workflows/research_609_rest_crosscheck_once.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-609-ws-rest-crosscheck
+  cancel-in-progress: false
+
+jobs:
+  public-crosscheck:
+    if: github.repository == '007andra/nexus7-bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout isolated research branch with no GitHub token stored
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install only public websockets client
+        run: python -m pip install --disable-pip-version-check --no-input websockets==12.0
+      - name: Read exactly one 60s BTCUSDT public WS session to ephemeral disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/research/aggtrade-public-pilot-609-20261013'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/nexus609rest/raw"
+          python -I - "$RUNNER_TEMP/nexus609rest/raw" > "$RUNNER_TEMP/nexus609rest/capture.json" <<'PY'
+          import runpy,sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          sys.argv = ['scripts/short_down_bos_public_aggtrade_capture_v1.py',
+               '--symbol', 'BTCUSDT', '--directory', sys.argv[1],
+               '--duration-seconds', '60', '--ack-local-not-durable']
+          runpy.run_path('scripts/short_down_bos_public_aggtrade_capture_v1.py', run_name='__main__')
+          PY
+          echo 'Public stream received; raw bytes never printed'
+      - name: Reverify local chain then compare WS trade IDs and fields against bounded REST
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I - <<'PY'
+          import json, os, sys, time, urllib.parse, urllib.request
+          from decimal import Decimal
+          from pathlib import Path
+          sys.path.insert(0, os.environ['GITHUB_WORKSPACE'])
+          from bot.short_down_bos_event_archive_v1 import verify
+          root=Path(os.environ['RUNNER_TEMP'])/'nexus609rest'
+          receipt=json.loads((root/'capture.json').read_text())
+          sid=receipt['session_id']
+          checked=verify(root/'raw',session_id=sid)
+          assert checked['status']=='SELF_CHAIN_VERIFIED_UNATTESTED'
+          assert receipt['symbol']=='BTCUSDT'
+          manifest=json.loads((root/'raw'/(sid+'.manifest.json')).read_bytes())
+          ws=[]
+          for seg in manifest['segments']:
+              with (root/'raw'/seg['file']).open('rb') as handle:
+                  for raw in handle:
+                      ws.append(json.loads(raw)['event'])
+          assert 2<=len(ws)<=10000
+          assert len(ws)==checked['event_count']
+          assert ws[-1]['T'] >= ws[0]['T']
+          start=int(ws[0]['a'])
+          last=int(ws[-1]['a'])
+          assert last-start+1==len(ws)
+          # Official /fapi/v1/aggTrades returns last 48h only, <=1000 rows/call.
+          # Limit to at most 11 pages (strictly below 1m interval need).
+          matched=0
+          cursor=start
+          field_keys=('a','f','l','T','m')
+          for page in range(11):
+              if matched==len(ws):
+                  break
+              qs=urllib.parse.urlencode({'symbol':'BTCUSDT','fromId':cursor,'limit':1000})
+              request=urllib.request.Request(
+                  'https://fapi.binance.com/fapi/v1/aggTrades?'+qs,
+                  headers={'User-Agent':'nexus7-research-609-public-crosscheck/1.0'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  assert response.status==200
+                  body=response.read(700000)
+              batch=json.loads(body)
+              assert isinstance(batch,list) and 1<=len(batch)<=1000
+              for item in batch:
+                  if matched==len(ws):
+                      break
+                  observed=ws[matched]
+                  assert all(type(item[k]) is type(observed[k]) and item[k]==observed[k] for k in field_keys), 'REST_ID_OR_TIME_FIELD_MISMATCH'
+                  assert Decimal(str(item['p']))==Decimal(str(observed['p'])), 'REST_PRICE_MISMATCH'
+                  assert Decimal(str(item['q']))==Decimal(str(observed['q'])), 'REST_QTY_MISMATCH'
+                  matched+=1
+              cursor=start+matched
+              if matched<len(ws):
+                  time.sleep(0.15)
+          assert matched==len(ws), 'REST_TRADES_INCOMPLETE'
+          print('PUBLIC_WS_REST_SAME_EXCHANGE_CONSISTENCY_PASS')
+          print('verified_events=' + str(matched))
+          print('first_agg_id=' + str(start))
+          print('last_agg_id=' + str(last))
+          print('raw_events_remotely_retained=false')
+          print('independent_third_party_attestation=false')
+          print('research_only=true, live_allowed=false')
+          PY
+
+# No GitHub release/tag, workflow artifact upload, DB, Binance keys or LIVE effects.
