@@ -1,0 +1,86 @@
+# One-shot, bounded research feasibility probe. No trading, no release, no raw artifact.
+# Restricted to creation/update of this workflow on its isolated research branch.
+name: Research Public aggTrade 609 Probe
+
+on:
+  push:
+    branches:
+      - research/aggtrade-public-pilot-609-20261013
+    paths:
+      - .github/workflows/research_public_aggtrade_pilot_609.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-public-aggtrade-609
+  cancel-in-progress: false
+
+jobs:
+  capture-once:
+    if: github.repository == '007andra/nexus7-bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout isolated research ref without persisted GitHub credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify ref and exact checked-out source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/research/aggtrade-public-pilot-609-20261013'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo 'Research-only isolated checkout verified'
+      - name: Configure Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install only public WebSocket dependency
+        run: python -m pip install --disable-pip-version-check --no-input websockets==12.0
+      - name: Capture exactly one 60-second public BTCUSDT tape
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nexus609/raw" "$RUNNER_TEMP/nexus609/out"
+          PYTHONPATH="$GITHUB_WORKSPACE" python scripts/short_down_bos_public_aggtrade_capture_v1.py \
+            --symbol BTCUSDT --directory "$RUNNER_TEMP/nexus609/raw" \
+            --duration-seconds 60 --ack-local-not-durable \
+            > "$RUNNER_TEMP/nexus609/capture.json"
+          echo 'One isolated local capture completed; no event payloads logged'
+      - name: Reverify archive and public-only ZIP locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE" python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from bot.short_down_bos_event_archive_v1 import verify
+          from bot.short_down_bos_release_bundle_v1 import prepare_bundle, verify_bundle
+          root = Path(os.environ['RUNNER_TEMP']) / 'nexus609'
+          output = json.loads((root / 'capture.json').read_text())
+          sid = output['session_id']
+          assert output['status'] == 'SELF_CHAIN_VERIFIED_UNATTESTED'
+          checked = verify(root / 'raw', session_id=sid)
+          assert checked['status'] == 'SELF_CHAIN_VERIFIED_UNATTESTED'
+          target = root / 'out' / (sid + '.zip')
+          proof = prepare_bundle(root / 'raw', session_id=sid, destination=target)
+          assert proof['status'] == 'BUNDLE_SELF_VERIFIED_NOT_UPLOADED'
+          assert proof['event_count'] >= 2
+          assert target.stat().st_size <= 18 * 1024 * 1024
+          assert verify_bundle(target)['bundle_sha256'] == proof['bundle_sha256']
+          assert proof['live_allowed'] is False
+          assert proof['github_asset_uploaded'] is False
+          print('PUBLIC_CAPTURE_LOCAL_SELF_VERIFIED')
+          print('event_count=' + str(proof['event_count']))
+          print('compressed_bytes=' + str(proof['compressed_bytes']))
+          print('zip_sha256=' + proof['bundle_sha256'])
+          print('chain_sha256=' + proof['final_event_chain_sha256'])
+          print('github_release_created=false; no raw files uploaded; not independently attested')
+          PY
+
+# No artifacts, cache, release, issue writes, or persistence of raw trades.
+# GitHub-hosted runner temp directory is destroyed after the job.
