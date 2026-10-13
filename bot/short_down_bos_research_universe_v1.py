@@ -123,3 +123,83 @@ def qualify(configured_symbols, snapshots, *, now_ms):
         "evaluated": len(configured_symbols),
         "reasons": reasons,
     }
+
+
+SCAN_FIELDS = (
+    "symbols_scanned", "strategy_signals", "fresh_candidates",
+    "nexus_evaluated", "nexus_approved", "counterfactual_nexus_allowed",
+)
+
+
+def diagnose_609_scan_boundary(market_report, scan_summary):
+    """Offline interpret two snapshots; never enroll or manufacture a candidate.
+
+    A market-only observation can be available while the production-equivalent
+    scanner has zero viable symbols. The counters are untrusted caller input:
+    they cannot establish durable candidate provenance or 609 membership.
+    """
+    def reject(reason):
+        return {
+            **AUTHORITY, "status": "BOUNDARY_NOT_PROVEN", "reason": reason,
+            "observed_new_nexus_approvals": None,
+            "cohort_membership_proven": False,
+            "market_source_attested": False,
+        }
+
+    if not isinstance(market_report, dict) or not isinstance(scan_summary, dict):
+        return reject("INVALID_EVIDENCE_ENVELOPE")
+    if (market_report.get("market_data_only") is not True
+            or market_report.get("eligible_for_609_enrollment") is not False
+            or market_report.get("live_allowed") is not False
+            or market_report.get("status") not in (
+                "MARKET_OBSERVATION_READY", "NO_MARKET_READY_SYMBOLS"
+            )):
+        return reject("UNSAFE_MARKET_REPORT")
+    ready = market_report.get("market_ready_symbols")
+    if (not isinstance(ready, tuple)
+            or len(ready) > MAX_SYMBOLS
+            or any(not isinstance(sym, str) or
+                   not re.fullmatch(r"[A-Z0-9]{2,20}USDT", sym) for sym in ready)
+            or len(set(ready)) != len(ready)
+            or (market_report["status"] == "MARKET_OBSERVATION_READY") != bool(ready)):
+        return reject("INVALID_MARKET_SCOPE")
+    if (scan_summary.get("shadow_scan_enabled") is not True
+            or scan_summary.get("shadow_only") is not True
+            or scan_summary.get("live_entries_blocked") is not True
+            or scan_summary.get("population") != "HARD_GATE_SHADOW"
+            or scan_summary.get("live_eligible") is not False
+            or scan_summary.get("decision_effect") != "NONE"
+            or scan_summary.get("execution_effect") != "NONE"):
+        return reject("INVALID_CANONICAL_SCANNER_AUTHORITY")
+    if any(type(scan_summary.get(k)) is not int or scan_summary[k] < 0
+           for k in SCAN_FIELDS):
+        return reject("INVALID_SCANNER_COUNTER")
+    n = scan_summary
+    if (n["strategy_signals"] < n["fresh_candidates"]
+            or n["fresh_candidates"] < n["nexus_evaluated"]
+            or n["nexus_evaluated"] < n["nexus_approved"]
+            or (n["symbols_scanned"] == 0 and n["strategy_signals"] != 0)):
+        return reject("INCONSISTENT_SCANNER_COUNTERS")
+    if n["symbols_scanned"] == 0:
+        stage = ("ZERO_CANONICAL_SCAN_WITH_MARKET_OBSERVABLE"
+                 if ready else "ZERO_CANONICAL_SCAN_MARKET_UNPROVEN")
+    elif n["fresh_candidates"] == 0:
+        stage = "NO_FRESH_CANONICAL_CANDIDATES"
+    elif n["nexus_evaluated"] == 0:
+        stage = "CANONICAL_NEXUS_NOT_CALLED"
+    elif n["nexus_approved"] == 0:
+        stage = "NO_CANONICAL_NEXUS_APPROVALS"
+    else:
+        stage = "APPROVAL_COUNTERS_NEED_DURABLE_CANDIDATE_PROOF"
+    return {
+        **AUTHORITY, "status": "RESEARCH_BOUNDARY_DIAGNOSED_UNATTESTED",
+        "reason": stage,
+        "market_ready_symbols": ready,
+        "symbols_scanned_in_snapshot": n["symbols_scanned"],
+        "observed_new_nexus_approvals": n["nexus_approved"],
+        "counterfactual_allowed_excluded": n["counterfactual_nexus_allowed"],
+        "cohort_membership_proven": False,
+        "market_source_attested": False,
+        "enrollment_count": None,
+        "required_action": "PRESERVE_ORIGINAL_609_CANONICAL_ELIGIBILITY",
+    }
