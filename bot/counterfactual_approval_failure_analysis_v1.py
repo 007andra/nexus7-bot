@@ -101,7 +101,14 @@ def _cost_fraction(raw):
     exit_slip = _finite(snap.get("exit_slippage"))
     if None in (fee, entry_slip, exit_slip):
         return None
-    return 2.0 * fee + entry_slip + exit_slip
+    # Never let a negative/implausible cost component cancel a positive
+    # component and masquerade as a valid nonnegative round trip.
+    if not (0.0 <= fee <= 0.05
+            and 0.0 <= entry_slip <= 0.1
+            and 0.0 <= exit_slip <= 0.1):
+        return None
+    cost = 2.0 * fee + entry_slip + exit_slip
+    return cost if cost <= 0.1 else None
 
 
 def _stop_width(raw):
