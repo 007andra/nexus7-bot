@@ -112,3 +112,34 @@ Added on this draft branch; still **zero real candidates**, no capture run.
   redistribution still need review; nothing raw is published.
 - Operator confirmation of items 2 and 3; frozen `effective_t0` comment on
   #666 before the first capture; human review of this branch.
+
+## Addendum B — capture route and operating rules (2026-10-13, before t0)
+
+Operator authorized the full sequence on 2026-10-13 (chat instruction "O resto
+eu autorizo tudo"). Fixed here before any capture:
+
+- **Route:** `bot/capital_free_market_collector_666_v1.py` runs as a separate
+  Railway service (region `ams`; Binance answers HTTP 451 to US hosts), started
+  through `research/railway.collector666.toml`. It reads only public
+  `GET /fapi/v1/klines` (no API key, no signed endpoint), never shares
+  variables with the trading service, and is pinned to one CI-approved commit.
+  It is not a GitHub Actions job and has no cron.
+- **Parameters:** code defaults at `45ebd59`. `MIN_ENTRY_SCORE=60` matches
+  production (shadow-scan log `Score=55/100 < 60`). Production sets
+  `MIN_RR_RATIO` and `TAKER_FEE` as Railway variables whose values were not
+  readable (redacted); BOS_BREAK geometry is fixed at R:R 3.0 so
+  `MIN_RR_RATIO<=3` cannot change it, but a production `TAKER_FEE` different
+  from 0.0006 would shift the minimum-move pre-filter slightly. The study
+  therefore measures the strategy at code defaults, stated as such.
+- **Readings of the gate** (Addendum A item 3) are accepted as fixed.
+- **Each 15m boundary t > effective_t0:** 25 symbols in universe order, three
+  REST reads each (rows with closeTime >= t dropped), isolated observer, every
+  attempt logged in `observations.jsonl` with the raw-body SHA-256; envelopes
+  go to the manifest; heads of all chains are submitted to public
+  OpenTimestamps calendars and printed to the service log.
+- **Outcomes:** for enrolled members only, the 15m candle closing at t+60m
+  and t+240m is read inside that same 15m window. A missed window is never
+  filled later; the pair stays censored and the cohort reports
+  `INSUFFICIENT_EVIDENCE` rather than replacing members.
+- **Code changes after t0** produce a new implementation SHA, which the
+  manifest header rejects: any fix means a new cohort version, not an edit.
