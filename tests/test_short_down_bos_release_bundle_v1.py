@@ -1,4 +1,5 @@
 """Offline deterministic GitHub-release *candidate* package, NO publishing."""
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -102,6 +103,52 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(bundle.verify_bundle(target)["status"],
                              "BUNDLE_NOT_PROVEN")
             self.assertFalse(bundle.verify_bundle(target)["live_allowed"])
+
+    def test_public_export_rejects_private_manifest_fields_even_if_local_archive_sealed(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            origin, out = root / "raw", root / "export"
+            origin.mkdir()
+            out.mkdir()
+            sealed(origin)
+            original = out / "original.zip"
+            bundle.prepare_bundle(origin, session_id=SID, destination=original)
+            altered = out / "extra_manifest_field.zip"
+            with zipfile.ZipFile(original, "r") as inp:
+                contents = [(x.filename, inp.read(x.filename)) for x in inp.infolist()]
+            with zipfile.ZipFile(altered, "w") as z:
+                for name, data in contents:
+                    if name.endswith(".manifest.json"):
+                        metadata = json.loads(data)
+                        metadata["private_account_key"] = "MUST_NOT_PUBLISH"
+                        data = json.dumps(metadata, sort_keys=True).encode()
+                    z.writestr(name, data)
+            self.assertEqual(bundle.verify_bundle(altered)["reason"],
+                             "PRIVATE_OR_UNEXPECTED_FIELD_IN_PUBLIC_TAPE")
+
+    def test_public_export_rejects_private_event_payload_fields(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            origin, out = root / "raw", root / "export"
+            origin.mkdir()
+            out.mkdir()
+            sealed(origin)
+            original = out / "original.zip"
+            bundle.prepare_bundle(origin, session_id=SID, destination=original)
+            altered = out / "extra_event_field.zip"
+            with zipfile.ZipFile(original, "r") as inp:
+                contents = [(x.filename, inp.read(x.filename)) for x in inp.infolist()]
+            with zipfile.ZipFile(altered, "w") as z:
+                for name, data in contents:
+                    if name.endswith(".jsonl"):
+                        rows = data.splitlines()
+                        first = json.loads(rows[0])
+                        first["event"]["orderId"] = "SECRET"
+                        rows[0] = json.dumps(first).encode()
+                        data = b"\\n".join(rows) + b"\\n"
+                    z.writestr(name, data)
+            self.assertEqual(bundle.verify_bundle(altered)["reason"],
+                             "PRIVATE_OR_UNEXPECTED_FIELD_IN_PUBLIC_TAPE")
 
     def test_missing_manifest_or_symlink_refused(self):
         with tempfile.TemporaryDirectory() as parent:
