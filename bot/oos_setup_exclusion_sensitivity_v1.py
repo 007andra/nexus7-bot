@@ -165,3 +165,39 @@ def public_summary(report: dict) -> dict:
         key: value for key, value in result.items()
         if key != "results"
     } | {"results": result["results"]}
+
+
+def approved_only_remainder(*, horizon_min: int, approved_n: int,
+                            approved_avg_return: float,
+                            excluded_approved_n: int,
+                            excluded_approved_avg_return: float) -> dict:
+    """Bounded gross arithmetic when rejected setup denominators are unavailable.
+
+    The provided means may be rounded public log values, hence the result is
+    approximate. It DOES NOT compute or label a selection lift or economic edge.
+    Never reinterpret the same historical cohort as an independent OOS test.
+    """
+    if horizon_min not in HORIZONS:
+        raise ValueError("RCA_INVALID_HORIZON")
+    n = _count(approved_n)
+    removed = _count(excluded_approved_n)
+    if removed <= 0 or removed >= n:
+        raise ValueError("RCA_INVALID_APPROVED_EXCLUSION")
+    whole = _avg(approved_avg_return, n)
+    deleted = _avg(excluded_approved_avg_return, removed)
+    remainder_n, remainder_avg = _without(n, whole, removed, deleted)
+    return {
+        **AUTHORITY,
+        "status": "APPROVED_ONLY_RETROSPECTIVE_GROSS",
+        "horizon_min": horizon_min,
+        "approved_n": n,
+        "excluded_approved_n": removed,
+        "remaining_approved_n": remainder_n,
+        "remaining_approved_avg_return": remainder_avg,
+        "gross_break_even_cost_fraction": max(0.0, remainder_avg),
+        "rejected_setup_denominator_proven": False,
+        "selection_lift_proven": False,
+        "net_return_proven": False,
+        "historical_rounding_uncertainty": True,
+        "prospective_confirmation_required": True,
+    }
