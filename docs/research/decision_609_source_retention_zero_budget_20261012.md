@@ -65,3 +65,103 @@ https://docs.github.com/en/repositories/releasing-projects-on-github/about-relea
 No session has been captured/archived in the current project workflow; GitHub API reports zero Releases at time of authorization. The connected GitHub toolset in this ChatGPT session can review repository metadata and edit code/issues but does **not** expose an action to create a Release or upload binary assets. **No Release, tag or asset has been created, and no cost or successful download-and-reverify has been claimed.**
 
 Next acceptable operational sequence: (a) exact-head CI and security PASS on this privacy-gate patch; (b) source-only pilot capture outside the live bot, with bounded quota and a source-consistency check; (c) verify the public-only ZIP locally; (d) use a GitHub Release publishing workflow with separately checked billing/quota and explicit visibility, then re-download and compare ZIP SHA-256 and contents; (e) only then record archive persistence as demonstrated. Until independent market-data provenance, actual fee and funding records, and protective execution evidence are verified, financial OOS remains `NOT_PROVEN` and LIVE `NO_GO`.
+
+
+## Reproducible bounded-public pilot runbook — 13/10/2026
+
+Commands below are a prepared procedure, **not a claim of an actual feed capture
+or published release**. The operator already authorized one PUBLIC market-trades-only
+pilot. Execute on a separately checked-out copy of PR #610 on an isolated local
+Linux/macOS host with public internet; NOT on the LIVE Railway bot or its
+PostgreSQL. Python 3.11+ is required. This is source-format research, not
+canonical enrollment into the first 60 of #609.
+
+### Capture manually, without Binance credentials
+
+~~~sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install websockets==12.0
+mkdir -p ./research_public_raw ./research_public_out
+PYTHONPATH=. python scripts/short_down_bos_public_aggtrade_capture_v1.py \
+  --symbol BTCUSDT \
+  --directory ./research_public_raw \
+  --duration-seconds 60 \
+  --ack-local-not-durable
+~~~
+
+Record the actual session_id reported in stdout. Never invent or backfill it.
+Abort on gaps, errors, timeouts, missing seal or the 16 MiB raw-data cap.
+
+### Reverify and prepare privacy-gated ZIP
+
+~~~sh
+export SESSION_ID='PASTE_THE_REAL_REPORTED_SESSION_ID'
+PYTHONPATH=. python - <<'PY'
+import os
+from pathlib import Path
+from bot.short_down_bos_event_archive_v1 import verify
+from bot.short_down_bos_release_bundle_v1 import prepare_bundle, verify_bundle
+sid = os.environ["SESSION_ID"]
+raw = Path("research_public_raw")
+out = Path("research_public_out") / (sid + ".zip")
+assert verify(raw, session_id=sid)["status"] == "SELF_CHAIN_VERIFIED_UNATTESTED"
+receipt = prepare_bundle(raw, session_id=sid, destination=out)
+assert receipt["status"] == "BUNDLE_SELF_VERIFIED_NOT_UPLOADED"
+assert receipt["event_count"] >= 2
+assert verify_bundle(out)["bundle_sha256"] == receipt["bundle_sha256"]
+print("ZIP:", out)
+print("EXPECTED_SHA256:", receipt["bundle_sha256"])
+print("EVENT_COUNT:", receipt["event_count"])
+PY
+~~~
+
+An existing output ZIP is intentionally never overwritten; use a new
+destination directory if a previous file already exists. Inspect ZIP entries
+and manifest for private data. Only the preapproved public-only schema can
+pass the exporter; self-hashes do not independently authenticate Binance.
+
+### Publication — manual GitHub step, not available in connector
+
+GitHub official Releases documentation currently specifies up to 1,000 assets
+per release, each **under 2 GiB**, with no published aggregate release-size or
+bandwidth quotas:
+https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases
+
+These published limits do **not** verify this account's billing or a retention
+SLA. Review the GitHub account's billing/quota before posting.
+The connected GitHub tools do **not** expose Release creation or upload of binary
+release assets. After local ZIP validation, use repository Releases > Draft a new
+release in the GitHub web interface. Choose a distinct research tag with a target
+commit that does not activate PR #610 in LIVE, and mark it a pre-release.
+Before tag creation, inspect whether tag-triggered workflows can deploy.
+Attach exactly the verified public-only ZIP. Release notes must not include
+account, strategy, candidate, API credential or proprietary information.
+If privacy, billing or tag deployment preflight fails, **do not publish**.
+The user's PUBLIC-pilot consent is already recorded above; it need not be
+requested again.
+
+### Download and verify a published asset independently
+
+Use the actual published asset URL, never a guessed one:
+
+~~~sh
+curl --fail --location --output research_public_out/downloaded.zip \
+  'PASTE_ACTUAL_PUBLISHED_ASSET_DOWNLOAD_URL'
+sha256sum research_public_out/downloaded.zip
+PYTHONPATH=. python - <<'PY'
+from bot.short_down_bos_release_bundle_v1 import verify_bundle
+result = verify_bundle("research_public_out/downloaded.zip")
+assert result["status"] == "BUNDLE_SELF_VERIFIED_NOT_UPLOADED"
+print("DOWNLOADED_SHA256:", result["bundle_sha256"])
+print("EVENT_COUNT:", result["event_count"])
+print("FINAL_CHAIN_SHA256:", result["final_event_chain_sha256"])
+PY
+~~~
+
+Compare SHA-256, event count and final chain digest to the original local
+receipt and only then report a real Release URL and receipt in issue #609.
+The verifier's github_release_created=false flag is deliberately static: an
+offline ZIP cannot attest that GitHub actually accepted its upload.
+Public trades alone still do not prove protected order fills, fees/funding,
+independent provenance, 60 prospective canonical approvals or LIVE readiness.
