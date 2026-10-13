@@ -28,7 +28,8 @@ def source(captured=BASE, horizon=60):
     first_grid = (start + path.INTERVAL_MS - 1) // path.INTERVAL_MS * path.INTERVAL_MS
     starts = list(range(first_grid, end, path.INTERVAL_MS))
     if start % path.INTERVAL_MS:
-        starts.append(start)
+        # Off-grid 60/240m requires two independent nonempty partial windows.
+        starts.extend((start, first_grid + (horizon // 15 - 1) * path.INTERVAL_MS))
     points = sorted(set([start - 100, end + 100] + [v + 100 for v in starts]))
     raw = [{"e": "aggTrade", "s": SYM, "a": 200 + i,
             "T": stamp, "p": "100.0"} for i, stamp in enumerate(points)]
