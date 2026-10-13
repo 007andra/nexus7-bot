@@ -23,6 +23,11 @@ MAX_SEGMENTS = 500
 MAX_BYTES_PER_LINE = 4096
 # Hard local disk ceiling per opt-in session. Exceeding it INVALIDATES the run.
 MAX_SESSION_BYTES = 16 * 1024 * 1024
+# Receipt clock must not lead the exchange trade time by more than 5s, nor
+# trail it by more than the collector's 15s stall bound. A backlog or clock
+# step outside this window makes the receipt time unusable as evidence.
+MAX_CLOCK_LEAD_MS = 5_000
+MAX_RECEIVE_LAG_MS = 15_000
 _NAME = re.compile(r"[a-z0-9_-]{12,64}\Z")
 _SYMBOL = re.compile(r"[A-Z0-9]{2,20}USDT\Z")
 AUTHORITY = {
@@ -73,6 +78,14 @@ def _normalize(raw, symbol):
     return {k: raw[k] for k in allowed}
 
 
+def _receipt_timing_ok(ev, received_ms, last_received_ms):
+    """Exchange-vs-receipt clock window and non-decreasing receipt order."""
+    return (type(received_ms) is int
+            and ev["T"] <= received_ms + MAX_CLOCK_LEAD_MS
+            and received_ms - ev["T"] <= MAX_RECEIVE_LAG_MS
+            and (last_received_ms is None or received_ms >= last_received_ms))
+
+
 def _open_exclusive(path):
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -106,6 +119,7 @@ class Archive:
         self._segment_events = 0
         self._last_id = None
         self._last_stamp = None
+        self._last_received = None
         self._bytes_written = 0
         self._dead = False
         self._sealed = False
@@ -127,7 +141,7 @@ class Archive:
         try:
             ev = _normalize(raw, self.header["symbol"])
             if (type(received_ms) is not int or received_ms < self.header["started_ms"]
-                    or ev["T"] > received_ms + 5_000
+                    or not _receipt_timing_ok(ev, received_ms, self._last_received)
                     or (self._last_id is not None and ev["a"] != self._last_id + 1)
                     or (self._last_stamp is not None and ev["T"] < self._last_stamp)):
                 raise ValueError("SOURCE_EVENT_GAP_OR_CLOCK")
@@ -153,6 +167,7 @@ class Archive:
             self._segments[-1]["count"] += 1
             self._last_id = ev["a"]
             self._last_stamp = ev["T"]
+            self._last_received = received_ms
         except Exception:
             self.abort()
             raise
@@ -222,7 +237,7 @@ def verify(directory, *, session_id):
         anchor = hashlib.sha256(_canonical(header)).hexdigest()
         count = 0
         total_bytes = 0
-        last_id = last_stamp = None
+        last_id = last_stamp = last_received = None
         for idx, info in enumerate(segments):
             name = f"{session_id}.{idx:04d}.jsonl"
             if (info.get("file") != name or type(info.get("count")) is not int
@@ -248,7 +263,8 @@ def verify(directory, *, session_id):
                             or item["seq"] != count + 1
                             or type(item["received_ms"]) is not int
                             or item["received_ms"] < meta["started_ms"]
-                            or ev["T"] > item["received_ms"] + 5_000
+                            or not _receipt_timing_ok(
+                                ev, item["received_ms"], last_received)
                             or (last_id is not None and ev["a"] != last_id + 1)
                             or (last_stamp is not None and ev["T"] < last_stamp)):
                         return reject("EVENT_TAMPER_OR_GAP")
@@ -257,6 +273,7 @@ def verify(directory, *, session_id):
                     found += 1
                     last_id = ev["a"]
                     last_stamp = ev["T"]
+                    last_received = item["received_ms"]
                 if found != info["count"]:
                     return reject("TRUNCATED_SEGMENT")
         if (count < 2 or count != meta["event_count"]
