@@ -130,6 +130,7 @@ def _time_bucket(raw):
 
 def _records(payloads):
     from bot import min_order_counterfactual_nexus_v1 as study
+    from bot import rca594_matched_bbo_v1 as paired_bbo
 
     out = {}
     for raw in payloads:
@@ -146,7 +147,16 @@ def _records(payloads):
             continue
         score = row.get("score_snapshot")
         score = score if isinstance(score, dict) else {}
+        bbo_cost = paired_bbo.captured_bbo_cost_fraction(
+            raw,
+            candidate_id=cid,
+            symbol=str(row.get("symbol") or raw.get("symbol") or "UNKNOWN"),
+            side=str(row.get("side") or raw.get("side") or "UNKNOWN").upper(),
+            setup=str(row.get("setup") or raw.get("setup") or "UNKNOWN"),
+            regime=str(row.get("regime") or raw.get("regime") or "UNKNOWN"),
+        )
         out[cid] = {
+            "matched_bbo_cost_fraction": bbo_cost,
             "candidate_id": cid,
             "allowed": row.get("execution_allowed") is True,
             "status": row.get("status"),
@@ -432,6 +442,7 @@ def build_report(payloads, outcomes60=(), outcomes240=(), *, epoch_id="UNKNOWN",
     # Research-only descriptive control for simple side/regime/setup mix effects.
     # It cannot identify a causal approval edge or change runtime decisions.
     from bot import selection_bias_stratified_v1 as strata
+    from bot import rca594_matched_bbo_v1 as paired_bbo
     strata60 = strata.evaluate(m60)
     strata240 = strata.evaluate(m240)
 
@@ -469,6 +480,8 @@ def build_report(payloads, outcomes60=(), outcomes240=(), *, epoch_id="UNKNOWN",
         "dimensions_240m": dimensions240,
         "setup_cost_coverage_60m": _setup_cost_coverage(m60),
         "setup_cost_coverage_240m": _setup_cost_coverage(m240),
+        "setup_matched_bbo_60m": paired_bbo.setup_coverage(m60),
+        "setup_matched_bbo_240m": paired_bbo.setup_coverage(m240),
         "selection_strata_60m": strata60,
         "selection_strata_240m": strata240,
         "minimum_group_n_for_interpretation": MIN_GROUP_N,
@@ -642,6 +655,8 @@ def _setup_partition_public_suffix(report, *, horizon):
 
 
 def format_worst_groups(report, *, horizon=60, limit=10):
+    from bot import rca594_matched_bbo_v1 as paired_bbo
+
     dims = report["dimensions_60m"] if horizon == 60 else report["dimensions_240m"]
     rows = []
     for dimension, groups in dims.items():
@@ -673,6 +688,7 @@ def format_worst_groups(report, *, horizon=60, limit=10):
         + " small_n_guard=true association_not_causation=true execution_effect=NONE "
         + _setup_partition_public_suffix(report, horizon=horizon)
         + " " + _format_setup_cost_coverage(report, horizon=horizon)
+        + " " + paired_bbo.format_coverage(report, horizon=horizon)
     )
 
 
