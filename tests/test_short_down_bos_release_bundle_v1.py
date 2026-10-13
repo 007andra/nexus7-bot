@@ -145,7 +145,7 @@ class BundleTests(unittest.TestCase):
                         first = json.loads(rows[0])
                         first["event"]["orderId"] = "SECRET"
                         rows[0] = json.dumps(first).encode()
-                        data = b"\\n".join(rows) + b"\\n"
+                        data = b"\n".join(rows) + b"\n"
                     z.writestr(name, data)
             self.assertEqual(bundle.verify_bundle(altered)["reason"],
                              "PRIVATE_OR_UNEXPECTED_FIELD_IN_PUBLIC_TAPE")
