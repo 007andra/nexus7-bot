@@ -6,3 +6,5 @@ __pycache__/
 logs/
 models/
 .DS_Store
+research_cache/
+artifacts/raw_signal_edge_v1/
