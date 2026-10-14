@@ -31,7 +31,9 @@ _ALIASES: dict[str, str] = {}
 
 
 def exchange() -> str:
-    raw = os.environ.get("EXCHANGE", "kucoin").strip().lower().replace("-", "_")
+    # Default matches bot.exchange (Binance is the only venue). An explicit
+    # EXCHANGE=binance, as production sets, yields the same scope as before.
+    raw = os.environ.get("EXCHANGE", "binance").strip().lower().replace("-", "_")
     return "binance" if raw in {"binance", "binance_usdm", "binance_futures", "usdm"} else "kucoin"
 
 

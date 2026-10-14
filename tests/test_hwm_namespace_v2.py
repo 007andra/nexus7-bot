@@ -8,7 +8,8 @@ from bot import hwm_namespace
 class HwmNamespaceV2Tests(unittest.TestCase):
     def test_namespace_is_stable_and_non_secret(self):
         env = {
-            "KUCOIN_API_KEY": "secret-account-identifier",
+            "EXCHANGE": "binance",
+            "BINANCE_API_KEY": "secret-account-identifier",
             "DATABASE_URL": "postgresql://user:password@db.internal:5432/nexus",
             "RAILWAY_ENVIRONMENT_NAME": "production",
         }
@@ -18,7 +19,7 @@ class HwmNamespaceV2Tests(unittest.TestCase):
             legacy = hwm_namespace.legacy_hwm_namespace()
         # NOVO-03 (v3): no Railway identity in the financial namespace.
         self.assertNotIn("environment=", ns)
-        self.assertIn("exchange=kucoin", ns)
+        self.assertIn("exchange=binance", ns)
         self.assertNotIn("secret-account-identifier", ns)
         self.assertNotIn("password", ns)
         self.assertTrue(key.startswith("risk:account_equity_peak:v3:"))
@@ -28,10 +29,11 @@ class HwmNamespaceV2Tests(unittest.TestCase):
         base = {
             "DATABASE_URL": "postgresql://u:p@db.internal:5432/nexus",
             "RAILWAY_ENVIRONMENT_NAME": "production",
+            "EXCHANGE": "binance",
         }
-        with patch.dict(os.environ, {**base, "KUCOIN_API_KEY": "account-a"}, clear=True):
+        with patch.dict(os.environ, {**base, "BINANCE_API_KEY": "account-a"}, clear=True):
             a = hwm_namespace.equity_peak_key()
-        with patch.dict(os.environ, {**base, "KUCOIN_API_KEY": "account-b"}, clear=True):
+        with patch.dict(os.environ, {**base, "BINANCE_API_KEY": "account-b"}, clear=True):
             b = hwm_namespace.equity_peak_key()
         self.assertNotEqual(a, b)
 
@@ -40,7 +42,8 @@ class HwmNamespaceV2Tests(unittest.TestCase):
         # must not make the HWM peak (drawdown gate) disappear.
         base = {
             "DATABASE_URL": "postgresql://u:p@db.internal:5432/nexus",
-            "KUCOIN_API_KEY": "account-a",
+            "EXCHANGE": "binance",
+            "BINANCE_API_KEY": "account-a",
         }
         with patch.dict(os.environ, {**base, "RAILWAY_ENVIRONMENT_NAME": "production"}, clear=True):
             prod = hwm_namespace.equity_peak_key()

@@ -1,6 +1,9 @@
-"""KuCoin Futures readers for the execution-cost model.
+"""KuCoin Futures public market-data readers for research replays.
 
-The venue-neutral formulas live in bot.execution_model.
+The historical OOS replay evidence was built on KuCoin public data; these
+readers keep it reproducible. They never touch the trading adapter (removed)
+and never place, change or close orders. The venue-neutral cost formulas live
+in bot.execution_model.
 """
 from __future__ import annotations
 
@@ -10,6 +13,15 @@ from bot.execution_model import _finite, configured_taker_fee
 from bot.logger import log
 
 _FUNDING_CHUNK_MS = 90 * 24 * 60 * 60 * 1000
+_BASE_ALIAS = {"BTC": "XBT"}  # KuCoin names Bitcoin XBT
+
+
+def to_kucoin(symbol: str) -> str:
+    """BTCUSDT -> XBTUSDTM, the static rule of the former trading adapter."""
+    if not symbol.endswith("USDT"):
+        return symbol
+    base = symbol[:-4]
+    return f"{_BASE_ALIAS.get(base, base)}USDTM"
 
 
 async def fetch_actual_taker_fee(client, symbol: str) -> tuple[float, str]:
@@ -18,7 +30,6 @@ async def fetch_actual_taker_fee(client, symbol: str) -> tuple[float, str]:
     if not hasattr(client, "_get"):
         return fallback, "env_fallback"
     try:
-        from bot.kucoin import to_kucoin
         data = await client._get(
             "/api/v1/trade-fees",
             {"symbol": to_kucoin(symbol)},
@@ -42,7 +53,6 @@ async def fetch_public_funding_history(
     if not hasattr(client, "_get") or end_ms <= start_ms:
         return []
     try:
-        from bot.kucoin import to_kucoin
         kucoin_symbol = to_kucoin(symbol)
         by_ts: dict[int, dict] = {}
         cursor = int(start_ms)

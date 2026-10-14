@@ -80,6 +80,8 @@ def _import_output(exchange, code):
                LIVE_TRADING_CONFIRMED="I_UNDERSTAND_THE_RISK")
     for key in ("PYTHONSTARTUP", "PYTHONPATH"):
         env.pop(key, None)
+    if exchange is None:
+        env.pop("EXCHANGE", None)
     # Run outside the repo so the repo's sitecustomize is not auto-loaded and
     # only the imported modules speak.
     code = f"import sys; sys.path.insert(0, {str(ROOT)!r}); " + code
@@ -90,13 +92,18 @@ def _import_output(exchange, code):
 
 class BinanceVenueTruthTests(unittest.TestCase):
     def test_binance_live_banner_names_binance_never_kucoin(self):
-        text = _import_output("binance", "import bot.exchange, bot.kucoin")
+        text = _import_output("binance", "import bot.exchange")
         self.assertIn("ordens serão enviadas à Binance USD-M Futures", text)
         self.assertNotIn("ordens serão enviadas à KuCoin", text)
 
-    def test_kucoin_live_banner_unchanged_when_kucoin_is_active(self):
-        text = _import_output("kucoin", "import bot.exchange, bot.kucoin")
-        self.assertEqual(text.count("ordens serão enviadas à KuCoin"), 1)
+    def test_removed_kucoin_venue_fails_closed_at_import(self):
+        text = _import_output("kucoin", "import bot.exchange")
+        self.assertIn("Unsupported EXCHANGE='kucoin'; only binance is supported", text)
+        self.assertNotIn("OPERAÇÃO REAL ATIVA", text)
+
+    def test_unset_exchange_selects_binance(self):
+        text = _import_output(None, "import bot.exchange as e; print('VENUE=' + e.EXCHANGE_NAME)")
+        self.assertIn("VENUE=binance", text)
 
     def test_signal_notification_names_active_venue(self):
         text = _import_output("binance", (
@@ -131,12 +138,6 @@ class PilotCredentialVenueTests(unittest.TestCase):
         self.assertEqual(blockers, ["1_AUTH: credenciais Binance indisponíveis (ValueError)"])
         self.assertNotIn("secret", blockers[0])
 
-    def test_kucoin_venue_keeps_kucoin_check(self):
-        from bot import exchange, kucoin, pilot
-
-        with patch.object(exchange, "is_binance", return_value=False), \
-                patch.object(kucoin, "API_KEY", ""):
-            self.assertEqual(pilot._venue_credential_blockers(), ["1_AUTH: credenciais KuCoin ausentes"])
 
 
 if __name__ == "__main__":

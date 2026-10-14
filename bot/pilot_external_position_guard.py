@@ -20,17 +20,9 @@ from bot.conditional_stop_protection import conditional_stop_confirmed, _to_base
 from bot.restart_ownership_recovery import prove_restart_ownership
 
 
-def install(TradingEngine, log, exchange_name: str = "kucoin"):
+def install(TradingEngine, log, exchange_name: str = "binance"):
     if getattr(TradingEngine, "_pilot_external_position_guard_patched", False):
         return
-
-    # Shadow position forensics currently contains KuCoin-specific transport
-    # assumptions. The ownership boundary below is exchange-neutral and is
-    # installed for Binance without importing those KuCoin hooks.
-    if str(exchange_name).lower() == "kucoin":
-        from bot import kucoin as _kucoin
-        from bot import shadow_position_forensics as _shadow_position_forensics
-        _shadow_position_forensics.install(_kucoin, log)
 
     original_guard = getattr(TradingEngine, "_guard_naked_positions", None)
     original_sync = getattr(TradingEngine, "_sync_positions", None)

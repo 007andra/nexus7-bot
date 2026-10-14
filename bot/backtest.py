@@ -113,7 +113,7 @@ def _historical_integrity(candles: list, interval: str) -> dict:
 
 
 async def _kucoin_page(client, symbol: str, interval: str, start_ms: int, end_ms: int) -> list:
-    from bot.kucoin import to_kucoin
+    from bot.kucoin_execution_model import to_kucoin
 
     data = await client._get(
         "/api/v1/kline/query",

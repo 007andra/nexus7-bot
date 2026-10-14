@@ -24,7 +24,6 @@ from bot.drawdown_persistence import (
     restore_zero_equity_peak_fail_closed,
 )
 from bot.engine import TradingEngine as CoreTradingEngine
-from bot.kucoin_position_units import KuCoinPositionUnitAdapter
 from bot.exchange import EXCHANGE_NAME
 from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
@@ -39,14 +38,6 @@ class TradingEngine(CoreTradingEngine):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # KuCoin exposes native contract counts and therefore needs an inbound
-        # normalization proxy. Binance USD-M already exposes base-asset
-        # quantities, so wrapping it in the KuCoin multiplier adapter would
-        # convert the quantity a second time.
-        if EXCHANGE_NAME == "kucoin" and not isinstance(
-            self.client, KuCoinPositionUnitAdapter
-        ):
-            self.client = KuCoinPositionUnitAdapter(self.client)
         if not isinstance(self.risk, ProfessionalRiskAdapter):
             self.risk = ProfessionalRiskAdapter(self.risk)
 
@@ -54,16 +45,14 @@ class TradingEngine(CoreTradingEngine):
         """Honor the runtime position-unit boundary exactly once.
 
         The legacy core calls this helper after reading ``get_positions()`` and
-        historically expected that read to expose native contracts. In the BGX
-        runtime, ``KuCoinPositionUnitAdapter`` already normalizes every
-        ``get_positions()[\"size\"]`` to base-asset units and labels the row
-        ``sizeUnit=BASE_ASSET``. Reapplying the multiplier here would therefore
-        shrink/grow exposure a second time.
+        historically expected that read to expose native contracts. Binance
+        USD-M reports base-asset quantities, so applying a contract multiplier
+        here would shrink/grow exposure.
 
         This override is intentionally limited to the composed runtime. The
         unwrapped legacy core keeps its original contracts-to-base conversion.
         """
-        if isinstance(self.client, KuCoinPositionUnitAdapter) or EXCHANGE_NAME == "binance":
+        if EXCHANGE_NAME == "binance":
             value = float(quantity)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(

@@ -26,10 +26,7 @@ def install(TradingEngine, log) -> None:
     from bot import news_semantic_hardening as news_semantics
     from bot import nexus_ai
     from bot import nexus_regime_transition_consistency as regime_transition
-    from bot import kucoin_contract_risk_hardening as cross_risk_hardening
     from bot import exchange as exchange_runtime
-    from bot import cross_geometry_target_policy as cross_target_policy
-    from bot import cross_portfolio_stress
     from bot import binance_cross_portfolio_stress
     from bot import operator_runtime_policy
     from bot import final_sizing_invariants
@@ -49,10 +46,8 @@ def install(TradingEngine, log) -> None:
     from bot import order_visibility_race_hardening
     from bot import policy_log_throttle
     from bot import partial_tp_execution_hardening
-    from bot import exchange_accounting_evidence
     from bot import binance_accounting_evidence
     from bot import binance_exit_forensics
-    from bot import daily_pnl_exchange_reconciliation
     from bot import daily_stop_override_telemetry
     from bot import external_origin_runtime
     from bot import market_risk_runtime
@@ -64,7 +59,7 @@ def install(TradingEngine, log) -> None:
     ExchangeClient = exchange_runtime.ExchangeClient
     TAKER_FEE = exchange_runtime.TAKER_FEE
 
-    # Install before any KuCoinClient instance is created by FastAPI lifespan.
+    # Install before any exchange client instance is created by FastAPI lifespan.
     # This is logging-only and cannot affect exchange request semantics.
     auth_log_redaction.install(log)
     state_authority_observability.log_database_authority(log)
@@ -82,8 +77,6 @@ def install(TradingEngine, log) -> None:
     partial_tp_execution_hardening.install(
         TradingEngine, ExchangeClient, TAKER_FEE, log
     )
-    if exchange_runtime.is_kucoin():
-        cross_target_policy.install(cross_risk_hardening, log)
     # Binance public market-data freshness is native to BinanceClient
     # (market_data_health, written by the /market websocket handler) and read
     # by PilotGuard gate 11; no overlay may wrap or duplicate it.
@@ -104,23 +97,14 @@ def install(TradingEngine, log) -> None:
     if exchange_runtime.is_binance():
         binance_exit_forensics.install(TradingEngine, log)
     daily_pnl_estimate_lineage_hardening.install(durable_daily_pnl, log)
-    if exchange_runtime.is_kucoin():
-        daily_pnl_exchange_reconciliation.install(exchange_accounting_evidence, log)
-        external_origin_runtime.install(
-            TradingEngine, exchange_accounting_evidence, log
-        )
-    else:
-        external_origin_runtime.install(
-            TradingEngine, binance_accounting_evidence, log
-        )
-        from bot import runtime_release_contract
+    external_origin_runtime.install(
+        TradingEngine, binance_accounting_evidence, log
+    )
+    from bot import runtime_release_contract
 
-        log.warning(runtime_release_contract.current().accounting_log())
+    log.warning(runtime_release_contract.current().accounting_log())
     regime_transition.install(nexus_ai, log)
-    if exchange_runtime.is_binance():
-        binance_cross_portfolio_stress.install(TradingEngine, log)
-    else:
-        cross_portfolio_stress.install(TradingEngine, log)
+    binance_cross_portfolio_stress.install(TradingEngine, log)
 
     runtime_contract_guard.install(
         TradingEngine, PilotGuard, nexus_ai, core_engine, log

@@ -539,9 +539,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         guard = pilot.PilotGuard()
         with patch.object(pilot, "PILOT_ENABLED", True), patch(
-            "bot.kucoin.API_KEY", "test-key"
-        ), patch("bot.kucoin.API_SECRET", "test-secret"), patch(
-            "bot.kucoin.API_PASSPHRASE", "test-pass"
+            "bot.binance._assert_signing_credentials_available", lambda: None
         ), patch.dict(os.environ, {
             "PAPER_TRADE": "false",
             "PILOT_ACCOUNT_CONFIRMED": "true",
@@ -566,9 +564,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         guard = pilot.PilotGuard()
         exchange_entry_mutations = 0
         with patch.object(pilot, "PILOT_ENABLED", True), patch(
-            "bot.kucoin.API_KEY", "test-key"
-        ), patch("bot.kucoin.API_SECRET", "test-secret"), patch(
-            "bot.kucoin.API_PASSPHRASE", "test-pass"
+            "bot.binance._assert_signing_credentials_available", lambda: None
         ), patch.dict(os.environ, {
             "PAPER_TRADE": "false",
             "PILOT_ACCOUNT_CONFIRMED": "true",
@@ -619,9 +615,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         }
         patches = (
             patch.object(pilot, "PILOT_ENABLED", True),
-            patch("bot.kucoin.API_KEY", "test-key"),
-            patch("bot.kucoin.API_SECRET", "test-secret"),
-            patch("bot.kucoin.API_PASSPHRASE", "test-pass"),
+            patch("bot.binance._assert_signing_credentials_available", lambda: None),
             patch.dict(os.environ, env, clear=False),
         )
         for p in patches:

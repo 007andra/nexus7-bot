@@ -1,7 +1,7 @@
 """Offline regressions for live NEXUS execution-cost calibration.
 
 These tests prove cost-context propagation without sending orders, changing
-Railway variables, or requiring KuCoin credentials.
+Railway variables, or requiring exchange credentials.
 """
 from __future__ import annotations
 
@@ -59,10 +59,12 @@ class _FakeClient:
         return {"bid": 99.99, "ask": 100.01, "lastPrice": 100.0}
 
     async def _get(self, endpoint, params=None, auth=False):
-        assert endpoint == "/api/v1/trade-fees"
+        # Binance USD-M account commission endpoint (production venue).
+        assert endpoint == "/fapi/v1/commissionRate"
+        assert params == {"symbol": "BTCUSDT"}
         assert auth is True
         self.fee_reads += 1
-        return {"takerFeeRate": "0.00042", "makerFeeRate": "0.0002"}
+        return {"takerCommissionRate": "0.00042", "makerCommissionRate": "0.0002"}
 
 
 class _FakeEngine:
@@ -110,7 +112,7 @@ def test_cost_context_propagates_through_asyncio_to_thread():
 
     assert abs(result["fee_seen"] - 0.00042) < 1e-12
     assert 0.00019 < result["slippage_seen"] < 0.00021
-    assert result["cost_source"] == "kucoin_actual_fee+ticker_half_spread_plus_impact"
+    assert result["cost_source"] == "binance_commission_rate+ticker_half_spread_plus_impact"
     assert engine.client.fee_reads == 1
 
 

@@ -104,9 +104,6 @@ jobs:
       - name: Pretrade market data fail-closed
         run: python -m unittest tests.test_pretrade_fail_closed -v
 
-      - name: Configured leverage is immutable at dispatch
-        run: python -m unittest tests.test_leverage_no_fallback -v
-
       - name: Full offline test suite
         run: python -m tests.run_offline
 
@@ -163,7 +160,7 @@ jobs:
       - name: Deterministic PAPER and SHADOW E2E safety pack
         run: |
           python -m unittest tests.test_shadow_post_ai_chain -v
-          python -m unittest tests.test_paper_mutations -v
+          python -m unittest tests.test_binance_paper_mutations -v
           python -m unittest tests.test_paper_signal_exit_idempotency -v
           python -m unittest tests.test_paper_wallet_restart -v
           python -m unittest tests.test_e2e_validation_contract -v
@@ -197,10 +194,7 @@ jobs:
       - name: Durable execution restart and idempotency
         run: python -m unittest tests.test_durable_execution_restart -v
 
-      - name: Durable intent before dispatch
-        run: python -m unittest tests.test_durable_dispatch_gate -v
-
-      - name: Binance LIVE-path engine safety pack (production venue)
+      - name: Binance LIVE-path engine safety pack (durable intent, AI gate, pilot limits, dispatch)
         run: |
           test -n "$TEST_POSTGRES_DSN"
           python -m unittest -v \
@@ -213,15 +207,6 @@ jobs:
 
       - name: Atomic PAPER database state
         run: python -m unittest tests.test_database_atomic_paper -v
-
-      - name: LIVE adapter chaos safety pack
-        run: python -m unittest tests.test_live_adapter_chaos -v
-
-      - name: KuCoin native TPSL protected-entry safety pack
-        run: python -m unittest tests.test_kucoin_native_tpsl -v
-
-      - name: KuCoin fill multiplier normalization safety pack
-        run: python -m unittest tests.test_kucoin_fill_normalization -v
 
       - name: Hardened entrypoint imports with unified thresholds
         env:

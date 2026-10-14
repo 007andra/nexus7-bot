@@ -119,22 +119,13 @@ def _venue_credential_blockers() -> List[str]:
     EXCHANGE=binance either blocked every entry or passed on unrelated
     leftover KuCoin secrets without proving Binance signing material.
     """
-    from bot import exchange
+    from bot import binance
 
-    if exchange.is_binance():
-        from bot import binance
-
-        try:
-            binance._assert_signing_credentials_available()
-        except Exception as exc:  # noqa: BLE001 - any failure is a fail-closed blocker
-            code = str(exc) if str(exc).startswith("BINANCE_") else type(exc).__name__
-            return [f"1_AUTH: credenciais Binance indisponíveis ({code})"]
-        return []
-
-    from bot.kucoin import API_KEY, API_SECRET, API_PASSPHRASE
-
-    if not (API_KEY and API_SECRET and API_PASSPHRASE):
-        return ["1_AUTH: credenciais KuCoin ausentes"]
+    try:
+        binance._assert_signing_credentials_available()
+    except Exception as exc:  # noqa: BLE001 - any failure is a fail-closed blocker
+        code = str(exc) if str(exc).startswith("BINANCE_") else type(exc).__name__
+        return [f"1_AUTH: credenciais Binance indisponíveis ({code})"]
     return []
 
 

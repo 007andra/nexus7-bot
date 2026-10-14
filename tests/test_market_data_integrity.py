@@ -2,7 +2,6 @@ import time
 from types import SimpleNamespace
 
 from bot.market_data_integrity import (
-    _rewrite_kucoin_ws_kline_volume,
     closed_candles,
     prepare_strategy_series,
     validate_nexus_candles,
@@ -26,36 +25,6 @@ def _series(n, interval_ms, last_close_ms):
     last_start = int(last_close_ms - interval_ms)
     first_start = last_start - (n - 1) * interval_ms
     return [_bar(first_start + i * interval_ms, 100 + i * 0.01) for i in range(n)]
-
-
-def test_kucoin_ws_ignores_documented_incorrect_volume_field():
-    msg = {
-        "topic": "/contractMarket/limitCandle:XBTUSDTM_15min",
-        "type": "message",
-        "data": {
-            "candles": [
-                "1789142400", "100", "101", "102", "99",
-                "999999",  # official Classic Futures docs mark this field incorrect
-                "42",      # transaction amount used by the integrity layer
-            ]
-        },
-    }
-    rewritten, changed = _rewrite_kucoin_ws_kline_volume(msg)
-    assert changed is True
-    assert rewritten["data"]["candles"][5] == "42"
-    assert rewritten["data"]["_bgx_volume_source"] == "transaction_amount_index_6"
-    # Do not mutate the websocket payload object observed by other code.
-    assert msg["data"]["candles"][5] == "999999"
-
-
-def test_kucoin_ws_kline_without_usable_amount_is_dropped():
-    msg = {
-        "topic": "/contractMarket/limitCandle:XBTUSDTM_15min",
-        "data": {"candles": ["1789142400", "100", "101", "102", "99", "7"]},
-    }
-    rewritten, changed = _rewrite_kucoin_ws_kline_volume(msg)
-    assert rewritten is None
-    assert changed is False
 
 
 def test_closed_selection_uses_time_boundary_not_list_length():
