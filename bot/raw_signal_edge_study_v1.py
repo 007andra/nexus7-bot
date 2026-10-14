@@ -113,22 +113,22 @@ def _isolate_worker() -> None:
     socket.setdefaulttimeout(1)
 
 
-def evaluate_symbol(symbol: str, k15: list, k1h: list, k4h: list, funding: list,
-                    *, start_ms: int, end_ms: int, fees: list[float]) -> list[dict]:
-    """Every production-stack signal for ``symbol`` with simulated outcomes."""
+def iter_signals(symbol: str, k15: list, k1h: list, k4h: list, *, start_ms: int,
+                 end_ms: int, horizon: int, windows=None, min_windows=None):
+    """Yield ``(i, decision_ts, sig, pullback)`` for every production-stack signal.
+
+    ``i`` indexes the 15m bar opening at the decision boundary (the entry bar).
+    Analyzer exceptions are yielded as ``(i, decision_ts, exc, None)``.
+    """
     from bot.backtest import _closed_window_by_ts, _timestamp_index
     from bot.config import cfg
-    from bot.execution_model import slippage_rate_for_symbol
     from bot.hard_gate_shadow_context import scope
-    from bot.nexus_oos_real_replay import _simulate_net_r
     from bot.strategy import Analyzer
 
     analyzer = Analyzer()
     ts15, ts1h, ts4h = _timestamp_index(k15), _timestamp_index(k1h), _timestamp_index(k4h)
-    slippage = slippage_rate_for_symbol(symbol)
-    horizon = PREREG["outcome_bars_15m"]
-    wins, mins = PREREG["windows"], PREREG["min_windows"]
-    rows = []
+    wins = windows or PREREG["windows"]
+    mins = min_windows or PREREG["min_windows"]
     for i, bar in enumerate(k15):
         decision_ts = int(bar["ts"])
         if not start_ms <= decision_ts < end_ms or i + horizon > len(k15):
@@ -148,9 +148,35 @@ def evaluate_symbol(symbol: str, k15: list, k1h: list, k4h: list, funding: list,
                 sig = sig if sig is not None else context.signal
                 pullback = context.pullback
         except Exception as exc:
-            rows.append({"symbol": symbol, "ts": decision_ts, "error": type(exc).__name__})
+            yield i, decision_ts, exc, None
             continue
-        if sig is None:
+        if sig is not None:
+            yield i, decision_ts, sig, pullback
+
+
+def signal_fields(sig, symbol: str, decision_ts: int, pullback: str) -> dict:
+    from bot.config import cfg
+    return {
+        "direction": str(sig.direction).upper(), "entry_type": str(getattr(sig, "entry_type", "")),
+        "regime": str(getattr(sig, "regime", "")), "score": int(sig.score),
+        "rr": float(sig.rr), "pullback": str(pullback),
+        **funnel_flags(sig, symbol, decision_ts, str(pullback), int(cfg.MIN_ENTRY_SCORE)),
+    }
+
+
+def evaluate_symbol(symbol: str, k15: list, k1h: list, k4h: list, funding: list,
+                    *, start_ms: int, end_ms: int, fees: list[float]) -> list[dict]:
+    """Every production-stack signal for ``symbol`` with simulated outcomes."""
+    from bot.execution_model import slippage_rate_for_symbol
+    from bot.nexus_oos_real_replay import _simulate_net_r
+
+    slippage = slippage_rate_for_symbol(symbol)
+    rows = []
+    for i, decision_ts, sig, pullback in iter_signals(
+            symbol, k15, k1h, k4h, start_ms=start_ms, end_ms=end_ms,
+            horizon=PREREG["outcome_bars_15m"]):
+        if isinstance(sig, Exception):
+            rows.append({"symbol": symbol, "ts": decision_ts, "error": type(sig).__name__})
             continue
         direction = str(sig.direction).upper()
         outcome = {}
@@ -174,11 +200,8 @@ def evaluate_symbol(symbol: str, k15: list, k1h: list, k4h: list, funding: list,
             continue
         rows.append({
             "symbol": symbol, "ts": decision_ts, "exit_ts": exit_ts,
-            "direction": direction, "entry_type": str(getattr(sig, "entry_type", "")),
-            "regime": str(getattr(sig, "regime", "")), "score": int(sig.score),
-            "rr": float(sig.rr), "pullback": str(pullback), "gross_r": gross_r,
-            "net_r": outcome,
-            **funnel_flags(sig, symbol, decision_ts, str(pullback), int(cfg.MIN_ENTRY_SCORE)),
+            "gross_r": gross_r, "net_r": outcome,
+            **signal_fields(sig, symbol, decision_ts, pullback),
         })
     return rows
 

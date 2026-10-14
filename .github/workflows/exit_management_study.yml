@@ -1,0 +1,96 @@
+name: Exit management study (EXIT_MANAGEMENT_V1)
+
+# Research only: replays the effective production analyzer stack over
+# Binance USD-M public history (data.binance.vision) and reports the
+# pre-registered verdict. No credentials, no database, no orders.
+on:
+  pull_request:
+    branches: [main, migration/binance-usdm]
+    paths:
+      - "bot/exit_management_study_v1.py"
+      - "bot/binance_public_history.py"
+      - "bot/raw_signal_edge_study_v1.py"
+      - "docs/research/exit_management_v1_prereg.md"
+      - ".github/workflows/exit_management_study.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shard:
+    name: Replay shard ${{ matrix.shard }}/5
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Study mechanics tests
+        run: python -m unittest tests.test_exit_management_study_v1 -v
+      - name: Download verified public history
+        run: python -m bot.exit_management_study_v1 --shard ${{ matrix.shard }}/5 --download-only
+      - name: Replay shard
+        run: |
+          python -m bot.exit_management_study_v1 --shard ${{ matrix.shard }}/5 \
+            --skip-download --no-report --out artifacts/shard_${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exit-management-shard-${{ matrix.shard }}
+          path: artifacts/shard_${{ matrix.shard }}/signals.jsonl
+          retention-days: 90
+
+  report:
+    name: Pre-registered verdict
+    needs: shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: exit-management-shard-*
+          path: shards
+      - name: Build report
+        run: |
+          python -m bot.exit_management_study_v1 --aggregate shards/*/signals.jsonl \
+            --out artifacts/exit_management_v1
+          python - <<'EOF'
+          import json
+          r = json.load(open("artifacts/exit_management_v1/report.json"))
+          print("VERDICT", r["verdict"], "prereg_sha256", r["prereg_sha256"])
+          print("CONSERVATIVE_BASIS", json.dumps(r["conservative_basis"], sort_keys=True))
+          for window, pops in r["windows"].items():
+              for pop, data in pops.items():
+                  for fee, s in data["by_fee"].items():
+                      print("SUMMARY", window, pop, fee, json.dumps(s, sort_keys=True))
+                  for key in ("gross", "exit_reasons", "partial_rate", "median_bars_held",
+                              "by_direction", "by_entry_type", "by_month", "by_symbol"):
+                      if key in data:
+                          print("BREAKDOWN", window, pop, key, json.dumps(data[key], sort_keys=True))
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exit-management-report
+          path: artifacts/exit_management_v1/report.json
+          retention-days: 90
