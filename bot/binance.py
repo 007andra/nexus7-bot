@@ -679,6 +679,8 @@ class BinanceClient:
         if not math.isfinite(balance) or balance < 0:
             raise RuntimeError("Futures availableBalance invalid")
         log.info("💰 Binance Futures available USDT: $%.4f", balance)
+        # Read-only observability for /api/status (balance_observability).
+        self._last_exchange_balance = balance
         return balance
 
     async def get_account_config(self) -> dict:

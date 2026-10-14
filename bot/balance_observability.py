@@ -1,8 +1,9 @@
 """Disambiguate exchange balance from PAPER and SHADOW read-only modes.
 
 Observability-only hardening. In PAPER or validation-held SHADOW mode the
-KuCoin available balance may be queried for connectivity/account visibility,
-but it must never be presented as an actively executable LIVE balance.
+exchange available balance may be queried for connectivity/account
+visibility, but it must never be presented as an actively executable LIVE
+balance.
 """
 from __future__ import annotations
 
@@ -16,11 +17,17 @@ def exchange_metadata(balance, paper_trade: bool, shadow_readonly: bool = False)
         "available_usdt": (
             round(float(balance), 4) if balance is not None else None
         ),
-        "source": "KuCoin",
+        "source": _exchange_source(),
         "read_only": read_only,
         "mode": mode,
         "used_for_paper_sizing": False,
     }
+
+
+def _exchange_source() -> str:
+    from bot import exchange
+
+    return f"{exchange.EXCHANGE_NAME.capitalize()} {exchange.EXCHANGE_PRODUCT}"
 
 
 def paper_metadata(balance) -> dict:

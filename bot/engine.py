@@ -503,8 +503,14 @@ class TradingEngine:
             self._start_background(scoring.update_macro_cache())        # Fear&Greed
             self._start_background(scoring.news_reader_loop())           # news 24/7
             self._start_background(mdata.update_macro_correlations())    # DXY/S&P
-            self._start_background(bt.weekly_backtest_loop(self.client))   # backtest semanal
-            self._start_background(opt.weekly_optimization_loop(self.client)) # otimização semanal
+            # Weekly backtest/optimizer are research jobs: their output is saved
+            # with runtime_applied=False and never read by trading. They are not
+            # started inside the trading process (CPU-heavy full-history replays
+            # next to the live loop); run them offline when needed.
+            log.info(
+                "[WEEKLY_RESEARCH] backtest=not_started optimizer=not_started "
+                "reason=research_isolated_from_trading_process execution_effect=NONE"
+            )
             self._start_background(self._monitor_news_pipeline())               # pipeline de notícias
             await self._connect()
             _orders_reconciled = await durable.reconcile_orders(self)
