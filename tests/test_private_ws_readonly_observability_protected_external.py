@@ -7,18 +7,16 @@ from bot import private_ws_readonly_observability as obs
 class _Client:
     def __init__(self, positions, active_orders=None, stop_orders=None):
         self.get_positions = AsyncMock(return_value=positions)
-        self._get = AsyncMock(side_effect=self._read)
         self._active_orders = active_orders or []
         self._stop_orders = stop_orders
 
-    async def _read(self, endpoint, *args, **kwargs):
-        if endpoint.startswith("/api/v1/orders"):
-            return {"items": list(self._active_orders)}
-        if endpoint.startswith("/api/v1/stopOrders"):
-            if isinstance(self._stop_orders, Exception):
-                raise self._stop_orders
-            return {"items": list(self._stop_orders or [])}
-        raise AssertionError(endpoint)
+    async def get_open_orders(self):
+        return list(self._active_orders)
+
+    async def get_stop_orders(self, symbol):
+        if isinstance(self._stop_orders, Exception):
+            raise self._stop_orders
+        return list(self._stop_orders or [])
 
 
 class _Log:

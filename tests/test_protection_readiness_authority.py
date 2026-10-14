@@ -19,7 +19,12 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_paper_flat_readiness_never_requires_private_active_orders(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(
+            get_open_orders=AsyncMock(
+                side_effect=AssertionError(
+                    "private exchange active-order read executed in PAPER"
+                )
+            ),
+            get_stop_orders=AsyncMock(
                 side_effect=AssertionError(
                     "private exchange active-order read executed in PAPER"
                 )
@@ -34,13 +39,15 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
             positions={},
         )
         self.assertTrue(await refresh_protection_readiness(engine))
-        client._get.assert_not_awaited()
+        client.get_open_orders.assert_not_awaited()
+        client.get_stop_orders.assert_not_awaited()
         self.assertTrue(engine._protection_system_ready)
 
     async def test_flat_exchange_is_ready_only_with_zero_unprotected(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols=set(),
@@ -60,10 +67,32 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine._unprotected_symbols, set())
         self.assertTrue(engine._protection_system_ready)
 
+    async def test_client_without_native_order_reader_is_never_ready(self):
+        # The raw KuCoin /api/v1/orders fallback was removed: a client that
+        # cannot list open orders natively stays fail-closed, even with a
+        # generic _get available.
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            get_stop_orders=AsyncMock(return_value=[]),
+            _get=AsyncMock(side_effect=AssertionError("raw read must not run")),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols=set(),
+            orders=_registry(),
+        )
+        self.assertFalse(await refresh_protection_readiness(engine))
+        self.assertFalse(engine._protection_system_ready)
+        self.assertEqual(
+            engine._protection_readiness_evidence["reason"],
+            "flat_active_orders_unconfirmed",
+        )
+        client._get.assert_not_awaited()
+
     async def test_stale_unprotected_symbol_is_cleared_only_after_confirmed_flat(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -76,7 +105,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_flat_read_failure_keeps_stale_state_blocked(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(side_effect=TimeoutError("exchange read failed")),
+            get_open_orders=AsyncMock(side_effect=TimeoutError("exchange read failed")),
+            get_stop_orders=AsyncMock(side_effect=TimeoutError("exchange read failed")),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -88,7 +118,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_flat_with_pending_durable_intent_keeps_stale_state_blocked(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         orders = _registry()
         order, _ = orders.get_or_create("bgx7-pending", "SOLUSDT", "Buy", 1.0)
@@ -103,7 +134,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_flat_with_active_entry_order_keeps_stale_state_blocked(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": [{"symbol": "SOLUSDT", "reduceOnly": False}]}),
+            get_open_orders=AsyncMock(return_value={"items": [{"symbol": "SOLUSDT", "reduceOnly": False}]}),
+            get_stop_orders=AsyncMock(return_value={"items": [{"symbol": "SOLUSDT", "reduceOnly": False}]}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -115,7 +147,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_recent_local_fill_blocks_clear_until_exchange_converges(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -131,7 +164,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_confirming_sol_flat_does_not_clear_eth_unprotected(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client,
@@ -146,7 +180,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_flat_reconciliation_is_idempotent(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -174,7 +209,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
 
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -213,7 +249,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(order.exposure_reconciliation_complete)
 
         client.get_positions = AsyncMock(return_value=[])
-        client._get = AsyncMock(return_value={"items": []})
+        client.get_open_orders = AsyncMock(return_value={"items": []})
+        client.get_stop_orders = AsyncMock(return_value={"items": []})
         engine._unprotected_symbols = {"SOLUSDT"}
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertEqual(engine._unprotected_symbols, set())
@@ -281,7 +318,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         orders, order = self._filled_reduce("bgx7-full-close", 4.2, 4.2)
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -298,7 +336,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         order.previous_position_qty = None
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -325,7 +364,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
 
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -340,7 +380,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         orders, order = self._filled_reduce("bgx7-close-db-fail", 4.2, 4.2)
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -354,7 +395,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         orders, order = self._filled_reduce("bgx7-close-partial", 2.0, 4.2)
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -374,7 +416,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.previous_position_qty, 4.2)
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
@@ -525,7 +568,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         import os
         client_reconcile = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         engine_reconcile = SimpleNamespace(
             connected=True, client=client_reconcile,
@@ -597,7 +641,8 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
 
         reconcile_client = SimpleNamespace(
             get_positions=AsyncMock(side_effect=get_positions),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value={"items": []}),
+            get_stop_orders=AsyncMock(return_value={"items": []}),
         )
         reconcile_engine = SimpleNamespace(
             connected=True, client=reconcile_client,

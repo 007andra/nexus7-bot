@@ -267,19 +267,13 @@ async def refresh_protection_readiness(engine) -> bool:
             active = []
         else:
             open_orders = getattr(client, "get_open_orders", None)
+            if not callable(open_orders):
+                engine._protection_readiness_evidence["reason"] = (
+                    "flat_active_orders_unconfirmed"
+                )
+                return False
             try:
-                if callable(open_orders):
-                    payload = await open_orders()
-                else:
-                    raw_get = getattr(client, "_get", None)
-                    if not callable(raw_get):
-                        engine._protection_readiness_evidence["reason"] = (
-                            "flat_active_orders_unconfirmed"
-                        )
-                        return False
-                    payload = await raw_get(
-                        "/api/v1/orders", {"status": "active"}, auth=True
-                    )
+                payload = await open_orders()
             except Exception as exc:
                 engine._protection_readiness_evidence["reason"] = (
                     "flat_active_orders_read_failed"

@@ -15,7 +15,6 @@ Fail-closed rules:
 """
 
 import math
-from urllib.parse import quote
 
 from bot.quantity import contracts_to_base
 
@@ -170,29 +169,14 @@ def _protective_order(
 
 
 async def read_stop_orders(client, symbol: str):
-    """Read untriggered KuCoin stop orders. Returns None when unconfirmed."""
+    """Read untriggered stop orders. Returns None when unconfirmed."""
     getter = getattr(client, "get_stop_orders", None)
-    if callable(getter):
-        try:
-            data = await getter(symbol)
-        except Exception:
-            return None
-    else:
-        raw_get = getattr(client, "_get", None)
-        if not callable(raw_get):
-            return None
-        try:
-            kc_symbol = symbol
-            try:
-                from bot.kucoin import to_kucoin
-            except (ImportError, AttributeError):
-                to_kucoin = None
-            if callable(to_kucoin):
-                kc_symbol = to_kucoin(symbol)
-            endpoint = f"/api/v1/stopOrders?symbol={quote(str(kc_symbol), safe='')}"
-            data = await raw_get(endpoint, auth=True)
-        except Exception:
-            return None
+    if not callable(getter):
+        return None
+    try:
+        data = await getter(symbol)
+    except Exception:
+        return None
 
     if data is None:
         return None
