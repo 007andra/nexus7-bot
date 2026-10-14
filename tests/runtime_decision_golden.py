@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import random
 import sys
+from contextlib import ExitStack
 from unittest.mock import patch
 
 GOLDEN = Path(__file__).with_name("runtime_decision_golden_v1.json")
@@ -115,9 +116,18 @@ def compute():
     from bot.professional_risk import CapitalState
     from bot.risk_manager_v3 import RiskManagerV3
     from bot.strategy import Analyzer
+    from bot.config import cfg
 
+    # bot.config reads the environment once at import. When another test
+    # imported it first, the pinned env above came too late, so pin the
+    # already-built cfg attributes as well.
+    pinned_cfg = {k: type(getattr(cfg, k))(v) for k, v in PINNED_ENV.items()
+                  if hasattr(cfg, k) and isinstance(getattr(cfg, k), (int, float))}
     out = {}
-    with patch("time.time", return_value=T / 1000 + 30):
+    with ExitStack() as stack:
+        stack.enter_context(patch("time.time", return_value=T / 1000 + 30))
+        for name, value in pinned_cfg.items():
+            stack.enter_context(patch.object(cfg, name, value))
         for case, seed, drift, vol, factor, spike in corpus():
             symbol = SYMBOLS[seed % len(SYMBOLS)]
             k15, k1h, k4h = _klines(seed, drift, vol, factor, spike)
