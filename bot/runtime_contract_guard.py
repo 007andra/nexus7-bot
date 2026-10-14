@@ -113,16 +113,12 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
         ContractItem(
             f"{exchange_label}.get_order_status",
             ExchangeClient.get_order_status,
-            "kucoin.py" if exchange_runtime.is_kucoin() else "binance.py",
+            "binance.py",
         ),
         ContractItem(
             f"{exchange_label}.set_position_stops",
             ExchangeClient.set_position_stops,
-            (
-                "prelive_protection_failclosed.py"
-                if exchange_runtime.is_kucoin()
-                else "binance.py"
-            ),
+            "binance.py",
         ),
         ContractItem(
             "TradingEngine._manage_partial_tp",
@@ -163,91 +159,79 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
         ),
     ]
 
-    if exchange_runtime.is_kucoin():
-        markers.extend([
-            MarkerItem(
-                "kucoin.native_tpsl",
-                getattr(ExchangeClient, "_native_tpsl_entry_installed", False),
-            ),
-            MarkerItem(
-                "kucoin.fill_normalization",
-                getattr(ExchangeClient, "_fill_normalization_installed", False),
-            ),
-        ])
-    else:
-        items.append(
-            ContractItem(
-                "TradingEngine._refresh_entry_balance",
-                TradingEngine._refresh_entry_balance,
-                "binance_cross_portfolio_stress.py",
-            )
+    items.append(
+        ContractItem(
+            "TradingEngine._refresh_entry_balance",
+            TradingEngine._refresh_entry_balance,
+            "binance_cross_portfolio_stress.py",
         )
-        markers.append(
-            MarkerItem(
-                "TradingEngine.binance_cross_portfolio_stress",
-                getattr(TradingEngine, "_binance_cross_portfolio_stress_installed", False),
-            )
+    )
+    markers.append(
+        MarkerItem(
+            "TradingEngine.binance_cross_portfolio_stress",
+            getattr(TradingEngine, "_binance_cross_portfolio_stress_installed", False),
         )
-        # Binance PAPER parity deliberately has no claimed LIVE accounting/MMR
-        # authority yet. The client-level migration gate remains fail-closed.
-        markers.append(
-            MarkerItem(
-                "binance.paper_parity_client",
-                getattr(ExchangeClient, "exchange_name", "") == "binance",
-            )
+    )
+    # Binance PAPER parity deliberately has no claimed LIVE accounting/MMR
+    # authority yet. The client-level migration gate remains fail-closed.
+    markers.append(
+        MarkerItem(
+            "binance.paper_parity_client",
+            getattr(ExchangeClient, "exchange_name", "") == "binance",
         )
-        # PilotGuard gate 11 reads BinanceClient.market_data_health, written
-        # only by the native public WS handler on the routed /market stream.
-        # Any late wrapper/overlay of that handler (a second writer) or an
-        # unrouted stream URL (silent socket) is startup drift.
-        from bot import binance as binance_runtime
+    )
+    # PilotGuard gate 11 reads BinanceClient.market_data_health, written
+    # only by the native public WS handler on the routed /market stream.
+    # Any late wrapper/overlay of that handler (a second writer) or an
+    # unrouted stream URL (silent socket) is startup drift.
+    from bot import binance as binance_runtime
 
-        items.append(
-            ContractItem(
-                "binance._handle_ws_message",
-                ExchangeClient._handle_ws_message,
-                "binance.py",
-            )
+    items.append(
+        ContractItem(
+            "binance._handle_ws_message",
+            ExchangeClient._handle_ws_message,
+            "binance.py",
         )
-        markers.append(
-            MarkerItem(
-                "binance.public_market_data_route",
-                binance_runtime.WS_MARKET_BASE.endswith("/market"),
-            )
+    )
+    markers.append(
+        MarkerItem(
+            "binance.public_market_data_route",
+            binance_runtime.WS_MARKET_BASE.endswith("/market"),
         )
-        # The private user-data stream must run on the routed /private path
-        # and its native handler must not be replaced by a late overlay.
-        items.append(
-            ContractItem(
-                "binance._handle_private_order_event",
-                ExchangeClient._handle_private_order_event,
-                "binance.py",
-            )
+    )
+    # The private user-data stream must run on the routed /private path
+    # and its native handler must not be replaced by a late overlay.
+    items.append(
+        ContractItem(
+            "binance._handle_private_order_event",
+            ExchangeClient._handle_private_order_event,
+            "binance.py",
         )
-        markers.append(
-            MarkerItem(
-                "binance.private_user_data_route",
-                binance_runtime.WS_PRIVATE_BASE.endswith("/private"),
-            )
+    )
+    markers.append(
+        MarkerItem(
+            "binance.private_user_data_route",
+            binance_runtime.WS_PRIVATE_BASE.endswith("/private"),
         )
-        # Ambiguous-submit recovery (F-01) must protect adopted BGX exposure
-        # through the canonical Binance enforcement authority: identity is
-        # proven by code origin (file) and function name, not mere callability.
-        enforce = getattr(TradingEngine, "_bgx_enforce_owned_protection", None)
-        items.append(
-            ContractItem(
-                "TradingEngine._bgx_enforce_owned_protection",
-                enforce,
-                "binance_protection_failclosed.py",
-            )
+    )
+    # Ambiguous-submit recovery (F-01) must protect adopted BGX exposure
+    # through the canonical Binance enforcement authority: identity is
+    # proven by code origin (file) and function name, not mere callability.
+    enforce = getattr(TradingEngine, "_bgx_enforce_owned_protection", None)
+    items.append(
+        ContractItem(
+            "TradingEngine._bgx_enforce_owned_protection",
+            enforce,
+            "binance_protection_failclosed.py",
         )
-        markers.append(
-            MarkerItem(
-                "TradingEngine.ambiguous_entry_protection_authority",
-                callable(enforce)
-                and getattr(getattr(enforce, "__code__", None), "co_name", "") == "_enforce",
-            )
+    )
+    markers.append(
+        MarkerItem(
+            "TradingEngine.ambiguous_entry_protection_authority",
+            callable(enforce)
+            and getattr(getattr(enforce, "__code__", None), "co_name", "") == "_enforce",
         )
+    )
 
     items = tuple(items)
     markers = tuple(markers)

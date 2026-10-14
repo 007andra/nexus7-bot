@@ -220,12 +220,6 @@ async def fetch_taker_fee(client, symbol: str) -> tuple[float, float | None, str
                 taker, source = rate, "binance_commission_rate"
                 mk = _finite(data.get("makerCommissionRate"), -1.0)
                 maker = mk if 0 <= mk < 0.02 else None
-        elif venue == "kucoin":
-            from bot.kucoin_execution_model import fetch_actual_taker_fee
-
-            rate, src = await fetch_actual_taker_fee(client, symbol)
-            if src == "kucoin_actual_fee":
-                taker, source = float(rate), src
     except Exception:  # noqa: BLE001 - any read failure keeps the conservative fallback
         taker, maker, source = fallback_taker_fee(), None, "conservative_fallback"
 

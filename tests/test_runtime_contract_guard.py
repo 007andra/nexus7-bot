@@ -60,6 +60,7 @@ class RuntimeContractGuardTests(unittest.TestCase):
             _update_balance = _owned("operator_runtime_policy.py")
             _manage_partial_tp = _owned("partial_tp_execution_hardening.py")
             _partial_tp_execution_hardening_installed = True
+            _refresh_entry_balance = _owned("binance_cross_portfolio_stress.py")
 
         class PilotGuard:
             evaluate = _owned("pilot_exposure_capacity.py")
@@ -135,9 +136,9 @@ class RuntimeContractGuardTests(unittest.TestCase):
             "durable_reconcile_hardening.py",
             "_pilot_durable_submission_counter_installed",
             "_live_execution_fence_installed",
-            "exchange_runtime.is_kucoin()",
-            "_native_tpsl_entry_installed",
-            "_fill_normalization_installed",
+            "binance_cross_portfolio_stress.py",
+            "_binance_cross_portfolio_stress_installed",
+            "binance._handle_private_order_event",
             "binance.paper_parity_client",
             "execution_chain=idempotency>distributed_fence>dispatch>fill>protection>reconcile",
         )

@@ -30,7 +30,7 @@ def test_paper_trade_barrier():
         os.environ.update(env)
         for m in [x for x in sys.modules if x.startswith("bot.")]:
             del sys.modules[m]
-        from bot.kucoin import PAPER_TRADE
+        from bot.binance import PAPER_TRADE
         check(f"barreira paper/real {env or '{}'}", PAPER_TRADE == esperado,
               f"esperado {esperado}, obtido {PAPER_TRADE}")
     os.environ["PAPER_TRADE"] = "true"
@@ -442,12 +442,12 @@ def test_clientoid_consistente_entre_order_e_filled():
     mesma ordem, o que quebraria qualquer correlação com a KuCoin
     real (a exchange só conhece o valor com prefixo bgx7-).
     """
-    # NOTA: bot.kucoin lê PAPER_TRADE no nível do módulo, uma única vez
+    # NOTA: bot.binance lê PAPER_TRADE no nível do módulo, uma única vez
     # no import. Se outro teste já importou o módulo antes com um valor
     # diferente, setar a env var aqui não tem efeito — por isso este
     # teste verifica a LÓGICA de geração do clientOid isoladamente
     # (hashlib + prefixo), sem depender do estado de import de
-    # bot.kucoin, que é compartilhado entre todos os testes do processo.
+    # bot.binance, que é compartilhado entre todos os testes do processo.
     import hashlib, time
     _window = int(time.time() // 60)
     _raw = f"BTCUSDT_Buy_0.01_{_window}"
@@ -456,10 +456,10 @@ def test_clientoid_consistente_entre_order_e_filled():
           _oid_esperado.startswith("bgx7-"))
 
     import inspect
-    from bot.kucoin import KuCoinClient
-    src = inspect.getsource(KuCoinClient.place_order)
+    from bot.binance import BinanceClient
+    src = inspect.getsource(BinanceClient.place_order)
     check("place_order inclui clientOid no dict de retorno (bug corrigido)",
-          'data["clientOid"] = _oid' in src or '"clientOid": _oid' in src,
+          '"clientOid": client_oid' in src,
           "retorno não inclui mais o clientOid real")
 
 

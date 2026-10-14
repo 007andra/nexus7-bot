@@ -1,16 +1,8 @@
 """Market-data integrity policy shared by LIVE strategy and NEXUS.
 
-This module is intentionally fail-closed around data correctness. It addresses
-four production risks discovered in the 2026-09-11 audit:
+This module is intentionally fail-closed around data correctness (2026-09-11
+audit; the KuCoin-only volume rewrite was removed with the KuCoin adapter):
 
-* KuCoin Classic Futures documents ``limitCandle.candles[5]`` (transaction
-  volume) as incorrect. The adjacent transaction-amount field at index 6 is
-  therefore used as the activity series for WS candles instead of the
-  documented-bad field.
-* The REST kline seed and WS updates must use the same activity unit. REST rows
-  are normalized so their index 5 also carries index 6 before the legacy
-  KuCoin parser puts them into the shared cache. This prevents a cache seeded
-  with contract volume from being compared with WS transaction amount.
 * A candle is considered closed from its timestamp and timeframe boundary, not
   from its position in a list.
 * NEXUS gets an independent hard freshness/gap check so a numerically acceptable
@@ -21,7 +13,6 @@ is changed here.
 """
 from __future__ import annotations
 
-import copy
 import math
 import time
 from typing import Iterable
@@ -184,141 +175,3 @@ def validate_nexus_candles(k15: list, k1h: list, k4h: list,
         views.append(view)
 
     return True, "ok", (views[0], views[1], views[2])
-
-
-def _rewrite_kucoin_ws_kline_volume(msg: dict) -> tuple[dict | None, bool]:
-    """Replace the KuCoin-documented-bad WS volume with transaction amount.
-
-    Classic Futures ``/contractMarket/limitCandle`` explicitly documents index
-    5 as incorrect. Index 6 is the transaction amount and is the only usable
-    activity field in that message. Returning ``None`` means the event should be
-    ignored rather than poisoning the indicator cache.
-    """
-    topic = str(msg.get("topic", "")) if isinstance(msg, dict) else ""
-    data = msg.get("data", {}) if isinstance(msg, dict) else {}
-    if "andle" not in topic or not isinstance(data, dict) or "candles" not in data:
-        return msg, False
-
-    candles = data.get("candles")
-    if not isinstance(candles, (list, tuple)) or len(candles) < 7:
-        return None, False
-    try:
-        activity = float(candles[6])
-    except (TypeError, ValueError):
-        return None, False
-    if not math.isfinite(activity) or activity < 0:
-        return None, False
-
-    rewritten = copy.deepcopy(msg)
-    rewritten["data"]["candles"][5] = rewritten["data"]["candles"][6]
-    rewritten["data"]["_bgx_volume_source"] = "transaction_amount_index_6"
-    return rewritten, True
-
-
-def _rewrite_kucoin_rest_kline_volume(data) -> tuple[object, int, int]:
-    """Normalize Classic Futures REST klines to the same activity basis as WS.
-
-    ``get_klines`` historically maps raw index 5 into candle ``v``. Rather than
-    maintaining two incompatible units in the shared cache, this function
-    copies raw index 6 into index 5 before that legacy parser runs. Invalid rows
-    are dropped rather than falling back to index 5, because fallback would
-    reintroduce mixed-unit volume ratios.
-    """
-    if not isinstance(data, list):
-        return data, 0, 0
-
-    normalized = []
-    rewritten = 0
-    dropped = 0
-    for row in data:
-        if not isinstance(row, (list, tuple)) or len(row) < 7:
-            dropped += 1
-            continue
-        try:
-            activity = float(row[6])
-        except (TypeError, ValueError):
-            dropped += 1
-            continue
-        if not math.isfinite(activity) or activity < 0:
-            dropped += 1
-            continue
-        fixed = list(row)
-        fixed[5] = row[6]
-        normalized.append(fixed)
-        rewritten += 1
-    return normalized, rewritten, dropped
-
-
-def install(KuCoinClient, Analyzer, log) -> None:
-    """Install contained runtime guards without changing trading thresholds."""
-    if not getattr(KuCoinClient, "_market_data_integrity_installed", False):
-        original_get = KuCoinClient._get
-        original_ws = KuCoinClient._handle_ws_message
-
-        async def get_integrity(self, endpoint, *args, **kwargs):
-            result = await original_get(self, endpoint, *args, **kwargs)
-            if str(endpoint) != "/api/v1/kline/query":
-                return result
-            normalized, rewritten, dropped = _rewrite_kucoin_rest_kline_volume(result)
-            if rewritten and not getattr(self, "_rest_volume_basis_logged", False):
-                self._rest_volume_basis_logged = True
-                log.warning(
-                    "[MARKET_DATA_INTEGRITY] KuCoin Futures REST klines normalized "
-                    "to transaction amount index 6 so REST seed and WS updates use "
-                    "one activity basis; rows=%s",
-                    rewritten,
-                )
-            if dropped:
-                log.warning(
-                    "[MARKET_DATA_INTEGRITY] KuCoin Futures REST dropped %s kline "
-                    "row(s) without valid transaction amount index 6",
-                    dropped,
-                )
-            return normalized
-
-        async def handle_ws_integrity(self, msg: dict):
-            rewritten, changed = _rewrite_kucoin_ws_kline_volume(msg)
-            if rewritten is None:
-                if not getattr(self, "_bad_ws_kline_schema_logged", False):
-                    self._bad_ws_kline_schema_logged = True
-                    log.error(
-                        "[MARKET_DATA_INTEGRITY] KuCoin WS kline missing usable "
-                        "transaction-amount field; event dropped; REST fallback required"
-                    )
-                return None
-            if changed and not getattr(self, "_ws_volume_fix_logged", False):
-                self._ws_volume_fix_logged = True
-                log.warning(
-                    "[MARKET_DATA_INTEGRITY] KuCoin Futures WS candles[5] ignored "
-                    "because official schema marks it incorrect; using candles[6] "
-                    "transaction amount for activity/volume indicators"
-                )
-            return await original_ws(self, rewritten)
-
-        KuCoinClient._get = get_integrity
-        KuCoinClient._handle_ws_message = handle_ws_integrity
-        KuCoinClient._market_data_integrity_installed = True
-
-    if not getattr(Analyzer, "_timestamp_closed_candle_integrity_installed", False):
-        original_analyze = Analyzer.analyze_mtf
-
-        def analyze_timestamp_closed(self, symbol, k15, k1h, k4h,
-                                     min_score=60, fee_mult=2.0, vol_mult=1.0):
-            now_ms = int(time.time() * 1000)
-            p15 = prepare_strategy_series(k15, "15", 20, now_ms=now_ms)
-            p1h = prepare_strategy_series(k1h, "60", 15, now_ms=now_ms)
-            p4h = prepare_strategy_series(k4h, "240", 10, now_ms=now_ms)
-            return original_analyze(
-                self, symbol, p15, p1h, p4h,
-                min_score=min_score, fee_mult=fee_mult, vol_mult=vol_mult,
-            )
-
-        Analyzer.analyze_mtf = analyze_timestamp_closed
-        Analyzer._timestamp_closed_candle_integrity_installed = True
-
-    log.warning(
-        "[MARKET_DATA_INTEGRITY] installed kucoin_rest_ws_volume_basis=transaction_amount_index_6 "
-        "kucoin_ws_bad_volume_field=blocked closed_candle_source=timestamp_boundary "
-        "nexus_freshness=fail_closed thresholds_unchanged=true "
-        "leverage_unchanged=true execution_permissions_unchanged=true"
-    )

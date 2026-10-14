@@ -46,7 +46,6 @@ from bot.order_state import OrderRegistry, OrderState, InvalidTransition, TERMIN
 from bot.pilot import PilotGuard
 from bot.quantity import minimum_base_quantity, validate_base_quantity
 from bot.paper_loss_budget import cap_quantity as cap_paper_quantity
-from bot import liquidation as liq
 from bot import durable_execution as durable
 # ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
 from bot import nexus_ai
@@ -569,10 +568,7 @@ class TradingEngine:
                         self._update_daily_pnl()
                         from bot.durable_daily_stop import entries_blocked
                         daily_state_blocked = await entries_blocked(self)
-                        if is_binance():
-                            from bot.binance_accounting_evidence import schedule as schedule_accounting
-                        else:
-                            from bot.exchange_accounting_evidence import schedule as schedule_accounting
+                        from bot.binance_accounting_evidence import schedule as schedule_accounting
                         schedule_accounting(self)
                     
                         # Independent, cache-only research. No candidate is handed
@@ -3198,7 +3194,6 @@ class TradingEngine:
 
             # ── Retry com backoff exponencial (3 tentativas) ─────
             MAX_RETRIES   = 1 if self.pilot.enabled else 3
-            RETRY_DELAYS  = [1.0, 2.0, 4.0]   # segundos entre tentativas
             last_exc: Exception | None = None
 
             # ══════════════════════════════════════════════════════════
@@ -3230,168 +3225,56 @@ class TradingEngine:
             # margem de manutenção depende da conta inteira — informa
             # isso ao módulo para que ele se declare não-confiável
             # nesse cenário, em vez de dar um número falsamente preciso.
-            if is_binance():
-                from bot import binance_cross_portfolio_stress as binance_cross_stress
+            from bot import binance_cross_portfolio_stress as binance_cross_stress
 
-                _binance_stress = await binance_cross_stress.evaluate(
-                    self, sig, qty
-                )
-                _sl_pct = (
-                    abs(sig.entry - sig.sl) / sig.entry * 100
-                    if sig.entry > 0 and sig.sl > 0
-                    else 0.0
-                )
-                _liq_pct = 0.0
-                _sl_inseguro = False
-
-                if not _binance_stress.allowed:
-                    log.warning(
-                        "[BINANCE_CROSS_STRESS] symbol=%s result=BLOCK reason=%s "
-                        "mode=%s risk_rate=%.4f limit=%.4f stressed_margin=%.8f "
-                        "maintenance=%.8f closing_fees=%.8f opening_fee=%.8f "
-                        "existing_positions=%d stage=PRE_ORDER "
-                        "execution_effect=BLOCK_NEW_ENTRY",
-                        sig.symbol,
-                        _binance_stress.reason,
-                        _binance_stress.mode,
-                        _binance_stress.risk_rate,
-                        binance_cross_stress.MAX_STOP_STRESS_RISK_RATE,
-                        _binance_stress.stressed_margin,
-                        _binance_stress.maintenance,
-                        _binance_stress.closing_fees,
-                        _binance_stress.opening_fee,
-                        _binance_stress.existing_positions,
-                    )
-                    try:
-                        await db.save_signal(
-                            sig.symbol,
-                            sig.direction,
-                            {"total": int(sig.score)},
-                            entrou=False,
-                            motivo=(
-                                "binance cross stress: "
-                                f"{_binance_stress.reason}"
-                            ),
-                        )
-                    except Exception as _e:
-                        log.debug(f"save_signal binance_cross_stress: {_e}")
-                    return
-
-                log.info(
-                    "[BINANCE_CROSS_STRESS] symbol=%s result=PASS reason=%s "
-                    "mode=%s risk_rate=%.4f limit=%.4f existing_positions=%d "
-                    "stage=PRE_ORDER kucoin_liquidation_formula_used=false "
-                    "execution_effect=NONE",
+            _binance_stress = await binance_cross_stress.evaluate(
+                self, sig, qty
+            )
+            if not _binance_stress.allowed:
+                log.warning(
+                    "[BINANCE_CROSS_STRESS] symbol=%s result=BLOCK reason=%s "
+                    "mode=%s risk_rate=%.4f limit=%.4f stressed_margin=%.8f "
+                    "maintenance=%.8f closing_fees=%.8f opening_fee=%.8f "
+                    "existing_positions=%d stage=PRE_ORDER "
+                    "execution_effect=BLOCK_NEW_ENTRY",
                     sig.symbol,
                     _binance_stress.reason,
                     _binance_stress.mode,
                     _binance_stress.risk_rate,
                     binance_cross_stress.MAX_STOP_STRESS_RISK_RATE,
+                    _binance_stress.stressed_margin,
+                    _binance_stress.maintenance,
+                    _binance_stress.closing_fees,
+                    _binance_stress.opening_fee,
                     _binance_stress.existing_positions,
-                )
-            else:
-                _liq = liq.analyze(
-                    entry=sig.entry, stop=sig.sl, leverage=cfg.LEVERAGE,
-                    is_long=(sig.direction == "LONG"), symbol=sig.symbol,
-                    n_open_positions=len(self.positions) + 1,
-                )
-                # KuCoin-only legacy tier audit. Binance uses user-specific
-                # leverage brackets in binance_cross_portfolio_stress.
-                _notional_est = qty * sig.entry
-                if _notional_est and liq.notional_exceeds_tier1(_notional_est):
-                    log.warning(
-                        f"⚠️ [{sig.symbol}] notional ${_notional_est:,.0f} pode "
-                        f"exceder o Tier 1 assumido (MMR={_liq.mmr:.3%}) — "
-                        f"MMR real pode ser maior, liquidação mais próxima "
-                        f"do que calculado"
-                    )
-                _liq_pct = _liq.liq_move_pct
-                _sl_pct = _liq.stop_move_pct
-
-            # ══════════════════════════════════════════════════════════
-            # OVERRIDE EXPLÍCITO — ALLOW_SL_BEYOND_LIQUIDATION
-            #
-            # Quando o SL fica além do preço de liquidação, a posição é
-            # liquidada ANTES do stop disparar. A perda deixa de ser 1R
-            # e passa a ser 100% da margem.
-            #
-            # Exemplo real (SOLUSDT, 50x):
-            #   liquidação a 2.00% | SL a 2.27%
-            #   → o preço atinge a liquidação primeiro; o SL nunca executa
-            #
-            # Ativado por escolha do usuário, ciente de que o stop loss
-            # se torna decorativo nesses trades.
-            # ══════════════════════════════════════════════════════════
-            _allow_beyond = os.environ.get(
-                "ALLOW_SL_BEYOND_LIQUIDATION", "false"
-            ).lower() == "true"
-
-            # Binance uses account-level CROSS stop stress above. KuCoin keeps
-            # the legacy liquidation-price effectiveness check.
-            if not is_binance():
-                _sl_inseguro = not _liq.stop_effective
-
-            if _sl_inseguro and _allow_beyond:
-                # Não bloqueia, mas registra e avisa — o operador precisa
-                # saber quais trades entraram sem proteção efetiva.
-                _sera_liquidado = _sl_pct >= _liq_pct
-                log.warning(
-                    f"⚠️ [{sig.symbol}] SL a {_sl_pct:.2f}% vs liquidação "
-                    f"{_liq_pct:.2f}% — "
-                    f"{'LIQUIDA ANTES DO STOP' if _sera_liquidado else 'margem apertada'}. "
-                    f"Prosseguindo por ALLOW_SL_BEYOND_LIQUIDATION=true"
-                )
-                if _sera_liquidado:
-                    _k = f"beyond_{sig.symbol}"
-                    _now = time.time()
-                    if _now - self._liq_alert.get(_k, 0) > 1800:
-                        self._liq_alert[_k] = _now
-                        asyncio.create_task(notify(
-                            f"⚠️ *ORDEM SEM PROTEÇÃO EFETIVA*\n"
-                            f"`{'━'*26}`\n"
-                            f"📍 Par:        `{sig.symbol}`\n"
-                            f"🛑 SL a:       `{_sl_pct:.2f}%`\n"
-                            f"💀 Liquidação: `{_liq_pct:.2f}%` ({cfg.LEVERAGE}x)\n"
-                            f"`{'━'*26}`\n"
-                            f"_A liquidação ocorre ANTES do stop. Se este "
-                            f"trade perder, a perda é de 100% da margem, "
-                            f"não 1R._"
-                        ))
-
-            elif _sl_inseguro:
-                _lev_ok = liq.max_leverage_for_stop(_sl_pct)
-                log.warning(
-                    f"⛔ [{sig.symbol}] REJEITADO: {_liq.reason} | "
-                    f"leverage máximo seguro para este SL: {_lev_ok}x"
                 )
                 try:
                     await db.save_signal(
-                        sig.symbol, sig.direction, {"total": int(sig.score)},
+                        sig.symbol,
+                        sig.direction,
+                        {"total": int(sig.score)},
                         entrou=False,
-                        motivo=f"stop inefetivo: SL {_sl_pct:.2f}% vs liq {_liq_pct:.2f}%",
+                        motivo=(
+                            "binance cross stress: "
+                            f"{_binance_stress.reason}"
+                        ),
                     )
                 except Exception as _e:
-                    log.debug(f"save_signal sl_liq: {_e}")
-
-                _k = f"liq_{sig.symbol}"
-                _now = time.time()
-                if _now - self._liq_alert.get(_k, 0) > 1800:   # 30 min
-                    self._liq_alert[_k] = _now
-                    asyncio.create_task(notify(
-                        f"⛔ *ORDEM NÃO ABERTA — STOP INEFETIVO*\n"
-                        f"`{'━'*26}`\n"
-                        f"📍 Par:        `{sig.symbol}`\n"
-                        f"🛑 SL a:       `{_sl_pct:.2f}%` do entry\n"
-                        f"💀 Liquidação: `{_liq_pct:.2f}%` ({cfg.LEVERAGE}x)\n"
-                        f"📏 Folga:      `{_liq.gap_pct:+.2f}%`\n"
-                        f"✅ SL máximo:  `{_liq.max_safe_stop_pct:.2f}%`\n"
-                        f"`{'━'*26}`\n"
-                        f"_Liquidação calculada com margem de manutenção, "
-                        f"taxas e slippage._\n"
-                        f"_Leverage máximo seguro para este SL: `{_lev_ok}x`_"
-                    ))
+                    log.debug(f"save_signal binance_cross_stress: {_e}")
                 return
 
+            log.info(
+                "[BINANCE_CROSS_STRESS] symbol=%s result=PASS reason=%s "
+                "mode=%s risk_rate=%.4f limit=%.4f existing_positions=%d "
+                "stage=PRE_ORDER kucoin_liquidation_formula_used=false "
+                "execution_effect=NONE",
+                sig.symbol,
+                _binance_stress.reason,
+                _binance_stress.mode,
+                _binance_stress.risk_rate,
+                binance_cross_stress.MAX_STOP_STRESS_RISK_RATE,
+                _binance_stress.existing_positions,
+            )
             if self.paper_trade:
                 try:
                     qty_before = qty
@@ -3800,87 +3683,37 @@ class TradingEngine:
                     # recovery by newClientOrderId. A second engine-level
                     # submission would create a second logical dispatch boundary,
                     # so Binance fails closed here and waits for the next signal.
-                    if is_binance():
-                        if self._durable_state_enforced:
-                            await durable.record_binance_margin_rejection(self, _managed, exc)
-                        import re as _re
-                        _code_match = _re.search(
-                            r"code=(-?\d+)", err_str
-                        )
-                        _msg_match = _re.search(
-                            r"msg=(.*)$", err_str
-                        )
-                        ret_code = (
-                            _code_match.group(1)
-                            if _code_match else "?"
-                        )
-                        ret_msg = (
-                            _msg_match.group(1).strip()
-                            if _msg_match else err_str
-                        )
-                        log.error(
-                            f"❌ _open {sig.symbol} tentativa "
-                            f"{attempt}/{MAX_RETRIES} FALHOU | "
-                            f"exchange=binance code={ret_code} "
-                            f"msg='{ret_msg}' | "
-                            f"outer_retry=false "
-                            f"client_transport_recovery=authoritative"
-                        )
-                        log.error(
-                            f"🚫 _open {sig.symbol}: Binance não fará "
-                            f"nova submissão lógica após falha do "
-                            f"dispatcher; aguardando reconciliação/novo sinal"
-                        )
-                        break
-
-                    # KuCoin legacy classification remains venue-specific.
+                    if self._durable_state_enforced:
+                        await durable.record_binance_margin_rejection(self, _managed, exc)
                     import re as _re
-                    rc_match  = _re.search(r"KuCoin\s+(\d+):\s*(.*)|code['\"]?\s*[:=]\s*['\"]?(\d+)", err_str)
-                    ret_code  = rc_match.group(1) if rc_match else "?"
-                    ret_msg   = rc_match.group(2).strip() if rc_match else err_str
-
-                    log.error(
-                        f"❌ _open {sig.symbol} tentativa {attempt}/{MAX_RETRIES} FALHOU | "
-                        f"retCode={ret_code} retMsg='{ret_msg}' | "
-                        f"params: side={side} qty={qty} qty_step={qty_step} "
-                        f"entry={sig.entry:.6f} sl={sig.sl:.6f} tp={sig.tp:.6f} "
-                        f"tick={tick_size} notional={qty * sig.entry:.4f} "
-                        f"balance={self.risk.balance:.4f} leverage={cfg.LEVERAGE} | "
-                        f"raw_error={err_str}"
+                    _code_match = _re.search(
+                        r"code=(-?\d+)", err_str
                     )
-
-                    # Erros não-recuperáveis — não faz sentido tentar de novo
-                    # CORRIGIDO: os códigos anteriores (10001, 110007...) eram da
-                    # BYBIT. Na KuCoin nenhum deles existe, então erros permanentes
-                    # (saldo insuficiente, qty inválida) eram retentados 3x
-                    # inutilmente, com backoff — atrasando o scan.
-                    NON_RETRYABLE = {
-                        "400100",  # parâmetro inválido
-                        "400001",  # parâmetro obrigatório ausente
-                        "400002",  # KC-API-TIMESTAMP inválido
-                        "400003",  # KC-API-KEY inválida
-                        "400004",  # KC-API-PASSPHRASE inválida
-                        "400005",  # KC-API-SIGN inválida
-                        "400006",  # IP não autorizado
-                        "400007",  # sem permissão
-                        "300003",  # saldo insuficiente
-                        "300012",  # ordem rejeitada por risco
-                        "100001",  # ordem não existe
-                    }
-                    if ret_code in NON_RETRYABLE:
-                        log.error(
-                            f"🚫 _open {sig.symbol}: retCode={ret_code} é não-recuperável "
-                            f"— abortando sem retry"
-                        )
-                        break
-
-                    if attempt < MAX_RETRIES:
-                        delay = RETRY_DELAYS[attempt - 1]
-                        log.warning(
-                            f"⏳ _open {sig.symbol}: aguardando {delay}s antes da "
-                            f"tentativa {attempt + 1}/{MAX_RETRIES}..."
-                        )
-                        await asyncio.sleep(delay)
+                    _msg_match = _re.search(
+                        r"msg=(.*)$", err_str
+                    )
+                    ret_code = (
+                        _code_match.group(1)
+                        if _code_match else "?"
+                    )
+                    ret_msg = (
+                        _msg_match.group(1).strip()
+                        if _msg_match else err_str
+                    )
+                    log.error(
+                        f"❌ _open {sig.symbol} tentativa "
+                        f"{attempt}/{MAX_RETRIES} FALHOU | "
+                        f"exchange=binance code={ret_code} "
+                        f"msg='{ret_msg}' | "
+                        f"outer_retry=false "
+                        f"client_transport_recovery=authoritative"
+                    )
+                    log.error(
+                        f"🚫 _open {sig.symbol}: Binance não fará "
+                        f"nova submissão lógica após falha do "
+                        f"dispatcher; aguardando reconciliação/novo sinal"
+                    )
+                    break
 
             if last_exc is not None:
                 # Todas as tentativas falharam — loga resumo final e aborta
