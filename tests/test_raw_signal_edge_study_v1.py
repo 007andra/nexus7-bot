@@ -181,6 +181,27 @@ class StudyMechanicsTests(unittest.TestCase):
         self.assertFalse(report["live_allowed"])
 
 
+class ShardAndAggregateTests(unittest.TestCase):
+    def test_shards_partition_the_universe(self):
+        parts = [study.shard(study.PREREG["symbols"], f"{k}/5") for k in range(5)]
+        flat = [s for part in parts for s in part]
+        self.assertEqual(sorted(flat), sorted(study.PREREG["symbols"]))
+        self.assertEqual(len(flat), len(set(flat)))
+        with self.assertRaises(ValueError):
+            study.shard(study.PREREG["symbols"], "5/5")
+
+    def test_aggregate_rejects_duplicate_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.jsonl", Path(tmp) / "b.jsonl"
+            a.write_text('{"symbol": "X", "ts": 1}\n{"symbol": "Y", "ts": 1}\n')
+            b.write_text('{"symbol": "X", "ts": 2}\n')
+            self.assertEqual([(r["symbol"], r["ts"]) for r in study.read_rows([a, b])],
+                             [("X", 1), ("Y", 1), ("X", 2)])
+            b.write_text('{"symbol": "X", "ts": 1}\n')
+            with self.assertRaises(ValueError):
+                study.read_rows([a, b])
+
+
 class WorkerIsolationTests(unittest.TestCase):
     def test_worker_blocks_network_freezes_clock_and_scrubs_secrets(self):
         code = (

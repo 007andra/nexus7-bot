@@ -366,27 +366,71 @@ def download(cache: Path, symbols: list[str]) -> None:
         print(f"downloaded {symbol}", flush=True)
 
 
+def shard(symbols: list[str], spec: str | None) -> list[str]:
+    """``k/n`` picks every n-th symbol starting at k (0-based)."""
+    if not spec:
+        return list(symbols)
+    k, n = (int(x) for x in spec.split("/"))
+    if not 0 <= k < n:
+        raise ValueError("shard must be k/n with 0 <= k < n")
+    return list(symbols)[k::n]
+
+
+def read_rows(paths: list[Path]) -> list[dict]:
+    rows = []
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            rows.extend(json.loads(line) for line in fh if line.strip())
+    seen = {(r["symbol"], r["ts"]) for r in rows}
+    if len(seen) != len(rows):
+        raise ValueError("duplicate (symbol, ts) rows across inputs")
+    return sorted(rows, key=lambda r: (r["ts"], r["symbol"]))
+
+
+def write_report(rows: list[dict], out: Path) -> dict:
+    report = build_report(rows)
+    report["code_sha"] = _git_head()
+    report["symbols_with_rows"] = sorted({r["symbol"] for r in rows})
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    print(json.dumps({"verdict": report["verdict"], **report["verdict_basis"]}, sort_keys=True))
+    return report
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--cache", default="research_cache/binance_vision")
     parser.add_argument("--out", default="artifacts/raw_signal_edge_v1")
     parser.add_argument("--symbols", nargs="+", default=PREREG["symbols"])
+    parser.add_argument("--shard", help="k/n subset of the symbols, for parallel jobs")
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     parser.add_argument("--download-only", action="store_true")
     parser.add_argument("--skip-download", action="store_true")
+    parser.add_argument("--no-report", action="store_true", help="write signals.jsonl only")
+    parser.add_argument("--aggregate", nargs="+", type=Path,
+                        help="build the report from signals.jsonl files and exit")
     args = parser.parse_args(argv)
-    cache, out = Path(args.cache), Path(args.out)
+    out = Path(args.out)
+    if args.aggregate:
+        rows = read_rows(args.aggregate)
+        missing = sorted(set(PREREG["symbols"]) - {r["symbol"] for r in rows})
+        if missing:
+            print(f"warning: no rows for {missing}", flush=True)
+        write_report(rows, out)
+        return 0
+    cache = Path(args.cache)
+    symbols = shard(args.symbols, args.shard)
     if not args.skip_download:
-        download(cache, args.symbols)
+        download(cache, symbols)
     if args.download_only:
         return 0
     import multiprocessing as mp
     months = PREREG["discovery_months"] + PREREG["holdout_months"]
-    jobs = [{"symbol": s, "cache": str(cache), "months": months} for s in args.symbols]
+    jobs = [{"symbol": s, "cache": str(cache), "months": months} for s in symbols]
     out.mkdir(parents=True, exist_ok=True)
     rows = []
     ctx = mp.get_context("spawn")
-    with ctx.Pool(args.workers, maxtasksperchild=1) as pool:
+    with ctx.Pool(max(1, min(args.workers, len(jobs))), maxtasksperchild=1) as pool:
         for result in pool.imap_unordered(_worker, jobs):
             rows.extend(result["rows"])
             print(f"{result['symbol']}: {len(result['rows'])} signals in {result['elapsed_s']:.0f}s", flush=True)
@@ -394,10 +438,8 @@ def main(argv=None) -> int:
     with open(out / "signals.jsonl", "w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
-    report = build_report(rows)
-    report["code_sha"] = _git_head()
-    (out / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-    print(json.dumps({"verdict": report["verdict"], **report["verdict_basis"]}, sort_keys=True))
+    if not args.no_report:
+        write_report(rows, out)
     return 0
 
 
