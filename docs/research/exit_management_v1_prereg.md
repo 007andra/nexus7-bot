@@ -99,3 +99,21 @@ holdout à população `FUNNEL` com taxa de 0,06%:
   de confirmação prospectiva.
 - **Não autoriza nada em produção.** É uma simulação histórica; não prova
   execução nem libera LIVE.
+
+## Correção posterior (2026-10-14, depois da primeira execução)
+
+A primeira execução (PR #679, commit `2999ec2b`) mediu o R pela distância
+realizada entre o preenchimento e o stop. Quando o candle de entrada abre perto
+do stop planejado, essa distância fica minúscula, e os custos divididos por
+ela viram dezenas de R negativos. Isso apareceu como LINKUSDT a −8,27 R de
+média e dezembro de 2025 a −5,57 R.
+
+A produção dimensiona a posição pela distância planejada (`final_sizing`), e o
+RAW_SIGNAL_EDGE_V1 mede R da mesma forma. Por isso a medida foi corrigida para a
+distância planejada sobre o preço de preenchimento. Mais nada mudou: nem regras
+de saída, nem janelas, nem populações, nem critério. O dicionário `PREREG` e o
+seu SHA-256 são os mesmos.
+
+Como a correção foi feita depois de ver o resultado, os dois resultados ficam
+registrados. O veredito corrigido deve ser lido com essa ressalva.
+

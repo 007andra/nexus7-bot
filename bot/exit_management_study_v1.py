@@ -97,16 +97,17 @@ def _setup(direction, planned_entry, planned_sl, tp, decision_idx, k15, slippage
     sl = max(planned_sl, fill - distance) if long else min(planned_sl, fill + distance)
     if (fill - sl) * sign <= 0 or (tp - fill) * sign <= 0:
         return None
-    return long, sign, fill, sl
+    # R is the planned risk (what final sizing budgets), as in RAW_SIGNAL_EDGE_V1;
+    # the realized fill-to-stop distance can be arbitrarily small after a gap.
+    return long, sign, fill, sl, distance / fill
 
 
 def _finish(*, direction, fill, sl, legs, partial_ts, exit_ts, reason, decision_idx,
-            k15, funding, fee_rate):
+            k15, funding, fee_rate, risk_fraction):
     from bot.execution_model import fee_return_fraction, funding_return_fraction
     from bot.backtest import _timestamp_index
     from bot.nexus_oos_real_replay import _price_at_ts
     sign = 1.0 if direction == "LONG" else -1.0
-    risk_fraction = abs(fill - sl) / fill
     gross = sum(sign * (px - fill) / fill * w for px, w in legs)
     fees = fee_return_fraction(fill, legs, fee_rate)
     timestamps = _timestamp_index(k15)
@@ -126,7 +127,7 @@ def _simulate_path(*, direction: str, planned_entry: float, planned_sl: float,
     setup = _setup(direction, planned_entry, planned_sl, tp, decision_idx, k15, slippage)
     if setup is None:
         return None
-    long, sign, fill, sl = setup
+    long, sign, fill, sl, risk_fraction = setup
     rules = PREREG["exit"]
     max_bars = max_bars or rules["max_hold_bars_15m"]
     target = abs(tp - fill)
@@ -195,7 +196,7 @@ def _simulate_path(*, direction: str, planned_entry: float, planned_sl: float,
         exit_ts = int(last_bar["ts"]) + 900_000
     return _finish(direction=direction, fill=fill, sl=sl, legs=legs, partial_ts=partial_ts,
                    exit_ts=exit_ts, reason=reason, decision_idx=decision_idx, k15=k15,
-                   funding=funding, fee_rate=fee_rate)
+                   funding=funding, fee_rate=fee_rate, risk_fraction=risk_fraction)
 
 
 def _simulate_conservative(*, direction: str, planned_entry: float, planned_sl: float,
@@ -219,7 +220,7 @@ def _simulate_conservative(*, direction: str, planned_entry: float, planned_sl: 
     sl = max(planned_sl, fill - distance) if long else min(planned_sl, fill + distance)
     if (fill - sl) * sign <= 0 or (tp - fill) * sign <= 0:
         return None
-    risk_fraction = abs(fill - sl) / fill
+    risk_fraction = distance / fill   # planned risk, see _setup
     target = abs(tp - fill)
     active_stop = sl          # most protective native stop on the exchange
     pos_sl = sl               # engine's local pos.sl (read by the partial rule)

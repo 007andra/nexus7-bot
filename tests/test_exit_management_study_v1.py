@@ -69,6 +69,16 @@ class LiveExitRuleTests(unittest.TestCase):
         self.assertAlmostEqual(r["risk_fraction"], 1.0 / 100.5)
         self.assertAlmostEqual(r["gross_r"], -1.0)
 
+    def test_r_uses_the_planned_risk_after_a_gap_toward_the_stop(self):
+        # Opens at 99.05, just above the planned stop 99: the realized distance
+        # is 0.05 but sizing budgets the planned 1.0, so R must use 1.0.
+        for mode in ("CONSERVATIVE", "OHLC_PATH"):
+            r = sim(bars((99.05, 99.1, 98.9, 99.0)), fee=0.0006, mode=mode)
+            self.assertEqual(r["reason"], "STOP")
+            self.assertAlmostEqual(r["risk_fraction"], 1.0 / 99.05)
+            self.assertAlmostEqual(r["gross_r"], -0.05)
+            self.assertGreater(r["net_r"], -0.2)
+
     def test_short_mirror_and_costs_subtract(self):
         r = sim(bars((100, 100.2, 97.9, 98.0)), direction="SHORT", sl=101.0, tp=98.0,
                 fee=0.0006, slip=0.0005)
