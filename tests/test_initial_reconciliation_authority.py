@@ -22,11 +22,8 @@ class _Client:
     async def get_positions(self):
         return list(self.positions)
 
-    async def _get(self, path, params=None, auth=False):
-        assert path == "/api/v1/orders"
-        assert params == {"status": "active"}
-        assert auth is True
-        return {"items": list(self.active)}
+    async def get_open_orders(self):
+        return list(self.active)
 
 
 class _NativeOrdersClient(_Client):

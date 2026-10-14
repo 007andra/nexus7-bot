@@ -72,13 +72,9 @@ async def refresh_account_exposure(client, log) -> bool:
                 positions.append(p)
 
         open_orders = getattr(client, "get_open_orders", None)
-        if callable(open_orders):
-            orders_raw = await open_orders()
-        else:
-            orders_raw = await client._get(
-                "/api/v1/orders", {"status": "active"}, auth=True
-            )
-        orders = _active_orders(orders_raw)
+        if not callable(open_orders):
+            raise ValueError("client_has_no_open_orders_reader")
+        orders = _active_orders(await open_orders())
 
         protected = []
         unprotected = []

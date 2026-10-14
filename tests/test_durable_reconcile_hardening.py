@@ -117,7 +117,7 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
             get_order_status=AsyncMock(return_value={}),
             get_order_by_client_oid=AsyncMock(return_value={}),
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value=[]),
         )
         return engine
 
@@ -208,9 +208,7 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(order.is_terminal)
         engine.client.get_order_by_client_oid.assert_awaited_once_with("bgx7-stale")
         engine.client.get_positions.assert_awaited_once()
-        engine.client._get.assert_awaited_once_with(
-            "/api/v1/orders", {"status": "active"}, auth=True
-        )
+        engine.client.get_open_orders.assert_awaited_once_with()
         self.assertFalse(engine._durable_state_ok)
         self.assertEqual(len(engine.orders.pending_orders()), 1)
 
