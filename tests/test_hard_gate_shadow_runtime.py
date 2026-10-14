@@ -47,7 +47,16 @@ class EngineLoop(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.dict(os.environ, {**ENV, "HARD_GATE_SHADOW_SCAN": str(enabled).lower()}))
             stack.enter_context(patch.object(cfg, "MAX_DRAWDOWN", .17))
             stack.enter_context(patch.object(core.asyncio, "sleep", side_effect=one_cycle))
-            stack.enter_context(patch.object(obj, "_start_background", side_effect=lambda co: co.close()))
+            research = []
+            def start_background(co):
+                # Long-lived workers are dropped; the shadow scan task is kept
+                # and awaited so its research effect is still observed.
+                if co.__qualname__ != "scan_if_enabled":
+                    co.close()
+                    return None
+                research.append(asyncio.ensure_future(co))
+                return research[-1]
+            stack.enter_context(patch.object(obj, "_start_background", side_effect=start_background))
             for name in ("_connect", "_update_balance", "_guard_naked_positions", "_sync_positions",
                          "_check_stagnation_and_invalidation", "_manage_partial_tp", "_apply_trailing_stops",
                          "_check_rr_double", "_heartbeat_telegram"):
@@ -71,6 +80,8 @@ class EngineLoop(unittest.IsolatedAsyncioTestCase):
             live = stack.enter_context(patch.object(obj, "_scan_all_and_enter", new_callable=AsyncMock))
             open_order = stack.enter_context(patch.object(obj, "_open", new_callable=AsyncMock))
             await CORE_RUN(obj)
+            await asyncio.gather(*research)
+            self.assertEqual(len(research), int(bool(enabled)))
             self.assertFalse(hasattr(obj, "_last_bug_sig"), getattr(obj, "_last_bug_sig", ""))
             live.assert_not_called()
             open_order.assert_not_called()

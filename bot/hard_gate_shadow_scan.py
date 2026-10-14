@@ -1450,6 +1450,28 @@ async def _maybe_emit_short_down_bos_prospective(db):
         return None
 
 
+def schedule_if_enabled(engine):
+    """Start scan_if_enabled beside the trading loop, at most one at a time.
+
+    The trading loop used to await the scan, so a slow research cycle (DB
+    snapshots, report emitters) delayed stop/trailing management. While a
+    previous scan is still running this cycle is skipped, not queued.
+    """
+    if not enabled():
+        return None
+    try:
+        task = getattr(engine, "_hard_gate_shadow_task", None)
+        if task is not None and not task.done():
+            return task
+        task = engine._start_background(scan_if_enabled(engine))
+        task.add_done_callback(engine._background_tasks.discard)
+        engine._hard_gate_shadow_task = task
+        return task
+    except Exception as exc:
+        _emit("HARD_GATE_SHADOW_SCAN", {"schedule_error": type(exc).__name__, **AUTHORITY})
+        return None
+
+
 async def scan(engine, *, db=None, bbo_views=None):
     if not enabled():
         return None

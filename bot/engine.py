@@ -579,8 +579,10 @@ class TradingEngine:
                     
                         # Independent, cache-only research. No candidate is handed
                         # to the LIVE funnel; its authorization below is unchanged.
-                        from bot.hard_gate_shadow_scan import scan_if_enabled
-                        await scan_if_enabled(self)
+                        # It runs beside this loop so a slow scan never delays
+                        # position management or the next cycle.
+                        from bot.hard_gate_shadow_scan import schedule_if_enabled
+                        schedule_if_enabled(self)
 
                         if not self.active or getattr(self, 'entries_paused', False) or self.daily_stopped or daily_state_blocked or not daily_pnl_ok:
                             # FIX: logar apenas 1x — não a cada 5s em loop infinito
