@@ -75,9 +75,22 @@ class EntryPauseTests(BinanceEngineFixture):
             for name in managed:
                 getattr(e, name).assert_awaited_once()
             e._scan_all_and_enter.assert_not_awaited()
-            self.assertEqual(len(tasks), 7)
+            # Weekly backtest/optimizer are not started in the trading process.
+            self.assertEqual(len(tasks), 5)
             self.assertTrue(all(t.done() for t in tasks))
             self.assertFalse(e._background_tasks)
             await e.run()
-            self.assertEqual(len(tasks), 14)
+            self.assertEqual(len(tasks), 10)
             self.assertTrue(all(t.done() for t in tasks))
+
+
+class WeeklyResearchIsolationTests(BinanceEngineFixture):
+    async def test_engine_does_not_start_weekly_research_loops(self):
+        from pathlib import Path
+
+        # TradingEngine.run is wrapped by runtime overlays; read the core run().
+        text = Path(E.__file__).read_text(encoding="utf-8")
+        src = text[text.index("    async def run(self):"):text.index("    async def _connect(")]
+        self.assertNotIn("weekly_backtest_loop(", src)
+        self.assertNotIn("weekly_optimization_loop(", src)
+        self.assertIn("[WEEKLY_RESEARCH] backtest=not_started", src)
