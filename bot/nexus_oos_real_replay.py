@@ -99,8 +99,13 @@ def _simulate_net_r(
     funding_events: list[dict],
     fee_rate: float,
     slippage_rate: float,
-) -> float | None:
-    """Mirror KUCOIN_MARKET_PROXY_V1 and return net R for one candidate."""
+    return_detail: bool = False,
+) -> float | dict | None:
+    """Mirror KUCOIN_MARKET_PROXY_V1 and return net R for one candidate.
+
+    With ``return_detail`` the exit time and the gross/fee/funding parts are
+    returned too, so a study can avoid overlapping trades per symbol.
+    """
     market_open = float(klines_15[decision_idx]["o"])
     entry_fill = adverse_fill(market_open, direction, is_entry=True, slippage_rate=slippage_rate)
     if entry_fill <= 0 or signal_entry <= 0:
@@ -184,7 +189,12 @@ def _simulate_net_r(
         price_at_ts=lambda ts: _price_at_ts(klines_15, timestamps, ts),
         partial_after_ts_ms=tp1_ts,
     )
-    return (gross - fees + funding) / risk_fraction
+    net_r = (gross - fees + funding) / risk_fraction
+    if return_detail:
+        return {"net_r": net_r, "exit_ts": exit_ts, "gross": gross, "fees": fees,
+                "funding": funding, "risk_fraction": risk_fraction,
+                "tp1_hit": tp1_hit}
+    return net_r
 
 
 def _freeze_nexus_clock(nexus_ai, decision_ts_ms: int):
