@@ -1090,6 +1090,215 @@ async def attest_flows(
     return {"status": "APPLIED", "record": record}
 
 
+CAPITAL_RESTART_HISTORY_KEY = "risk:capital_restart:binance:history:v1"
+CAPITAL_RESTART_METHOD = "CAPITAL_RESTART"
+
+
+def _parse_restart_history(raw) -> dict:
+    if raw is None:
+        return {"version": 1, "restarts": []}
+    try:
+        doc = json.loads(raw)
+        if not isinstance(doc, dict) or int(doc.get("version", 0)) != 1:
+            raise ValueError("version")
+        if not isinstance(doc.get("restarts"), list):
+            raise ValueError("restarts")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise db.PersistenceError("capital restart history is malformed") from exc
+    return doc
+
+
+async def capital_restart(
+    *,
+    rows: list[dict],
+    restart_id: str,
+    tran_ids: list[str],
+    reason: str,
+    evidence_ref: str,
+    apply: bool,
+    now_ms: int,
+    account: dict | None,
+    rows_cover_until_ms: int | None,
+    strict: bool = True,
+) -> dict:
+    """Operator-authorised restart of the performance HWM on new capital.
+
+    For an account whose historical trading drawdown is at or beyond the
+    configured limit and that was then recapitalised. The TWR rebase cannot
+    help there (it carries the old drawdown over to the new money, by design),
+    so this opens a new performance baseline equal to the current equity.
+
+    Nothing is deleted: the ledger keeps every earlier record, this restart is
+    appended to it with the previous HWM, and an append-only restart history
+    records who/why/when. Every flow in the batch must come from exchange
+    ledger rows, the account must be flat, the batch must cover every pending
+    flow and every external flow since the first one, and the ledger must
+    prove the equity before the batch. Only an explicit CLI command with an
+    exact confirmation token applies it; nothing in the runtime calls this.
+    """
+    restart_id = str(restart_id or "").strip()
+    if not restart_id or len(restart_id) > 64:
+        raise ValueError("restart_id must be 1..64 chars")
+    reason = str(reason or "").strip()
+    evidence_ref = str(evidence_ref or "").strip()
+    if not reason or not evidence_ref:
+        raise ValueError("reason and evidence_ref are mandatory")
+    wanted = [str(t).strip() for t in tran_ids if str(t).strip()]
+    if not wanted or len(set(wanted)) != len(wanted):
+        raise ValueError("tran_ids must be non-empty and unique")
+
+    cursor_raw = await db.load_key_value(SEEN_CURSOR_KEY, strict=strict)
+    if cursor_raw is None:
+        raise ValueError("runtime cash-flow cursor not bootstrapped; nothing to restart against")
+    seen = _parse_cursor(cursor_raw)
+    ledger_raw = await db.load_key_value(LEDGER_KEY, strict=strict)
+    doc = _empty_ledger() if ledger_raw is None else _parse_ledger(ledger_raw)
+    history_raw = await db.load_key_value(CAPITAL_RESTART_HISTORY_KEY, strict=strict)
+    history = _parse_restart_history(history_raw)
+
+    for record in doc["applied"]:
+        if str(record["reconciliation_id"]) == restart_id:
+            if (record.get("method") == CAPITAL_RESTART_METHOD
+                    and sorted(record.get("tran_ids", [])) == sorted(wanted)):
+                return {"status": "ALREADY_APPLIED", "record": record}
+            raise ValueError("restart_id already used for a different reconciliation")
+
+    flows = []
+    for tran_id in wanted:
+        matches = [
+            r for r in rows
+            if str(r.get("tranId")) == tran_id
+            and classify_income_type(r.get("incomeType")) == "EXTERNAL_FLOW"
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"tranId {tran_id} not found exactly once as an external flow row")
+        flow = _normalize_flow(matches[0], now_ms)
+        if flow["asset"] != "USDT":
+            raise ValueError("only USDT flows are supported")
+        flows.append(flow)
+    ids = {f["identity"] for f in flows}
+    if ids & applied_identities(doc):
+        raise ValueError("flow already applied")
+    pending_ids = {str(p["identity"]) for p in doc["pending"]}
+    if pending_ids - ids:
+        raise ValueError("every pending flow must be part of the restart batch")
+    if (ids & set(seen)) - pending_ids:
+        raise ValueError("flow was checkpointed before the ledger existed; refusing to restart")
+
+    net = math.fsum(f["amount"] for f in flows)
+    if net <= 0:
+        raise ValueError("a capital restart needs net new capital (net flow must be positive)")
+    provable = ledger_provable_pre_flow_equity(
+        flows, rows, account, rows_cover_until_ms=rows_cover_until_ms, now_ms=now_ms,
+    )
+    if provable is None:
+        raise ValueError(
+            "pre-restart equity unverified: needs a flat account and complete exchange "
+            "evidence with no performance income since the first flow"
+        )
+    tolerance = max(_WALLET_TOLERANCE_ABS, abs(provable) * _WALLET_TOLERANCE_REL)
+    if provable < -tolerance:
+        raise ValueError("ledger proves negative pre-restart equity")
+    pre = max(0.0, provable)
+    equity = _positive(account.get("equity"), "account equity")
+    post = pre + net
+    if abs(equity - post) > max(_WALLET_TOLERANCE_ABS, post * _WALLET_TOLERANCE_REL):
+        raise ValueError("account equity contradicts pre-restart equity + net flow")
+
+    previous_hwm, peak_raw = await _load_raw_peak(strict)
+    if previous_hwm is None:
+        raise ValueError("no durable HWM exists; a restart needs a history to preserve")
+    limit = _cfg_drawdown_limit()
+    if limit is None or not 0 < limit < 1:
+        raise ValueError("configured drawdown limit unavailable")
+    historical_drawdown = trading_drawdown(pre, max(previous_hwm, pre)) if pre > 0 else 1.0
+    if historical_drawdown < limit:
+        raise ValueError(
+            f"historical drawdown {historical_drawdown:.4f} is below the limit {limit:.4f}; "
+            "use the TWR attestation instead of a restart"
+        )
+
+    record = {
+        "reconciliation_id": restart_id,
+        "method": CAPITAL_RESTART_METHOD,
+        "identities": sorted(ids),
+        "tran_ids": sorted(str(f["tran_id"]) for f in flows),
+        "income_types": sorted({str(f["income_type"]) for f in flows}),
+        "net_amount": net,
+        "gross_in": math.fsum(float(f["amount"]) for f in flows if float(f["amount"]) > 0),
+        "gross_out": math.fsum(-float(f["amount"]) for f in flows if float(f["amount"]) < 0),
+        "direction": _direction(net),
+        "flow_time_first_ms": min(int(f["time_ms"]) for f in flows),
+        "flow_time_last_ms": max(int(f["time_ms"]) for f in flows),
+        "pre_flow_equity": pre,
+        "post_flow_equity": post,
+        "previous_hwm": previous_hwm,
+        "historical_drawdown_at_restart": historical_drawdown,
+        "drawdown_limit_at_restart": limit,
+        "adjusted_hwm": equity,
+        "equity_at_reconciliation": equity,
+        "trading_drawdown_after": 0.0,
+        "history_preserved": True,
+        "reason": reason[:200],
+        "evidence_ref": evidence_ref[:200],
+        "recorded_at_ms": int(now_ms),
+    }
+    entry = {
+        "restart_id": restart_id,
+        "previous_hwm": previous_hwm,
+        "historical_drawdown": historical_drawdown,
+        "pre_restart_equity": pre,
+        "net_new_capital": net,
+        "new_hwm": equity,
+        "tran_ids": record["tran_ids"],
+        "reason": record["reason"],
+        "evidence_ref": record["evidence_ref"],
+        "recorded_at_ms": int(now_ms),
+    }
+    if not apply:
+        return {"status": "DRY_RUN", "record": record, "history_entry": entry}
+
+    from bot import drawdown_persistence as ddp
+    from bot import hwm_namespace, hwm_provenance
+
+    new_doc = {
+        "version": 1,
+        "pending": [p for p in doc["pending"] if str(p["identity"]) not in ids],
+        "applied": list(doc["applied"]) + [record],
+    }
+    new_history = {"version": 1, "restarts": list(history["restarts"]) + [entry]}
+    items = [
+        (LEDGER_KEY, _dump(new_doc)),
+        (SEEN_CURSOR_KEY, _cursor_value(list(seen) + sorted(ids), now_ms)),
+        (ddp.DURABLE_EQUITY_PEAK_KEY, format(float(equity), ".17g")),
+        (hwm_namespace.provenance_key(), hwm_provenance.build_hwm_provenance(
+            reason="capital_restart",
+            old_peak=previous_hwm,
+            new_peak=equity,
+            account_equity=equity,
+            evidence_ref=f"cash_flow_ledger:{CAPITAL_RESTART_METHOD}:{restart_id}"[:160],
+        )),
+        (CAPITAL_RESTART_HISTORY_KEY, _dump(new_history)),
+    ]
+    expected = {
+        LEDGER_KEY: ledger_raw,
+        SEEN_CURSOR_KEY: cursor_raw,
+        ddp.DURABLE_EQUITY_PEAK_KEY: peak_raw,
+        CAPITAL_RESTART_HISTORY_KEY: history_raw,
+    }
+    ok = await save_key_values_atomic_cas(items, expected=expected, strict=strict)
+    if strict and not ok:
+        raise db.PersistenceError("capital restart write not confirmed")
+    log.critical(
+        "[CAPITAL_RESTART] restart_id=%s previous_hwm=%.8f historical_drawdown=%.4f "
+        "pre_restart_equity=%.8f net_new_capital=%.8f new_hwm=%.8f tran_ids=%s "
+        "history_preserved=true operator_authorised=true execution_effect=NONE",
+        restart_id, previous_hwm, historical_drawdown, pre, net, equity,
+        ",".join(record["tran_ids"]),
+    )
+    return {"status": "APPLIED", "record": record, "history_entry": entry}
+
+
 async def rebaseline_wallet(*, wallet: float, anchor_ms: int, reason: str, apply: bool, strict: bool = True) -> dict:
     """Operator re-anchor of the wallet-completeness invariant (never the HWM)."""
     reason = str(reason or "").strip()
@@ -1124,4 +1333,7 @@ async def ledger_snapshot(*, strict: bool = True) -> dict:
         "totals": ledger_totals(doc),
         "wallet_baseline": _parse_baseline(baseline_raw),
         "durable_hwm": peak,
+        "capital_restarts": _parse_restart_history(
+            await db.load_key_value(CAPITAL_RESTART_HISTORY_KEY, strict=strict)
+        )["restarts"],
     }

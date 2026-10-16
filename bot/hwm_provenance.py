@@ -17,6 +17,7 @@ _ALLOWED_REASONS = {
     "incident_repair",
     "external_capital_flow_rebase",
     "external_position_performance_rebase",
+    "capital_restart",
 }
 
 

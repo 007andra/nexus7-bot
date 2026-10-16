@@ -24,6 +24,7 @@ SETTINGS = {
 ALLOWED_REASONS = {
     "bootstrap", "new_equity_high", "incident_repair",
     "external_capital_flow_rebase", "external_position_performance_rebase",
+    "capital_restart",
 }
 
 
@@ -95,7 +96,10 @@ def review_values(values, *, peak_key, provenance_key):
             errors.append("DUPLICATE_APPLIED_FLOW")
         reconciled_flow_ids.update(ids)
         flow_n += len(ids)
-        pre = _number(record.get("pre_flow_equity"), positive=True)
+        restart = record.get("method") == "CAPITAL_RESTART"
+        pre = _number(record.get("pre_flow_equity"), positive=not restart)
+        if restart and pre is not None and pre < 0:
+            pre = None
         post = _number(record.get("post_flow_equity"), positive=True)
         prior = _number(record.get("previous_hwm"), positive=True)
         adjusted = _number(record.get("adjusted_hwm"), positive=True)
@@ -122,7 +126,9 @@ def review_values(values, *, peak_key, provenance_key):
         direction = "DEPOSIT" if net > 0 else "WITHDRAWAL" if net < 0 else "NET_ZERO"
         if record.get("direction") != direction:
             errors.append("FLOW_DIRECTION_MISMATCH")
-        expected = max(prior, pre) * (post / pre)
+        # A capital restart (operator-authorised, history preserved) opens a
+        # new baseline at the reconciliation equity instead of a TWR rebase.
+        expected = post if restart else max(prior, pre) * (post / pre)
         # One-way reconstruction mirrors the canonical cash_flow_ledger rule:
         # adjusted HWM >= both TWR rebased HWM and equity at reconciliation.
         equity_at = _number(record.get("equity_at_reconciliation"), positive=True)
