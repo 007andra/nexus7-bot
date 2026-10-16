@@ -1144,6 +1144,18 @@ class TradingEngine:
                     type(_cohort_exc).__name__,
                 )
 
+            # B2 daily channel breakout in shadow mode: public daily klines once
+            # per UTC day, virtual positions only, never an order.
+            try:
+                from bot import b2_trend_strategy as _b2_strategy
+                _b2_strategy.schedule_if_enabled(self, log)
+            except Exception as _b2_exc:
+                log.warning(
+                    "[B2_SHADOW] status=DEFER reason=%s %s",
+                    type(_b2_exc).__name__, "research_only=true shadow_only=true "
+                    "live_allowed=false decision_effect=NONE execution_effect=NONE",
+                )
+
             try:
                 await asyncio.wait_for(self._load_existing_positions(), timeout=20)
             except asyncio.TimeoutError:
