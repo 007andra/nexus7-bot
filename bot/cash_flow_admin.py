@@ -9,6 +9,13 @@ Read-only by default. Mutating commands require ``--apply`` plus an exact
         [--since-ms MS] [--apply --confirm ATTEST:ID]
     python -m bot.cash_flow_admin rebaseline-wallet --reason "..." \
         [--apply --confirm REBASELINE-WALLET]
+    python -m bot.cash_flow_admin restart-capital --restart-id ID --tran-ids 1,2 \
+        --evidence-ref "..." --reason "..." [--since-ms MS] \
+        [--apply --confirm RESTART-CAPITAL:ID]
+
+``restart-capital`` opens a new performance baseline on fresh capital after the
+historical drawdown reached the limit. It never deletes history: the previous
+HWM stays in the ledger record and in an append-only restart history.
 
 Amounts, directions and timestamps always come from Binance ``/fapi/v1/income``
 rows; they are never typed by the operator and never inferred from a balance
@@ -39,6 +46,14 @@ def _parser() -> argparse.ArgumentParser:
     attest.add_argument("--since-ms", type=int, default=None, help="income window start (<=7d window)")
     attest.add_argument("--apply", action="store_true")
     attest.add_argument("--confirm", default="")
+    restart = sub.add_parser("restart-capital", help="new performance baseline on fresh capital")
+    restart.add_argument("--restart-id", required=True)
+    restart.add_argument("--tran-ids", required=True, help="comma-separated Binance tranIds")
+    restart.add_argument("--evidence-ref", required=True)
+    restart.add_argument("--reason", required=True)
+    restart.add_argument("--since-ms", type=int, default=None, help="income window start (<=7d window)")
+    restart.add_argument("--apply", action="store_true")
+    restart.add_argument("--confirm", default="")
     rebase = sub.add_parser("rebaseline-wallet", help="re-anchor the wallet completeness invariant")
     rebase.add_argument("--reason", required=True)
     rebase.add_argument("--apply", action="store_true")
@@ -52,6 +67,48 @@ async def _client():
     client = BinanceClient()
     await client.sync_time()
     return client
+
+
+async def _verified_evidence(client, args, account, now_ms):
+    """Income rows + account snapshot; with --apply, read twice and require equality."""
+    from bot.binance_accounting_evidence import collect_income
+
+    start = args.since_ms if args.since_ms is not None else now_ms - _WINDOW_MS
+    end = min(now_ms, int(start) + _WINDOW_MS)
+    rows = await collect_income(client, int(start), end)
+    if not args.apply:
+        return rows, account, now_ms, end
+    # Re-check AFTER the income fetch. The first account snapshot
+    # can go stale while the Binance ledger is being paginated.
+    # An old --since-ms window cannot prove current equity.
+    verified_now_ms = client._now_ms()
+    # The default lookback must slide with the second observation.
+    # Otherwise any nonzero elapsed time makes second_end stale and
+    # falsely rejects every normal --apply call. Explicit --since-ms
+    # stays fixed and fails closed when it no longer covers now.
+    second_start = (
+        verified_now_ms - _WINDOW_MS
+        if args.since_ms is None else int(start)
+    )
+    second_end = min(verified_now_ms, second_start + _WINDOW_MS)
+    if second_end < verified_now_ms:
+        raise ValueError("incomplete Binance income window: apply refused")
+    rows_again = await collect_income(client, second_start, second_end)
+    account_again = await client.get_account_state()
+    if rows_again != rows or not isinstance(account_again, dict):
+        raise ValueError("unstable Binance income evidence: apply refused")
+    balance_fields = (
+        "equity", "walletBalance", "positionMargin",
+        "unrealisedPNL", "multiAssetsMargin",
+    )
+    if not isinstance(account, dict) or any(
+        account.get(key) != account_again.get(key)
+        for key in balance_fields
+    ):
+        raise ValueError("unstable Binance account balance: apply refused")
+    # Use the second fresh observation, not the older pre-fetch snapshot.
+    # No database write has occurred yet.
+    return rows, account_again, verified_now_ms, second_end
 
 
 async def _run(args) -> dict:
@@ -68,51 +125,28 @@ async def _run(args) -> dict:
         if args.command == "attest":
             if args.apply and args.confirm != f"ATTEST:{args.reconciliation_id}":
                 raise SystemExit("refused: --confirm must be ATTEST:<reconciliation-id>")
-            from bot.binance_accounting_evidence import collect_income
-
-            start = args.since_ms if args.since_ms is not None else now_ms - _WINDOW_MS
-            end = min(now_ms, int(start) + _WINDOW_MS)
-            rows = await collect_income(client, int(start), end)
-            if args.apply:
-                # Re-check AFTER the income fetch. The first account snapshot
-                # can go stale while the Binance ledger is being paginated.
-                # An old --since-ms window cannot prove current equity.
-                verified_now_ms = client._now_ms()
-                # The default lookback must slide with the second observation.
-                # Otherwise any nonzero elapsed time makes second_end stale and
-                # falsely rejects every normal --apply call. Explicit --since-ms
-                # stays fixed and fails closed when it no longer covers now.
-                second_start = (
-                    verified_now_ms - _WINDOW_MS
-                    if args.since_ms is None else int(start)
-                )
-                second_end = min(verified_now_ms, second_start + _WINDOW_MS)
-                if second_end < verified_now_ms:
-                    raise ValueError("incomplete Binance income window: attestation apply refused")
-                rows_again = await collect_income(client, second_start, second_end)
-                account_again = await client.get_account_state()
-                if rows_again != rows or not isinstance(account_again, dict):
-                    raise ValueError("unstable Binance income evidence: attestation apply refused")
-                balance_fields = (
-                    "equity", "walletBalance", "positionMargin",
-                    "unrealisedPNL", "multiAssetsMargin",
-                )
-                if not isinstance(account, dict) or any(
-                    account.get(key) != account_again.get(key)
-                    for key in balance_fields
-                ):
-                    raise ValueError("unstable Binance account balance: attestation apply refused")
-                # Attest against the second fresh observation, not the older
-                # pre-fetch snapshot. No database write has occurred yet.
-                now_ms = verified_now_ms
-                account = account_again
-                end = second_end
+            rows, account, now_ms, end = await _verified_evidence(client, args, account, now_ms)
             return await ledger.attest_flows(
                 rows=rows,
                 reconciliation_id=args.reconciliation_id,
                 tran_ids=args.tran_ids.split(","),
                 pre_flow_equity=args.pre_flow_equity,
                 current_equity=float(account["equity"]),
+                reason=args.reason,
+                evidence_ref=args.evidence_ref,
+                apply=bool(args.apply),
+                now_ms=now_ms,
+                account=account,
+                rows_cover_until_ms=end,
+            )
+        if args.command == "restart-capital":
+            if args.apply and args.confirm != f"RESTART-CAPITAL:{args.restart_id}":
+                raise SystemExit("refused: --confirm must be RESTART-CAPITAL:<restart-id>")
+            rows, account, now_ms, end = await _verified_evidence(client, args, account, now_ms)
+            return await ledger.capital_restart(
+                rows=rows,
+                restart_id=args.restart_id,
+                tran_ids=args.tran_ids.split(","),
                 reason=args.reason,
                 evidence_ref=args.evidence_ref,
                 apply=bool(args.apply),

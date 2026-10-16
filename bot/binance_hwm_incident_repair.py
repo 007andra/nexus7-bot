@@ -43,6 +43,7 @@ _SUPERSEDING_REASONS = frozenset({
     "new_equity_high",
     "external_capital_flow_rebase",
     "external_position_performance_rebase",
+    "capital_restart",
 })
 _TOL = 1e-6
 _EQUITY_TOL = 0.02
