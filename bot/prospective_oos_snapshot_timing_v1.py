@@ -38,6 +38,11 @@ class SnapshotTimingProbe:
         self.lock_not_acquired = 0
         self.rows_fetched = 0
         self.rows_by_stage = {name: 0 for name in ("metadata", "candidates", "outcomes")}
+        # Aggregate sizes of ALREADY FETCHED serialized JSON payloads only.
+        # These are client-side UTF-8 payload estimates, not SQL time or wire bytes.
+        self.payload_utf8_bytes_by_stage = {"candidates": 0, "outcomes": 0}
+        self.payload_max_utf8_bytes_by_stage = {"candidates": 0, "outcomes": 0}
+        self.payload_measured_rows_by_stage = {"candidates": 0, "outcomes": 0}
         self.unattributed_rows = 0
         self.fetch_cancelled = 0
         self.missing_row_counts = 0
@@ -118,6 +123,30 @@ class SnapshotTimingProbe:
             else:
                 self.unattributed_rows += count
 
+    def record_payload_size(self, stage, raw):
+        """Record only bounded integer lengths; never persist or log payload data.
+
+        Called while existing parsing already iterates over fetched rows.
+        No extra SELECTs, network calls or cohort transformations.
+        """
+        if stage not in self.payload_utf8_bytes_by_stage:
+            return
+        try:
+            if isinstance(raw, str):
+                byte_count = len(raw.encode("utf-8"))
+            elif isinstance(raw, bytes):
+                byte_count = len(raw)
+            else:
+                return
+        except (UnicodeError, TypeError, ValueError):
+            # Invalid research payload must not change the snapshot result.
+            return
+        self.payload_utf8_bytes_by_stage[stage] += byte_count
+        self.payload_max_utf8_bytes_by_stage[stage] = max(
+            self.payload_max_utf8_bytes_by_stage[stage], byte_count,
+        )
+        self.payload_measured_rows_by_stage[stage] += 1
+
     def record_exec(self, *, waited_ms, executed_ms, lock_acquired,
                     cancelled, owner_at_wait_start="NOT_SAMPLED"):
         # Metadata may execute DDL under the same lock as read-only SELECTs.
@@ -167,6 +196,13 @@ class SnapshotTimingProbe:
             "metadata_rows": self.rows_by_stage["metadata"],
             "candidate_rows": self.rows_by_stage["candidates"],
             "outcome_rows": self.rows_by_stage["outcomes"],
+            "candidate_json_utf8_bytes": self.payload_utf8_bytes_by_stage["candidates"],
+            "outcome_json_utf8_bytes": self.payload_utf8_bytes_by_stage["outcomes"],
+            "candidate_json_max_utf8_bytes": self.payload_max_utf8_bytes_by_stage["candidates"],
+            "outcome_json_max_utf8_bytes": self.payload_max_utf8_bytes_by_stage["outcomes"],
+            "candidate_json_measured_rows": self.payload_measured_rows_by_stage["candidates"],
+            "outcome_json_measured_rows": self.payload_measured_rows_by_stage["outcomes"],
+            "json_size_scope": "CLIENT_JSON_UTF8_ONLY_NOT_WIRE_OR_PG_EXECUTION",
             "unattributed_rows": self.unattributed_rows,
             "lock_not_acquired": self.lock_not_acquired,
             "fetch_cancelled": self.fetch_cancelled,

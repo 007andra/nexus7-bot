@@ -353,6 +353,8 @@ async def snapshot(db, *, timing_probe=None):
     payloads = []
     for item in rows or []:
         raw = item["payload"] if hasattr(item, "keys") else item[0]
+        if timing_probe is not None:
+            timing_probe.record_payload_size("candidates", raw)
         try:
             payloads.append(json.loads(raw))
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -377,6 +379,8 @@ async def snapshot(db, *, timing_probe=None):
     out60, out240 = [], []
     for item in out_rows or []:
         raw = item["payload"] if hasattr(item, "keys") else item[2]
+        if timing_probe is not None:
+            timing_probe.record_payload_size("outcomes", raw)
         cid = item["candidate_id"] if hasattr(item, "keys") else item[0]
         horizon = int(item["horizon"] if hasattr(item, "keys") else item[1])
         try:
