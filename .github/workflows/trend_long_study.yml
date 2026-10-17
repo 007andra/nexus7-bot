@@ -1,0 +1,45 @@
+name: Trend long study (TREND_LONG_V1)
+
+# Research only: two pre-registered long-only trend rules on Binance spot
+# 2017-2021 (decisive, untouched) and USD-M futures 2022-2026 (confirmation).
+# No credentials, no database, no orders.
+on:
+  pull_request:
+    branches: [main, migration/binance-usdm]
+    paths:
+      - "bot/trend_long_study_v1.py"
+      - "bot/binance_public_history.py"
+      - "docs/research/trend_long_v1_prereg.md"
+      - ".github/workflows/trend_long_study.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  study:
+    name: Pre-registered verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Study mechanics tests
+        run: python -m unittest tests.test_trend_long_study_v1 -v
+      - name: Download, simulate and report
+        run: python -m bot.trend_long_study_v1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trend-long-report
+          path: artifacts/trend_long_v1/report.json
+          retention-days: 90
