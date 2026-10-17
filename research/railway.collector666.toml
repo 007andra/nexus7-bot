@@ -1,0 +1,10 @@
+# Research-only #666 public-market collector. Separate Railway service.
+# Never point the trading service at this file: it starts the collector,
+# not the bot, and has no HTTP healthcheck.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m bot.capital_free_market_collector_666_v1"
+restartPolicyType = "ALWAYS"
