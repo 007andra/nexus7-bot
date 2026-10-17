@@ -33,6 +33,7 @@ SYMBOLS = (
 )
 SHADOW_FLAG = "STRATEGY_B2_SHADOW"
 STATE_KEY = "strategy:b2:shadow:state:v1"
+HISTORY_LIMIT = 5000  # closed virtual trades kept in the state key
 KLINE_LIMIT = 60
 RUN_DELAY_S = 120
 AUTHORITY = "research_only=true shadow_only=true live_allowed=false decision_effect=NONE execution_effect=NONE"
@@ -184,6 +185,19 @@ def _log_event(log, ev: dict) -> None:
         )
 
 
+def record_exit(state: dict, ev: dict, now_ms: int) -> None:
+    """Durable history of closed virtual trades, to compare with the study later."""
+    pos = ev["position"]
+    history = state.setdefault("closed", [])
+    history.append({
+        "symbol": ev["symbol"], "direction": pos["direction"],
+        "entry_day_ts": int(pos["entry_day_ts"]), "entry": pos["entry"], "stop": pos["stop"],
+        "distance": pos["distance"], "exit": ev["price"], "reason": ev["reason"],
+        "gross_r": ev["r"], "recorded_at_ms": int(now_ms),
+    })
+    del history[:-HISTORY_LIMIT]
+
+
 async def run_once(engine, log, now_ms: int | None = None) -> dict:
     from bot import database as db
 
@@ -204,6 +218,8 @@ async def run_once(engine, log, now_ms: int | None = None) -> dict:
             continue
         for ev in step(state, symbol, klines, now_ms):
             _log_event(log, ev)
+            if ev["event"] == "EXIT":
+                record_exit(state, ev, now_ms)
     if errors == 0:
         state["last_day_ts"] = today
     await db.save_key_value(STATE_KEY, json.dumps(state, sort_keys=True), strict=False)

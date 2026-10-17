@@ -1,7 +1,7 @@
 # NEXUS-7 / BGX Capital — trading bot
 
-Automated trading for **Binance USD-M perpetual futures** (the production venue).
-KuCoin Futures remains selectable (`EXCHANGE=kucoin`) for compatibility.
+Automated trading for **Binance USD-M perpetual futures**, the only supported venue.
+KuCoin support was removed (PR #670); `KUCOIN_MIGRATION.md` is kept as history.
 
 > Earlier versions of this README described Bybit. That text was obsolete and
 > has been replaced. For the migration history see `KUCOIN_MIGRATION.md` (historical).
