@@ -152,6 +152,32 @@ class RunOnceTests(unittest.IsolatedAsyncioTestCase):
         state = await b2.run_once(engine, LOG, now_ms=(DAY0 + 50) * b2.DAY_MS + 300_000)
         self.assertEqual(state["last_day_ts"], 0)
 
+    async def test_closed_virtual_trades_are_kept_in_the_state_key(self):
+        days = random_days(260, 5)
+        current = {"n": 0}
+
+        async def get_klines(symbol, interval, limit):
+            return days[:current["n"]][-limit:]
+
+        engine = SimpleNamespace(client=SimpleNamespace(get_klines=get_klines))
+        for i in range(1, len(days) + 1):
+            current["n"] = i
+            await b2.run_once(engine, LOG, now_ms=days[i - 1]["ts"] + 60_000)
+        saved = json.loads(await db.load_key_value(b2.STATE_KEY))
+        mine = [(c["entry_day_ts"] // b2.DAY_MS, c["direction"], c["reason"], round(c["exit"], 8))
+                for c in saved["closed"] if c["symbol"] == "BTCUSDT"]
+        self.assertEqual(mine, shadow_trades(days))
+        self.assertGreater(len(mine), 0)
+        self.assertEqual(len(saved["closed"]), len(b2.SYMBOLS) * len(mine))
+
+    def test_history_is_bounded(self):
+        state = {}
+        ev = {"symbol": "X", "price": 1.0, "reason": "STOP", "r": -1.0,
+              "position": {"direction": "LONG", "entry_day_ts": 0, "entry": 1.0, "stop": 0.9, "distance": 0.1}}
+        for _ in range(b2.HISTORY_LIMIT + 10):
+            b2.record_exit(state, ev, 0)
+        self.assertEqual(len(state["closed"]), b2.HISTORY_LIMIT)
+
     def test_disabled_by_default(self):
         engine = SimpleNamespace(_start_background=lambda c: self.fail("must not schedule"))
         self.assertFalse(b2.schedule_if_enabled(engine, LOG))
