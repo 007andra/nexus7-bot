@@ -1,0 +1,47 @@
+name: H1 prospective study (H1_PROSPECTIVE_V1)
+
+# Research only: re-runs the frozen H1 rule on months published after the
+# pre-registration (2026-10-17). Quarterly runs are requested by a push to
+# research/b2-prospective-runs (shared with B2_PROSPECTIVE_V1; scheduled workflows only fire on the default
+# branch). No credentials, no database, no orders.
+on:
+  pull_request:
+    branches: [main, migration/binance-usdm]
+    paths:
+      - "bot/h1_prospective_v1.py"
+      - "docs/research/h1_prospective_v1_prereg.md"
+      - ".github/workflows/h1_prospective_study.yml"
+  push:
+    branches: [research/b2-prospective-runs]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  study:
+    name: Prospective verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Study mechanics tests
+        run: python -m unittest tests.test_h1_prospective_v1 tests.test_trend_long_study_v1 -v
+      - name: Run on every published month
+        run: python -m bot.h1_prospective_v1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h1-prospective-report
+          path: artifacts/h1_prospective_v1/report.json
+          retention-days: 90

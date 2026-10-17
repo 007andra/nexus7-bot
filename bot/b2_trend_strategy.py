@@ -118,8 +118,12 @@ def r_multiple(position: dict, exit_px: float) -> float:
     return side * (exit_px - position["entry"]) / position["distance"]
 
 
-def step(state: dict, symbol: str, klines: list[dict], now_ms: int) -> list[dict]:
-    """Advance one symbol to ``now_ms``; returns the events and mutates ``state``."""
+def step(state: dict, symbol: str, klines: list[dict], now_ms: int, allow_entry=None) -> list[dict]:
+    """Advance one symbol to ``now_ms``; returns the events and mutates ``state``.
+
+    ``allow_entry(signal, days)`` can veto a new entry (used by H1); exits are
+    never filtered.
+    """
     days = closed_days(klines, now_ms)
     today = forming_day(klines, now_ms)
     positions = state.setdefault("positions", {})
@@ -146,6 +150,8 @@ def step(state: dict, symbol: str, klines: list[dict], now_ms: int) -> list[dict
             return events
     if pos is None and today is not None:
         sig = entry_signal(days)
+        if sig is not None and allow_entry is not None and not allow_entry(sig, days):
+            sig = None
         if sig is not None and int(days[-1]["ts"]) + DAY_MS == int(today["ts"]):
             side = 1.0 if sig["direction"] == "LONG" else -1.0
             entry = today["o"]
