@@ -1156,6 +1156,17 @@ class TradingEngine:
                     "live_allowed=false decision_effect=NONE execution_effect=NONE",
                 )
 
+            # H1 (B2 long only with the BTC 200-day filter) in shadow mode.
+            try:
+                from bot import h1_trend_shadow as _h1_strategy
+                _h1_strategy.schedule_if_enabled(self, log)
+            except Exception as _h1_exc:
+                log.warning(
+                    "[H1_SHADOW] status=DEFER reason=%s %s",
+                    type(_h1_exc).__name__, "research_only=true shadow_only=true "
+                    "live_allowed=false decision_effect=NONE execution_effect=NONE",
+                )
+
             try:
                 await asyncio.wait_for(self._load_existing_positions(), timeout=20)
             except asyncio.TimeoutError:
