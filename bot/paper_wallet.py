@@ -22,12 +22,13 @@ _PAPER_WALLET_KEY = "paper_wallet_state_v1"
 
 def install(log):
     from bot.engine import TradingEngine
-    from bot.kucoin import TAKER_FEE
+    from bot.exchange import TAKER_FEE
 
     if getattr(TradingEngine, "_paper_wallet_patched", False):
         return
 
     original_connect = TradingEngine._connect
+    original_startup_risk_balance = TradingEngine._startup_risk_balance
     original_filter_viable = TradingEngine._filter_viable_symbols
     original_update_balance = TradingEngine._update_balance
     original_refresh_entry_balance = TradingEngine._refresh_entry_balance
@@ -204,6 +205,36 @@ def install(log):
 
         return await original_filter_viable(self)
 
+    async def _startup_risk_balance_paper_safe(self):
+        if not getattr(self, "paper_trade", False):
+            return await original_startup_risk_balance(self)
+
+        if hasattr(self, "_paper_balance"):
+            value = float(getattr(self, "_paper_balance", 0.0) or 0.0)
+            if value > 0:
+                return value
+
+        if await _restore_persisted_state(self):
+            return float(getattr(self, "_paper_balance", 0.0) or 0.0)
+
+        initial, source = _virtual_initial_balance(0.0)
+        if initial > 0:
+            self._paper_balance = initial
+            self.risk.peak_balance = initial
+            self.risk.balance = initial
+            self.risk.drawdown = 0.0
+            self.risk.balance_confirmed = True
+            _sync_daily_limits(self, initial)
+            log.info(
+                "[PAPER_WALLET] startup uses virtual capital=$%.4f source=%s; "
+                "exchange credentials are not required for PAPER startup",
+                initial, source,
+            )
+            await _persist_state(self, f"initial_seed:{source}")
+            return initial
+
+        return await original_startup_risk_balance(self)
+
     async def _connect_with_paper_wallet(self):
         await original_connect(self)
         if not getattr(self, "paper_trade", False):
@@ -310,6 +341,7 @@ def install(log):
 
         return result
 
+    TradingEngine._startup_risk_balance = _startup_risk_balance_paper_safe
     TradingEngine._filter_viable_symbols = _filter_viable_symbols_paper_safe
     TradingEngine._connect = _connect_with_paper_wallet
     TradingEngine._update_balance = _update_balance_paper_safe

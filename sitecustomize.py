@@ -17,11 +17,6 @@ import sys
 builtins._nexus_sitecustomize_status = "installing"
 
 try:
-    # Install logging-only semantic normalization before bootstrap so even
-    # legacy startup wrappers cannot emit contradictory sizing authority text.
-    from bot.sizing_semantics_log_hardening import install as _install_sizing_semantics
-    _install_sizing_semantics()
-
     # Runtime-truth only: websockets==12.0 protocols are async iterables but
     # don't expose __anext__ directly. The truth WS proxy delegates __anext__
     # to the wrapped protocol, so install the compatibility shim before the

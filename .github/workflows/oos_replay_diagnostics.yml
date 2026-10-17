@@ -2,7 +2,9 @@ name: NEXUS OOS Replay Diagnostics
 
 on:
   pull_request:
-    branches: [main]
+    # migration/binance-usdm is the Binance USD-M production branch; PRs into it
+    # must run the same gates as PRs into main.
+    branches: [main, migration/binance-usdm]
     paths:
       - "bot/nexus_oos_real_replay.py"
       - "bot/nexus_oos_real_replay_corrected.py"

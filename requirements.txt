@@ -9,5 +9,6 @@ asyncpg==0.29.0
 aiosqlite==0.20.0
 websockets==12.0
 feedparser==6.0.11
+cryptography==50.0.1
 # Quant validation / hyperparameter search. Pin for reproducibility.
 optuna==4.5.0

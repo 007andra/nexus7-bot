@@ -23,6 +23,10 @@ def observe_analyze_mtf(func):
             vol_mult=vol_mult,
         )
 
+        from bot.hard_gate_shadow_context import active
+        if active():
+            return result
+
         # Study only canonical setups that are HOLD because the 15m activity
         # ratio is below 0.40 while every other strategy-stage condition can
         # still be satisfied. This observer never returns a Signal or calls the

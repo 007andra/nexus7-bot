@@ -16,7 +16,13 @@ BASELINE={
  "bot/nexus_probability.py":"325d614cd89ce111a95db2d44497a3c779f38d7c",
  "bot/indicators.py":"268fadc56d6a261d836144545138c7140bc51345",
  "bot/risk.py":"e6bdb2e2719e281449e49add189233f5c928aff6",
- "bot/quantity.py":"b081a785e67e7f33229c40dd0bb21061600eed96",
+ # Explicit, reviewed contract change (full audit 2026-09-26, P1-2): the
+ # production-baseline quantity.py (b081a785...) rejected every Binance
+ # base-asset instrument with a fractional minQty, so BTC/ETH/DOT/... sized
+ # to 0. The new blob adds the BASE_ASSET step-unit mapping; contract-venue
+ # results are unchanged, only one error message text differs
+ # (see test_binance_base_asset_quantity).
+ "bot/quantity.py":"1897fb775524533afc634c5cad0e27a06de21dd6",
 }
 def git_blob_sha(data:bytes)->str:
     return hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()

@@ -14,7 +14,6 @@ import time
 from datetime import datetime
 from typing import Set
 
-import aiohttp
 
 
 def install_database_schema_fix(log):
@@ -127,7 +126,7 @@ def install_database_schema_fix(log):
 
 
 def install_telegram_fix(log):
-    from bot import notifier
+    from bot import notifier, telegram_transport
     from bot.config import cfg
     import bot.engine as engine_module
 
@@ -137,49 +136,15 @@ def install_telegram_fix(log):
     lock = asyncio.Lock()
     last_send = [0.0]
     seen = {}
-    pending = set()
     min_interval = 3.0
     dedup_window = 60.0
 
     def _key(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:20]
 
-    async def _post(text: str, parse_mode=None):
-        url = f"https://api.telegram.org/bot{cfg.TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": cfg.TELEGRAM_CHAT, "text": text}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
-                )
-                body = None
-                if resp.status != 200:
-                    try:
-                        body = await resp.json()
-                    except Exception:
-                        try:
-                            body = {"description": (await resp.text())[:200]}
-                        except Exception:
-                            body = {}
-                return resp.status, body or {}
-        except Exception as exc:
-            log.debug("Telegram transport: %s", type(exc).__name__)
-            return 0, {}
-
-    async def _delayed_retry(text: str, wait_s: int, key: str):
-        try:
-            await asyncio.sleep(max(1, int(wait_s)))
-            status, _ = await _post(text, "Markdown")
-            if status == 400:
-                await _post(text, None)
-        finally:
-            pending.discard(key)
-
     async def robust_notify(text: str):
         if not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT:
-            return
+            return telegram_transport.DeliveryResult(False, "DISABLED", skipped="NO_CREDENTIALS")
 
         # A candidate exists before the mandatory NEXUS gate. Do not label it
         # as an opened/sent order. This prevents operators from assuming that
@@ -194,7 +159,9 @@ def install_telegram_fix(log):
         key = _key(text)
         now = time.monotonic()
         if now - seen.get(key, 0.0) < dedup_window:
-            return
+            # Identical text inside the window is never replayed, including
+            # after an ambiguous failure (the first copy may have arrived).
+            return telegram_transport.DeliveryResult(False, "DEDUP", skipped="DEDUP")
         seen[key] = now
         if len(seen) > 1000:
             cutoff = now - dedup_window * 2
@@ -206,33 +173,13 @@ def install_telegram_fix(log):
             delay = min_interval - (time.monotonic() - last_send[0])
             if 0 < delay <= min_interval:
                 await asyncio.sleep(delay)
-
-            status, data = await _post(text, "Markdown")
-            if status == 200:
+            # Canonical transport: classified errors, bounded retry with
+            # backoff+jitter, Telegram-only circuit breaker, Markdown→plain
+            # content fallback. Never raises; truthiness == Telegram ok:true.
+            result = await telegram_transport.deliver(text, parse_mode="Markdown", source="notify")
+            if result.sent:
                 last_send[0] = time.monotonic()
-                return
-
-            if status == 400:
-                status2, _ = await _post(text, None)
-                if status2 == 200:
-                    last_send[0] = time.monotonic()
-                    log.info("✅ Telegram fallback plain-text aplicado")
-                else:
-                    log.warning("Telegram fallback falhou HTTP %s", status2)
-                return
-
-            if status == 429:
-                retry_after = int((data.get("parameters") or {}).get("retry_after", 10))
-                if key not in pending and len(pending) < 20:
-                    pending.add(key)
-                    asyncio.create_task(_delayed_retry(text, retry_after, key))
-                log.debug("Telegram 429: retry agendado em background (%ss)", retry_after)
-                return
-
-            if status in (401, 403):
-                log.error("Telegram HTTP %s: credencial/chat recusado", status)
-            elif status:
-                log.debug("Telegram HTTP %s", status)
+            return result
 
     notifier.notify = robust_notify
     engine_module.notify = robust_notify
@@ -253,7 +200,7 @@ def install_paper_execution_fix(log):
     import bot.engine as engine_module
     from bot.engine import TradingEngine
     from bot.config import cfg
-    from bot.kucoin import TAKER_FEE
+    from bot.exchange import TAKER_FEE
 
     if getattr(TradingEngine, "_paper_execution_hardening_patched", False):
         return

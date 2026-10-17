@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import main
 import main_hardened
-from bot.kucoin import KuCoinClient
+from bot.binance import BinanceClient
 from bot.nexus_runtime_engine import TradingEngine
 from bot.runtime_readiness import runtime_readiness
 
@@ -18,13 +18,13 @@ def _raw_exchange_client(engine):
 
 
 def _make_canonical_engine():
-    raw = KuCoinClient()
+    raw = BinanceClient()
     engine = TradingEngine(raw)
     return raw, engine
 
 
 def _set_all_ready(engine):
-    engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
+    engine.instruments = {"BTCUSDT": {"symbol": "BTCUSDT"}}
     engine._durable_state_ok = True
     engine._financial_state_sane = True
     engine._initial_reconciliation_complete = True
@@ -76,7 +76,7 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         engine._running = True
         engine._durable_state_enforced = True
         engine._durable_state_ok = True
-        engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
+        engine.instruments = {"BTCUSDT": {"symbol": "BTCUSDT"}}
         engine._execution_ownership_valid = False
         engine._execution_ownership_expires_at = None
         try:
@@ -98,7 +98,7 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         main.app.state.blocked = False
         main.app.state.engine_task = asyncio.create_task(asyncio.sleep(3600))
         engine._running = True
-        engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
+        engine.instruments = {"BTCUSDT": {"symbol": "BTCUSDT"}}
         engine._durable_state_enforced = False
         engine._durable_state_ok = True
         try:

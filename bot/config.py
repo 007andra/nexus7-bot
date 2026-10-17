@@ -1,5 +1,7 @@
 import os
 
+from bot import telegram_credentials as _telegram_credentials
+
 
 def _pct(value: str, default: float, name: str = "") -> float:
     """Normalize percentage-like values used by bounded percentage controls."""
@@ -23,11 +25,15 @@ class Config:
     API_PASSPHRASE: str = os.environ.get("KUCOIN_API_PASSPHRASE", "")
     BOT_API_SECRET: str = os.environ.get("BOT_API_SECRET", "")
 
-    # KuCoin Futures symbols
+    # Liquid / widely traded USD-M futures monitoring universe.
+    # Runtime exchange viability checks remain authoritative: unavailable or
+    # unsuitable contracts are dropped fail-closed before trading.
     SYMBOLS: list = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
-        "ADAUSDT", "DOGEUSDT", "LINKUSDT", "AVAXUSDT",
-        "DOTUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT",
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+        "ADAUSDT", "DOGEUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT",
+        "DOTUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT", "SUIUSDT",
+        "PEOPLEUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "UNIUSDT",
+        "AAVEUSDT", "FILUSDT", "INJUSDT", "SEIUSDT", "ETCUSDT",
     ]
 
     # PRE-LIVE hardened risk defaults.
@@ -86,8 +92,11 @@ class Config:
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
     PORT:      int = int(os.environ.get("PORT", "8000"))
 
-    TELEGRAM_TOKEN: str = os.environ.get("TELEGRAM_TOKEN", "")
-    TELEGRAM_CHAT:  str = os.environ.get("TELEGRAM_CHAT", "")
+    # Telegram credential aliases. Keep the canonical names first so
+    # existing deployments are unchanged, while accepting the Railway names
+    # already used by this project.
+    TELEGRAM_TOKEN: str = _telegram_credentials.token()
+    TELEGRAM_CHAT: str = _telegram_credentials.chat()
 
     ALLOWED_ORIGINS: list = [
         o.strip()

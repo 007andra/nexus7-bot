@@ -1,26 +1,26 @@
+from tests.binance_engine_fixture import BinanceEngineFixture, E  # noqa: I001  (sets env first)
+
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-from tests.test_ai_gate import EngineFixture, E
 
 
-class EntryPauseTests(EngineFixture):
-    async def test_paused_entry_blocked_but_native_reduction_allowed(self):
+class EntryPauseTests(BinanceEngineFixture):
+    async def test_paused_entry_blocked_but_reduction_allowed(self):
         self.engine.active = True
         self.engine._running = True
-        from bot.kucoin_position_units import KuCoinPositionUnitAdapter
-        self.engine.client = KuCoinPositionUnitAdapter(self.client)
         self.engine.pause_entries()
         self.assertTrue(self.engine.active)
         self.assertTrue(self.engine._running)
-        session = Mock()
-        self.client._session = session
-        for endpoint in ('/api/v1/orders', '/api/v1/st-orders'):
+        self.assertTrue(self.client.entries_paused)
+        for endpoint in ('/fapi/v1/order', '/fapi/v1/algoOrder'):
             with self.assertRaises(ValueError):
-                self.client._entry_safe_post(endpoint, {}, 'unused')
-        session.post.assert_not_called()
-        self.client._entry_safe_post('/api/v1/orders', {'reduceOnly': True}, 'unused')
-        session.post.assert_called_once()
+                async with self.client._entry_safe_post(endpoint, {}, 'unused'):
+                    pass
+        # Reductions and position closes stay allowed while entries are paused.
+        for body in ({'reduceOnly': 'true'}, {'closePosition': 'true'}):
+            async with self.client._entry_safe_post('/fapi/v1/order', body, 'unused') as response:
+                self.assertEqual(response.status, 200)
         self.engine.resume_entries()
         self.assertFalse(self.client.entries_paused)
 
@@ -68,15 +68,29 @@ class EntryPauseTests(EngineFixture):
              patch.object(E.opt, 'weekly_optimization_loop', worker), \
              patch('bot.durable_daily_pnl.checkpoint', AsyncMock(return_value=True)), \
              patch('bot.durable_daily_stop.entries_blocked', AsyncMock(return_value=False)), \
-             patch('bot.exchange_accounting_evidence.schedule'), \
+             patch('bot.binance_accounting_evidence.schedule'), \
+             patch('bot.ambiguous_entry_recovery.recover_unadopted_entries', AsyncMock()), \
              patch.object(E.asyncio, 'sleep', finish_cycle):
             await e.run()
             for name in managed:
                 getattr(e, name).assert_awaited_once()
             e._scan_all_and_enter.assert_not_awaited()
-            self.assertEqual(len(tasks), 7)
+            # Weekly backtest/optimizer are not started in the trading process.
+            self.assertEqual(len(tasks), 5)
             self.assertTrue(all(t.done() for t in tasks))
             self.assertFalse(e._background_tasks)
             await e.run()
-            self.assertEqual(len(tasks), 14)
+            self.assertEqual(len(tasks), 10)
             self.assertTrue(all(t.done() for t in tasks))
+
+
+class WeeklyResearchIsolationTests(BinanceEngineFixture):
+    async def test_engine_does_not_start_weekly_research_loops(self):
+        from pathlib import Path
+
+        # TradingEngine.run is wrapped by runtime overlays; read the core run().
+        text = Path(E.__file__).read_text(encoding="utf-8")
+        src = text[text.index("    async def run(self):"):text.index("    async def _connect(")]
+        self.assertNotIn("weekly_backtest_loop(", src)
+        self.assertNotIn("weekly_optimization_loop(", src)
+        self.assertIn("[WEEKLY_RESEARCH] backtest=not_started", src)

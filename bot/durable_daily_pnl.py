@@ -1,10 +1,10 @@
 """Persist operational daily PnL and reconcile estimates with exchange truth.
 
 The execution engine may temporarily record a conservative local estimate when a
-position disappears before KuCoin fill/history indexing has caught up. That
+position disappears before exchange fill/history indexing has caught up. That
 estimate remains valid for risk decisions until authoritative evidence arrives.
-Once KuCoin position history + fills + durable BGX lineage are reconciled, an
-idempotent adjustment converts the operational ledger from the estimate to the
+Once exchange fills + durable BGX lineage are reconciled, an idempotent
+adjustment converts the operational ledger from the estimate to the
 exchange-confirmed realized PnL without double counting the trade.
 """
 import asyncio
@@ -21,6 +21,15 @@ from bot import daily_pnl_storage
 _ESTIMATED_SOURCE = 'ESTIMATED_LOCAL_MARK_AND_FEE_RATE'
 _CONFIRMED_ADJUSTMENT_SOURCE = 'KUCOIN_RECONCILIATION_ADJUSTMENT'
 _MATCH_WINDOW_SECONDS = 120.0
+
+
+def _reconciliation_source(receipt=None):
+    exchange = 'KUCOIN'
+    if isinstance(receipt, dict):
+        candidate = str(receipt.get('exchange') or '').strip().upper()
+        if candidate in {'KUCOIN', 'BINANCE'}:
+            exchange = candidate
+    return exchange, f'{exchange}_RECONCILIATION_ADJUSTMENT'
 
 
 def utc_day(value):
@@ -173,10 +182,13 @@ def _confirmed_adjustment(rows, row, receipt=None):
     confirmed_closed = datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc)
     expected_symbol = _normalized_symbol(row.get('symbol'))
     adjustment = confirmed - estimated
-    adjustment_token = hashlib.sha256(('kucoin-confirmed:' + close_id).encode()).hexdigest()
+    exchange, adjustment_source = _reconciliation_source(receipt)
+    adjustment_token = hashlib.sha256(
+        (exchange.lower() + '-confirmed:' + close_id).encode()
+    ).hexdigest()
     value = {
         'pnl': adjustment,
-        'source': _CONFIRMED_ADJUSTMENT_SOURCE,
+        'source': adjustment_source,
         'closed_at': confirmed_closed.isoformat(),
         'symbol': expected_symbol,
         'close_id': close_id,
@@ -212,7 +224,13 @@ def evidence_breakdown(stats, now=None):
         if source == _ESTIMATED_SOURCE:
             estimated += pnl
             estimated_events += 1
-        elif source == _CONFIRMED_ADJUSTMENT_SOURCE:
+        elif (
+            source == _CONFIRMED_ADJUSTMENT_SOURCE
+            or (
+                isinstance(source, str)
+                and source.endswith('_RECONCILIATION_ADJUSTMENT')
+            )
+        ):
             adjustments += pnl
             confirmed_adjustments += 1
         else:
@@ -283,12 +301,13 @@ async def reconcile_confirmed_exchange(engine, row, receipt):
             engine.stats._durable_daily_pnl = {day: dict(rows)}
             engine._daily_pnl_ok = True
             total = math.fsum(float(v['pnl']) for v in rows.values())
+            exchange, _ = _reconciliation_source(receipt)
             log.warning(
                 '[DURABLE_DAILY_PNL_RECONCILED] symbol=%s close_id=%s estimated_pnl=%s '
-                'confirmed_kucoin_pnl=%s adjustment=%s risk_effective_pnl=%s '
+                'confirmed_exchange_pnl=%s exchange=%s adjustment=%s risk_effective_pnl=%s '
                 'match_basis=%s fills_confirmed=true durable=true entry_policy_unchanged=true',
                 row.get('symbol', 'NA'), row.get('closeId', 'NA'), value['estimated_pnl'],
-                value['confirmed_pnl'], value['pnl'], total,
+                value['confirmed_pnl'], exchange, value['pnl'], total,
                 'OPENING_ORDER_ID' if value.get('opening_order_id') else 'SYMBOL_TIME_UNIQUE',
             )
             return True

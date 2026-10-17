@@ -3,8 +3,7 @@ import json
 import math
 from decimal import Decimal, ROUND_DOWN
 
-from bot import database as db
-from bot.confirmed_rr_exit import identity, _persist
+from bot.confirmed_rr_exit import durable_identity, _persist
 from bot.conditional_stop_protection import _instrument_info, _to_base_size
 from bot.logger import log
 from bot.quantity import quantity_rules, validate_base_quantity
@@ -14,16 +13,15 @@ async def check(engine):
     engine._pending_partial_symbols = set()
     for symbol, pos in list(engine.positions.items()):
         try:
-            key, idem = identity(symbol, pos)
-            key = key.replace('rr_exit_v1:', 'partial_exit_v1:')
-            idem = idem.replace('rr-', 'partial-', 1)
-            raw = await db.load_key_value(key, strict=True)
+            key, idem, raw = await durable_identity(symbol, pos, 'partial')
             state = json.loads(raw) if raw is not None else None
             if state is not None and (not isinstance(state, dict) or state.get('idem') != idem):
                 raise ValueError('invalid partial intent')
             if state is None:
                 if pos.tp1_hit:
                     continue
+                if getattr(pos, '_geometry_unproven', False) is True:
+                    continue    # Q-01: no new partial from an invented geometry
                 entry, stop, price = map(float, (pos.entry, pos.sl, pos.current_price))
                 if not all(math.isfinite(x) and x > 0 for x in (entry, stop, price)):
                     raise ValueError('invalid partial prices')

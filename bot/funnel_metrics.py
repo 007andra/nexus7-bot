@@ -13,8 +13,6 @@ import queue
 import re
 import threading
 import time
-import urllib.parse
-import urllib.request
 from collections import Counter
 
 _LOCK = threading.Lock()
@@ -111,17 +109,10 @@ def _tg_worker() -> None:
     while True:
         text = _TG_QUEUE.get()
         try:
-            token = os.environ.get("TELEGRAM_TOKEN", "")
-            chat = os.environ.get("TELEGRAM_CHAT", "")
-            if not token or not chat:
-                continue
-            data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
-            req = urllib.request.Request(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data=data,
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=8).read()
+            from bot import telegram_transport
+            result = telegram_transport.deliver_sync(text, source="funnel_metrics")
+            if not result.sent and result.skipped is None:
+                _record_telemetry_error("telegram_send")
         except Exception:
             _record_telemetry_error("telegram_send")
         finally:
@@ -132,7 +123,8 @@ def _enqueue_summary(text: str) -> None:
     global _TG_STARTED
     if not _TELEGRAM_ENABLED:
         return
-    if not os.environ.get("TELEGRAM_TOKEN") or not os.environ.get("TELEGRAM_CHAT"):
+    from bot import telegram_credentials
+    if not telegram_credentials.configured():
         return
     if not _TG_STARTED:
         _TG_STARTED = True

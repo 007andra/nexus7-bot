@@ -1,7 +1,7 @@
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from bot import durable_reconcile_hardening as hardening
 from bot import order_state
@@ -17,6 +17,67 @@ class _Log:
 
 
 class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
+    async def test_audited_link_recovery_requires_exact_identity_and_exchange_evidence(self):
+        from bot.binance import BinanceClient, BinanceAPIError
+        engine = self._engine()
+        engine.paper_trade = False
+        engine.positions = {}
+        client = BinanceClient()
+        engine.client = client
+        order, _ = engine.orders.get_or_create(hardening._LINK_REJECTED_OID, "LINKUSDT", "Buy", 19.34)
+        order.created_at = 1790667918
+        order.transition(OrderState.SUBMITTING)
+        responses = {
+            "/fapi/v1/order": BinanceAPIError("GET", "/fapi/v1/order", 400, -2013, "Order does not exist"),
+            "/fapi/v3/positionRisk": [], "/fapi/v1/openOrders": [], "/fapi/v1/openAlgoOrders": [],
+        }
+        async def read(endpoint, *args, **kwargs):
+            result = responses[endpoint]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        client._get = AsyncMock(side_effect=read)
+        client.get_symbol_config = AsyncMock(return_value={"symbol": "LINKUSDT", "marginType": "CROSSED", "leverage": 20})
+        client._post = AsyncMock(side_effect=AssertionError("no exchange mutation"))
+        with patch.dict("os.environ", {"RAILWAY_PROJECT_ID": "1443ec46-186f-497b-9e61-4b69446d35c3",
+                                       "RAILWAY_ENVIRONMENT_ID": "e07566a4-170b-418d-9c91-b19604db8b3e"}), patch(
+            "bot.durable_live_reconciliation._owner_valid", AsyncMock(return_value=True)
+        ) as owner:
+            owner.return_value = False
+            self.assertFalse(await hardening._recover_audited_link_rejection(engine, order, _Log()))
+            owner.return_value = True
+            for field, bad in (("qty", 19.35), ("filled_qty", 0.1), ("order_id", "123"),
+                               ("created_at", 1790667800), ("client_oid", "bgx7-other")):
+                original = getattr(order, field)
+                setattr(order, field, bad)
+                self.assertFalse(await hardening._recover_audited_link_rejection(engine, order, _Log()))
+                setattr(order, field, original)
+            for endpoint, bad in (
+                ("/fapi/v1/order", {}), ("/fapi/v1/order", TimeoutError()),
+                ("/fapi/v1/order", BinanceAPIError("GET", "/fapi/v1/order", 500, -2013, "unknown")),
+                ("/fapi/v3/positionRisk", [{"positionAmt": "nan"}]),
+                ("/fapi/v3/positionRisk", [{"positionAmt": "1"}]),
+                ("/fapi/v1/openOrders", {}), ("/fapi/v1/openAlgoOrders", [{"algoId": 1}]),
+            ):
+                original = responses[endpoint]
+                responses[endpoint] = bad
+                self.assertFalse(await hardening._recover_audited_link_rejection(engine, order, _Log()))
+                self.assertEqual(order.state, OrderState.SUBMITTING)
+                responses[endpoint] = original
+            durable = self._durable()
+            hardening.install(durable, order_state, _Log())
+            self.assertTrue(await durable.reconcile_orders(engine))
+            self.assertEqual(order.state, OrderState.REJECTED)
+            self.assertIn("startup_reconcile_hardened", engine.persist_reasons)
+            self.assertFalse(await hardening._recover_audited_link_rejection(engine, order, _Log()))
+            order.state = OrderState.SUBMITTING
+            engine.errors.add("orders")
+            engine._durable_state_ok = False
+            durable.persist_orders = AsyncMock(return_value=False)
+            self.assertFalse(await durable.reconcile_orders(engine))
+            self.assertFalse(engine._durable_state_ok)
+        client._post.assert_not_awaited()
+
     def _durable(self):
         async def original(engine):
             return False
@@ -56,7 +117,7 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
             get_order_status=AsyncMock(return_value={}),
             get_order_by_client_oid=AsyncMock(return_value={}),
             get_positions=AsyncMock(return_value=[]),
-            _get=AsyncMock(return_value={"items": []}),
+            get_open_orders=AsyncMock(return_value=[]),
         )
         return engine
 
@@ -147,9 +208,7 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(order.is_terminal)
         engine.client.get_order_by_client_oid.assert_awaited_once_with("bgx7-stale")
         engine.client.get_positions.assert_awaited_once()
-        engine.client._get.assert_awaited_once_with(
-            "/api/v1/orders", {"status": "active"}, auth=True
-        )
+        engine.client.get_open_orders.assert_awaited_once_with()
         self.assertFalse(engine._durable_state_ok)
         self.assertEqual(len(engine.orders.pending_orders()), 1)
 

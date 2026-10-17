@@ -20,7 +20,7 @@ from collections import Counter, deque
 
 import numpy as np
 
-from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+from bot.execution_model import estimated_round_trip_cost_pct
 
 
 _THRESHOLDS = (0.25, 0.30, 0.35, 0.40)

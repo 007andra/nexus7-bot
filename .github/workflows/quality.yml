@@ -9,9 +9,13 @@ name: Quality Check
 
 on:
   push:
-    branches: [main]
+    # Exact merge SHA on the production branch is what Railway deploys;
+    # it must be tested itself, not only the PR head before merge.
+    branches: [main, migration/binance-usdm]
   pull_request:
-    branches: [main]
+    # migration/binance-usdm is the Binance USD-M production branch; PRs into it
+    # must run the same gates as PRs into main.
+    branches: [main, migration/binance-usdm]
 
 jobs:
   check:
@@ -20,7 +24,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: postgres
@@ -100,11 +104,48 @@ jobs:
       - name: Pretrade market data fail-closed
         run: python -m unittest tests.test_pretrade_fail_closed -v
 
-      - name: Configured leverage is immutable at dispatch
-        run: python -m unittest tests.test_leverage_no_fallback -v
-
       - name: Full offline test suite
         run: python -m tests.run_offline
+
+      - name: PostgreSQL TEMP privilege grant-origin safety contract
+        run: python -m unittest -v tests.test_pg_temp_grant_origin
+
+      - name: Disposable Railway PostgreSQL role audit worker safety contract
+        run: python -m unittest -v tests.test_railway_pg_readonly_audit_once
+
+      - name: Startup PostgreSQL role audit observer safety contract
+        run: python -m unittest -v tests.test_pg_role_audit_startup_once
+
+      - name: TEMP consumer inventory offline redaction and fail-closed contract
+        run: python -m unittest -v tests.test_pg_temp_consumer_inventory
+
+      - name: TEMP consumer inventory on disposable PostgreSQL
+        run: |
+          test "$TEST_POSTGRES_DSN" = "postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof"
+          python -m unittest -v tests.test_pg_temp_consumer_inventory_postgres
+
+      - name: PostgreSQL PUBLIC TEMP revocation compatibility on disposable DB
+        run: |
+          test "$GITHUB_ACTIONS" = "true"
+          test "$TEST_POSTGRES_DSN" = "postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof"
+          python -m unittest -v tests.test_pg_temp_public_revoke_compatibility_postgres
+
+      - name: P0 CAS real PostgreSQL incident regression (must not skip)
+        run: |
+          test -n "$TEST_POSTGRES_DSN"
+          python -m unittest -v \
+            tests.test_p0_cas_transaction_isolation_pg \
+            tests.test_cash_flow_cas_postgres \
+            tests.test_risk_epoch_postgres \
+            tests.test_db_spurious_cancel_postgres \
+            tests.test_oos_research_reader_v2_postgres \
+            tests.test_pg_readonly_role_audit_postgres
+
+      - name: Engine cancellation origin classifier (no risk or order effects)
+        run: |
+          python -m unittest -v tests.test_engine_cancel_origin_observer_v1
+          python -m unittest -v tests.test_db_spurious_cancel_safety
+          python -m unittest -v tests.test_engine_run_spurious_cancel_loop
 
       - name: Final pre-release proof pack
         run: python -m bot.release_proof
@@ -119,7 +160,7 @@ jobs:
       - name: Deterministic PAPER and SHADOW E2E safety pack
         run: |
           python -m unittest tests.test_shadow_post_ai_chain -v
-          python -m unittest tests.test_paper_mutations -v
+          python -m unittest tests.test_binance_paper_mutations -v
           python -m unittest tests.test_paper_signal_exit_idempotency -v
           python -m unittest tests.test_paper_wallet_restart -v
           python -m unittest tests.test_e2e_validation_contract -v
@@ -153,23 +194,19 @@ jobs:
       - name: Durable execution restart and idempotency
         run: python -m unittest tests.test_durable_execution_restart -v
 
-      - name: Durable intent before dispatch
-        run: python -m unittest tests.test_durable_dispatch_gate -v
+      - name: Binance LIVE-path engine safety pack (durable intent, AI gate, pilot limits, dispatch)
+        run: |
+          test -n "$TEST_POSTGRES_DSN"
+          python -m unittest -v \
+            tests.test_binance_live_ai_gate \
+            tests.test_binance_live_pilot_limits \
+            tests.test_binance_live_dispatch_safety
 
       - name: Durable startup reconciliation hardening
         run: python -m unittest tests.test_durable_reconcile_hardening -v
 
       - name: Atomic PAPER database state
         run: python -m unittest tests.test_database_atomic_paper -v
-
-      - name: LIVE adapter chaos safety pack
-        run: python -m unittest tests.test_live_adapter_chaos -v
-
-      - name: KuCoin native TPSL protected-entry safety pack
-        run: python -m unittest tests.test_kucoin_native_tpsl -v
-
-      - name: KuCoin fill multiplier normalization safety pack
-        run: python -m unittest tests.test_kucoin_fill_normalization -v
 
       - name: Hardened entrypoint imports with unified thresholds
         env:

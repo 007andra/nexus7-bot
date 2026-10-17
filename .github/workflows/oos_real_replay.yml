@@ -2,17 +2,21 @@ name: NEXUS Real OOS Replay
 
 on:
   pull_request:
-    branches: [main]
+    # migration/binance-usdm is the Binance USD-M production branch; PRs into it
+    # must run the same gates as PRs into main.
+    branches: [main, migration/binance-usdm]
     paths:
       - "bot/nexus_oos_edge_gate.py"
       - "bot/nexus_oos_real_replay.py"
       - "bot/nexus_oos_real_replay_corrected.py"
       - "bot/nexus_oos_robustness.py"
       - "bot/nexus_oos_robustness_replay.py"
+      - "bot/nexus_oos_short_down_bos_history.py"
       - "tests/test_nexus_oos_edge_gate.py"
       - "tests/test_nexus_oos_real_replay.py"
       - "tests/test_nexus_oos_replay_full_clock.py"
       - "tests/test_nexus_oos_robustness.py"
+      - "tests/test_nexus_oos_short_down_bos_history.py"
       - ".github/workflows/oos_real_replay.yml"
   workflow_dispatch:
 
@@ -43,6 +47,7 @@ jobs:
           python -m unittest tests.test_nexus_oos_real_replay -v
           python -m unittest tests.test_nexus_oos_replay_full_clock -v
           python -m unittest tests.test_nexus_oos_robustness -v
+          python -m unittest tests.test_nexus_oos_short_down_bos_history -v
 
       - name: Run real public-market OOS replay
         run: |
@@ -50,6 +55,14 @@ jobs:
             --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
             --limit-15m 2500 \
             --output artifacts/nexus_oos_real_replay.json
+
+
+      - name: Run frozen SHORT downtrend BOS historical segment
+        run: |
+          python -m bot.nexus_oos_short_down_bos_history \
+            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT AVAXUSDT ADAUSDT ATOMUSDT AAVEUSDT UNIUSDT \
+            --limit-15m 2500 \
+            --output artifacts/oos_short_down_bos_history.json
 
       - name: Run paired-bootstrap robustness replay
         run: |
@@ -100,4 +113,5 @@ jobs:
           path: |
             artifacts/nexus_oos_real_replay.json
             artifacts/nexus_oos_robustness.json
+            artifacts/oos_short_down_bos_history.json
           if-no-files-found: error

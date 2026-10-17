@@ -60,6 +60,7 @@ class RuntimeContractGuardTests(unittest.TestCase):
             _update_balance = _owned("operator_runtime_policy.py")
             _manage_partial_tp = _owned("partial_tp_execution_hardening.py")
             _partial_tp_execution_hardening_installed = True
+            _refresh_entry_balance = _owned("binance_cross_portfolio_stress.py")
 
         class PilotGuard:
             evaluate = _owned("pilot_exposure_capacity.py")
@@ -115,7 +116,7 @@ class RuntimeContractGuardTests(unittest.TestCase):
         self.assertIn("RiskManager.can_open", source)
         self.assertIn("RiskManagerV3.can_open", source)
         self.assertIn("_final_sizing_invariants_installed", source)
-        self.assertIn("sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap", source)
+        self.assertIn("risk_authority=RiskManagerV3 final_quantity_policy=min(stop_risk_qty,operator_margin_cap_qty)", source)
         self.assertIn("entry_authorization_unchanged=true", source)
 
     def test_guard_covers_live_execution_chain(self):
@@ -123,21 +124,23 @@ class RuntimeContractGuardTests(unittest.TestCase):
             encoding="utf-8"
         )
         expected = (
-            "KuCoinClient.place_order",
+            "ExchangeClient.place_order",
             "live_execution_fence.py",
-            "KuCoinClient._post",
+            "ExchangeClient._post",
             "partial_tp_execution_hardening.py",
-            "KuCoinClient.wait_for_fill",
+            "ExchangeClient.wait_for_fill",
             "order_visibility_race_hardening.py",
-            "KuCoinClient.get_order_status",
-            "KuCoinClient.set_position_stops",
+            "ExchangeClient.get_order_status",
+            "ExchangeClient.set_position_stops",
             "durable_execution.reconcile_orders",
             "durable_reconcile_hardening.py",
-            "_native_tpsl_entry_installed",
-            "_fill_normalization_installed",
             "_pilot_durable_submission_counter_installed",
             "_live_execution_fence_installed",
-            "execution_chain=idempotency>distributed_fence>dispatch>fill>tpsl>reconcile",
+            "binance_cross_portfolio_stress.py",
+            "_binance_cross_portfolio_stress_installed",
+            "binance._handle_private_order_event",
+            "binance.paper_parity_client",
+            "execution_chain=idempotency>distributed_fence>dispatch>fill>protection>reconcile",
         )
         for text in expected:
             self.assertIn(text, source)

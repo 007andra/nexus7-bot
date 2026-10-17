@@ -168,6 +168,9 @@ def install(Analyzer, strategy, log) -> None:
                 extension_atr=extension_atr,
             )
             if not allowed:
+                from bot.hard_gate_shadow_context import active
+                if active():
+                    return None
                 thresholds = {
                     "min_combined": _MIN_COMBINED,
                     "min_4h": _MIN_4H,

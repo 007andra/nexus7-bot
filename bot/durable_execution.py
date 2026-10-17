@@ -42,6 +42,44 @@ def can_open(engine) -> bool:
     return bool(getattr(engine, "_durable_state_ok", False)) and getattr(engine, '_daily_pnl_ok', True) is True
 
 
+async def record_binance_margin_rejection(engine, order, exc) -> bool:
+    """Terminalize only the exact order rejected by a structured HTTP 400/-2019.
+
+    No regex classification, absent-order inference, retries, or historical
+    intent cleanup. Unknown transport outcomes keep their pending state.
+    """
+    from bot.binance import BinanceAPIError
+
+    if order is None or not isinstance(exc, BinanceAPIError):
+        return False
+    if (exc.method, exc.endpoint, exc.status, exc.code) != (
+        "POST", "/fapi/v1/order", 400, -2019
+    ):
+        return False
+    if (not exc.client_oid or order.client_oid != exc.client_oid
+            or order.symbol != exc.symbol or str(order.side).upper() != exc.side.upper()
+            or order.state != OrderState.SUBMITTING or order.order_id
+            or order.filled_qty > 0):
+        return False
+    try:
+        quantity = float(exc.quantity)
+        if not math.isfinite(quantity) or quantity <= 0 or quantity != float(order.qty):
+            return False
+    except (TypeError, ValueError):
+        return False
+    order.transition(OrderState.REJECTED, source="BINANCE_HTTP_REJECTION", code=-2019)
+    saved = await persist_orders(engine, "binance_margin_rejected", strict=True)
+    # persist_orders clears its write fault; other unresolved orders still block.
+    if engine.orders.pending_orders():
+        _block(engine, "orders")
+    log.warning(
+        "[BINANCE_ORDER_REJECTED] clientOid=%s symbol=%s code=-2019 "
+        "state=REJECTED persisted=%s resubmit=false",
+        order.client_oid, order.symbol, str(saved).lower(),
+    )
+    return saved
+
+
 def _positive(value, field: str) -> float:
     number = float(value)
     if not math.isfinite(number) or number <= 0:
@@ -264,11 +302,38 @@ async def restore_engine_state(engine) -> bool:
             state = json.loads(raw_orders)
             if not isinstance(state, dict) or state.get("version") != 1:
                 raise ValueError("unsupported order registry schema")
-            engine.orders.restore(state.get("orders"))
-            log.info(
-                "[DURABLE_ORDER] restored orders=%s pending=%s",
-                len(engine.orders), len(engine.orders.pending_orders()),
+            quarantined = int(engine.orders.restore(state.get("orders")) or 0)
+            identity_hook = getattr(
+                getattr(engine, "client", None),
+                "rehydrate_order_identity_maps",
+                None,
             )
+            if callable(identity_hook):
+                identity_hook(engine.orders.snapshot())
+            log.info(
+                "[DURABLE_ORDER] restored orders=%s pending=%s quarantined_legacy=%s",
+                len(engine.orders), len(engine.orders.pending_orders()), quarantined,
+            )
+            if quarantined:
+                log.critical(
+                    "[DURABLE_ORDER_MIGRATION] quarantined=%s "
+                    "reason=legacy_binance_algo_child_ws_artifact "
+                    "execution_authority=false valid_orders_preserved=true",
+                    quarantined,
+                )
+                # Rewrite only the validated registry. If this cleanup cannot
+                # be persisted, remain fail-closed so the same corrupt snapshot
+                # can never silently authorize a later restart.
+                if not await persist_orders(
+                    engine, "legacy_binance_ws_artifact_quarantined", strict=True
+                ):
+                    _block(engine, "orders")
+                    return can_open(engine)
+                log.warning(
+                    "[DURABLE_ORDER_MIGRATION] cleanup_persisted=true "
+                    "quarantined=%s snapshot_version=1",
+                    quarantined,
+                )
         _clear(engine, "orders")
     except Exception as exc:
         _block(engine, "orders")

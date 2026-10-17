@@ -218,7 +218,7 @@ class FinalLossObservabilityTests(unittest.TestCase):
         self.assertIn("result=BLOCK", msg)
         self.assertIn("specific_reason=projected_loss_exceeds_50pct_entry_margin", msg)
         self.assertIn("qty=5", msg)
-        self.assertIn("risk_v3_advisory_qty=0.25", msg)
+        self.assertIn("stop_risk_qty=0.25", msg)
         self.assertIn("allowed_loss_pct_notional=1.00000000", msg)
         self.assertIn("projected_loss_pct_notional=1.20000000", msg)
         self.assertIn("headroom_pct=-0.20000000", msg)
@@ -308,26 +308,40 @@ class FinalSizingTelemetryTests(unittest.TestCase):
             pilot_cap._PILOT_ENGINE.reset(token_engine)
         return qty, stored, log
 
-    def test_final_sizing_block_logs_operator_qty_not_risk_advisory_qty(self):
+    # The final quantity is min(stop_risk_qty, operator_margin_cap_qty), but
+    # that positive quantity is still subject to the independent final
+    # loss-budget gate. WARN rejects only this candidate; runtime remains active.
+    def test_final_sizing_warn_blocks_candidate_and_preserves_risk_telemetry(self):
         qty, stored, log = self._exercise(99.12)
         self.assertEqual(qty, 0.0)
         self.assertEqual(stored, 0.0)
-        msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
+        rendered = log.rendered()
+        msg = [m for _, m in rendered if "[FINAL_LOSS_BUDGET]" in m][0]
         self.assertIn("stage=FINAL_SIZING_INVARIANT", msg)
-        self.assertIn("result=BLOCK", msg)
-        self.assertIn("qty=5", msg)
-        self.assertIn("qty_authority=FINAL_OPERATOR_QTY", msg)
-        self.assertIn("risk_v3_advisory_qty=0.25", msg)
-        self.assertIn("risk_v3_qty_authority=NON_AUTHORITATIVE", msg)
+        self.assertIn("result=WARN", msg)
+        self.assertIn("projected_loss_exceeds_50pct_entry_margin", msg)
+        self.assertIn("execution_effect=OBSERVABILITY_ONLY", msg)
+        self.assertIn("qty=0.25", msg)
+        self.assertIn("qty_authority=FINAL_SIZING_INVARIANT", msg)
+        self.assertIn("stop_risk_qty=0.25", msg)
+        self.assertIn("risk_v3_qty_authority=BINDING_UPPER_BOUND", msg)
+        self.assertNotIn("NON_AUTHORITATIVE", msg)
+        block = [m for _, m in rendered if "[FINAL_SIZING_INVARIANT]" in m and "result=BLOCK" in m][0]
+        self.assertIn("candidate_only=true", block)
+        self.assertIn("runtime_paused=false", block)
 
-    def test_final_sizing_pass_preserves_operator_quantity(self):
+    def test_final_sizing_pass_uses_stop_risk_quantity_below_cap(self):
         qty, stored, log = self._exercise(99.6)
-        self.assertEqual(qty, 5.0)
-        self.assertEqual(stored, 5.0)
+        self.assertEqual(qty, 0.25)
+        self.assertEqual(stored, 0.25)
         msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
         self.assertIn("stage=FINAL_SIZING_INVARIANT", msg)
         self.assertIn("result=PASS", msg)
-        self.assertIn("qty=5", msg)
+        self.assertIn("qty=0.25", msg)
+        sizing = [m for _, m in log.rendered() if "[FINAL_SIZING_INVARIANT]" in m and "result=PASS" in m][0]
+        self.assertIn("binding=RISK_BUDGET", sizing)
+        self.assertIn("risk_authority=RiskManagerV3", sizing)
+        self.assertIn("final_quantity_policy=min(stop_risk_qty,operator_margin_cap_qty)", sizing)
 
 
 if __name__ == "__main__":

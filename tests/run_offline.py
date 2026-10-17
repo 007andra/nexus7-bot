@@ -64,7 +64,9 @@ def run_one(module):
                 cwd=cwd, env=env, capture_output=True, text=True, timeout=240,
             )
     except subprocess.TimeoutExpired as exc:
-        output = (exc.stdout or '') + (exc.stderr or '')
+        def _as_text(value):
+            return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else (value or '')
+        output = _as_text(exc.stdout) + _as_text(exc.stderr)
         return module, 124, 0, output + f'\nTIMEOUT: {module} exceeded 240s\n'
     output = proc.stdout + proc.stderr
     count = re.findall(r'(?:PASSOU|PASSARAM|PASS|Passou):\s*(\d+)', output)

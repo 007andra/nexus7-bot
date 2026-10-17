@@ -19,15 +19,36 @@ class ServiceReadiness:
     reason: str
 
 
-def engine_task_healthy(task, *, running: bool) -> bool:
-    """A deliberate clean pause is healthy; a lost/failed worker is not."""
+def engine_task_healthy(task, *, running: bool, stop_requested=None) -> bool:
+    """A deliberate clean pause is healthy; a lost/failed worker is not.
+
+    ``engine.run()`` always clears ``_running`` in its ``finally``, so a clean
+    return alone cannot prove the stop was requested. When the caller knows
+    whether ``engine.stop()`` was called, an unrequested return is unhealthy
+    (the 2026-10-11 incidents returned cleanly after a leaked cancel).
+    """
     if task is None:
         return False
     if not task.done():
         return True
     if task.cancelled():
         return False
-    return not running and task.exception() is None
+    if task.exception() is not None or running:
+        return False
+    return True if stop_requested is None else bool(stop_requested)
+
+
+def engine_task_state(task, *, stop_requested) -> str:
+    """Compact, secret-free engine task state for process health payloads."""
+    if task is None:
+        return "NOT_STARTED"
+    if not task.done():
+        return "RUNNING"
+    if task.cancelled():
+        return "CANCELLED"
+    if task.exception() is not None:
+        return "FAILED"
+    return "STOPPED_ON_REQUEST" if stop_requested else "EXITED_UNEXPECTEDLY"
 
 
 def evaluate_service_readiness(

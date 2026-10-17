@@ -1,0 +1,67 @@
+name: Trend breakout study (TREND_BREAKOUT_V1)
+
+# Research only: simulates two pre-registered trend-following rules over
+# Binance USD-M public history (data.binance.vision) and reports each
+# hypothesis's verdict. No credentials, no database, no orders.
+on:
+  pull_request:
+    branches: [main, migration/binance-usdm]
+    paths:
+      - "bot/trend_breakout_study_v1.py"
+      - "bot/binance_public_history.py"
+      - "docs/research/trend_breakout_v1_prereg.md"
+      - ".github/workflows/trend_breakout_study.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  study:
+    name: Pre-registered verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Study mechanics tests
+        run: python -m unittest tests.test_trend_breakout_study_v1 -v
+      - name: Download verified public history
+        run: python -m bot.trend_breakout_study_v1 --download-only
+      - name: Simulate and report
+        run: |
+          python -m bot.trend_breakout_study_v1 --skip-download
+          python - <<'PY'
+          import json
+          r = json.load(open("artifacts/trend_breakout_v1/report.json"))
+          print("PREREG", r["prereg_id"], r["prereg_sha256"], "code", r["code_sha"])
+          for h, data in r["hypotheses"].items():
+              print("VERDICT", h, data["verdict"], json.dumps(data["verdict_basis"], sort_keys=True))
+              for window in ("holdout", "descriptive"):
+                  for variant, v in data[window].items():
+                      for fee, s in v["by_fee"].items():
+                          print("SUMMARY", h, window, variant, fee, json.dumps(s, sort_keys=True))
+                      for key in ("gross_mean_r", "funding_mean_r", "funding_assumed_trades",
+                                  "median_stop_pct", "median_hold_hours", "exit_reasons",
+                                  "by_direction", "by_symbol", "by_month"):
+                          if key in v:
+                              print("BREAKDOWN", h, window, variant, key, json.dumps(v[key], sort_keys=True))
+          print("DATA_NOTES", json.dumps(r["data_notes"], sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trend-breakout-report
+          path: |
+            artifacts/trend_breakout_v1/report.json
+            artifacts/trend_breakout_v1/trades.jsonl
+          retention-days: 90

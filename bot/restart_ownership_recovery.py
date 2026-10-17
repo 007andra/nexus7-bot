@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import math
 
 from bot.conditional_stop_protection import conditional_stop_confirmed
-from bot.quantity import contracts_to_base, quantity_rules
+from bot.quantity import contracts_to_base, is_base_asset_instrument, number, quantity_rules
 
 
 @dataclass(frozen=True)
@@ -112,8 +112,14 @@ def _filled_base_qty(status: dict, info) -> float:
         return 0.0
     raw = status.get("filledSize", status.get("dealSize", 0))
     try:
+        if is_base_asset_instrument(info):
+            # Binance USD-M: executedQty is already base asset. Passing it to
+            # contracts_to_base (which refuses base-asset venues by design)
+            # made every Binance restart proof fail as a quantity mismatch.
+            value = float(number(raw))
+            return value if math.isfinite(value) else 0.0
         return float(contracts_to_base(raw, info))
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, ArithmeticError):
         return 0.0
 
 
@@ -151,6 +157,75 @@ def _durable_fill_matches_position(record: dict, position_qty: float, info) -> b
     except (KeyError, TypeError, ValueError):
         return False
     return _same_base_qty(normalized, position_qty, info)
+
+
+CONTINUITY_MAX_DAYS = 30
+
+
+async def _binance_trade_continuity(engine, symbol, side, record, position_qty, info):
+    """NOVO-02 (Binance port): a FILLED opening record proves only that BGX
+    opened a trade in the past. The CURRENT position is that trade only if the
+    exchange trade ledger, replayed from the opening order's first fill, shows
+    that only that order added exposure, the balance never returned to zero (a
+    close) and the final balance equals the position. Unreadable/incomplete
+    ledger -> reject (EXTERNAL/read-only). Returns a rejection reason or None.
+    """
+    import time
+
+    try:
+        from bot.binance import BinanceClient
+    except Exception:
+        return None
+    client = getattr(engine, "client", None)
+    raw_client = getattr(client, "_client", client)
+    if not isinstance(raw_client, BinanceClient):
+        return None
+    from bot.binance import to_binance
+    from bot.binance_accounting_evidence import collect_user_trades
+    try:
+        created_ms = int(float(record.get("created_at") or 0) * 1000)
+    except (TypeError, ValueError):
+        return "opening_time_unconfirmed"
+    now_ms = int(time.time() * 1000)
+    start = created_ms - 120_000
+    if created_ms <= 0 or now_ms - start > CONTINUITY_MAX_DAYS * 86400000:
+        return "trade_ledger_window_unsupported"
+    trades = []
+    window = 7 * 86400000 - 1
+    cursor = start
+    try:
+        while cursor < now_ms:
+            end = min(now_ms, cursor + window)
+            trades.extend(await collect_user_trades(raw_client, to_binance(symbol), cursor, end))
+            cursor = end + 1
+    except Exception:
+        return "trade_ledger_unconfirmed"
+    trades.sort(key=lambda row: (int(row.get("time", 0)), int(row["id"])))
+    opening = str(record.get("order_id") or "")
+    direction = "BUY" if side == "Buy" else "SELL"
+    first = next((i for i, t in enumerate(trades) if str(t.get("orderId")) == opening), None)
+    if first is None:
+        return "opening_fill_missing_in_ledger"
+    balance = 0.0
+    for trade in trades[first:]:
+        try:
+            qty = float(trade["qty"])
+        except (KeyError, TypeError, ValueError):
+            return "trade_ledger_malformed"
+        trade_side = str(trade.get("side") or "").upper()
+        if trade_side == direction:
+            if str(trade.get("orderId")) != opening:
+                return "exposure_added_after_open"
+            balance += qty
+        elif trade_side in ("BUY", "SELL"):
+            balance -= qty
+            if balance <= max(1e-12, position_qty * 1e-9):
+                return "lineage_flat_in_trade_ledger"
+        else:
+            return "trade_ledger_malformed"
+    if not _same_base_qty(balance, position_qty, info):
+        return "trade_ledger_residual_mismatch"
+    return None
 
 
 def _reject(reason: str, *, symbol: str = "") -> OwnershipProof:
@@ -244,6 +319,10 @@ async def prove_restart_ownership(engine, position: dict) -> OwnershipProof:
     filled_qty = _filled_base_qty(status, info)
     if not _same_base_qty(filled_qty, position_qty, info):
         return _reject("exchange_fill_quantity_mismatch", symbol=symbol)
+
+    continuity = await _binance_trade_continuity(engine, symbol, side, candidate, position_qty, info)
+    if continuity:
+        return _reject(continuity, symbol=symbol)
 
     protected, protection = await conditional_stop_confirmed(engine.client, position)
     if not protected:

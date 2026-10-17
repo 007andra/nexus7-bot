@@ -86,7 +86,14 @@ def _spawn_notice(factory, *, symbol: str, stage: str, log):
 
     async def _runner():
         try:
-            await factory()
+            result = await factory()
+            from bot.telegram_transport import delivered
+            if not delivered(result):
+                log.warning(
+                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s sent=false class=%s",
+                    symbol, stage, getattr(result, "cls", "NA"),
+                )
+                return
             log.info(
                 "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s sent=true",
                 symbol, stage,

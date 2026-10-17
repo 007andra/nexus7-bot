@@ -139,3 +139,20 @@ def test_fill_for_unknown_order_id_is_ignored_even_when_symbol_has_trace():
 def test_unrelated_logs_are_ignored():
     c = EntryLatencyCollector()
     assert c.observe("heartbeat ok", 1_000_000_000) == []
+
+
+def test_unknown_market_data_is_reported_as_na_never_zero():
+    """Audit P1-1: without an observed acquisition event the value is unknown."""
+    c = EntryLatencyCollector()
+    first = c.observe("[ATOMUSDT] ✅ SINAL SHORT score=63/100 RR=2.0 entry=PULLBACK", 1_010_000_000)
+    assert "stage_ms=NA" in first[0]
+    assert "total_ms=NA" in first[0]
+    output = c.observe(
+        "[PULLBACK_CONFIRMATION] symbol=ATOMUSDT side=SHORT result=BLOCKED reason=x",
+        1_020_000_000,
+    )
+    summary = output[-1]
+    assert "market_to_signal_ms=NA" in summary
+    assert "market_to_signal_ms=0.0" not in summary
+    assert "market_data_observed=false" in summary
+    assert "signal_to_pullback_ms=10.0" in summary

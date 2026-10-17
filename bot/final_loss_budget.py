@@ -1,8 +1,14 @@
-"""Deterministic projected loss ceiling for the operator margin policy.
+"""Projected-loss diagnostic retained for observability after final sizing.
 
-Keep 50% available margin and configured leverage. Reject incompatible stops;
-never resize or move a technical stop. This is an estimate, not a guaranteed
-maximum realized loss: gaps, funding and execution beyond estimates can exceed it.
+The final quantity is ``min(stop_risk_qty, operator_margin_cap_qty)`` (see
+``final_sizing_invariants``). The historical 50%-of-entry-initial-margin ceiling is measured here. Runtime
+final sizing consumes ``diagnose()`` and treats any non-PASS result as a
+candidate-local rejection; it never pauses the scanner/runtime globally.
+
+RiskManagerV3 owns the monetary stop-risk budget and Binance CROSS stress owns
+account-level solvency/liquidation safety. This module remains arithmetic and
+telemetry only: it does not resize, move technical stops, or mutate execution
+state itself.
 """
 import math
 
@@ -53,6 +59,26 @@ def validate(qty, entry, stop, direction, leverage, cost_fraction):
     return projected, limit
 
 
+def diagnose(qty, entry, stop, direction, leverage, cost_fraction):
+    """Return legacy-ceiling diagnostics without affecting execution.
+
+    Result is one of PASS, WARN, or UNAVAILABLE. Unlike validate(), this helper
+    never raises for ordinary input/geometry failures and is suitable for
+    observability-only runtime call sites.
+    """
+    try:
+        metrics = measure(qty, entry, stop, direction, leverage, cost_fraction)
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        return "UNAVAILABLE", reason_from_exception(exc), None
+
+    projected = metrics["projected_loss"]
+    limit = metrics["loss_limit"]
+    tolerance = max(1e-12, limit * 1e-12)
+    if projected > limit + tolerance:
+        return "WARN", "projected_loss_exceeds_50pct_entry_margin", metrics
+    return "PASS", "within_50pct_entry_margin", metrics
+
+
 def reason_from_exception(exc):
     text = str(exc)
     mapping = {
@@ -78,8 +104,8 @@ def emit_telemetry(
         logger = log.info if str(result).upper() == 'PASS' else log.warning
         logger(
             "[FINAL_LOSS_BUDGET] symbol=%s setup_id=%s stage=%s result=%s "
-            "specific_reason=%s qty=%.12g qty_authority=FINAL_OPERATOR_QTY "
-            "risk_v3_advisory_qty=%s risk_v3_qty_authority=NON_AUTHORITATIVE "
+            "specific_reason=%s qty=%.12g qty_authority=FINAL_SIZING_INVARIANT "
+            "stop_risk_qty=%s risk_v3_qty_authority=BINDING_UPPER_BOUND "
             "entry=%.12g stop=%.12g direction=%s leverage=%.12g margin=%.12g "
             "stop_fraction=%.12g cost_fraction=%.12g projected_loss=%.12g "
             "loss_limit=%.12g projected_loss_pct_notional=%.8f "
@@ -95,12 +121,23 @@ def emit_telemetry(
             metrics['headroom_pct'],
         )
     except Exception as exc:
-        try:
-            log.warning(
-                "[FINAL_LOSS_BUDGET] symbol=%s setup_id=%s stage=%s result=%s "
-                "telemetry_error=%s decision_effect=NONE execution_effect=NONE",
-                symbol, setup_id or 'UNKNOWN', stage, str(result).upper(),
-                type(exc).__name__,
-            )
-        except Exception:
-            pass
+        _report_telemetry_failure(log, symbol, setup_id, stage, result, exc)
+
+
+def _report_telemetry_failure(log, symbol, setup_id, stage, result, exc):
+    """Report a telemetry failure; a broken logger must never reach trading.
+
+    Returns True when the failure was reported, False when the logger itself
+    failed (then there is nothing else that could safely record it).
+    """
+    try:
+        log.warning(
+            "[FINAL_LOSS_BUDGET] symbol=%s setup_id=%s stage=%s result=%s "
+            "telemetry_error=%s decision_effect=NONE execution_effect=NONE",
+            symbol, setup_id or 'UNKNOWN', stage, str(result).upper(),
+            type(exc).__name__,
+        )
+        return True
+    except Exception as log_exc:  # noqa: BLE001 - logging must not raise into sizing
+        del log_exc
+        return False

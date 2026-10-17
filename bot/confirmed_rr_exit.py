@@ -6,7 +6,6 @@ Pending/partial fills retain the local position and its exchange protection.
 import hashlib
 import json
 import math
-import os
 
 from bot import database as db
 from bot.logger import log
@@ -17,9 +16,37 @@ def identity(symbol, position):
     opening = lineage.get('opening_order_id') or lineage.get('order_id')
     if not opening:
         raise ValueError('exact opening order identity required for LIVE RR exit')
-    scope = [os.getenv(k, '') for k in ('RAILWAY_PROJECT_ID','RAILWAY_SERVICE_ID','RAILWAY_ENVIRONMENT_ID')]
-    token = hashlib.sha256(json.dumps(scope + [symbol, str(opening), 'RR_DOUBLE']).encode()).hexdigest()
+    # NOVO-03: stable financial scope instead of Railway IDs.
+    from bot.financial_namespace import stable_scope
+    token = hashlib.sha256(json.dumps([stable_scope(), symbol, str(opening), 'RR_DOUBLE']).encode()).hexdigest()
     return 'rr_exit_v1:' + token, 'rr-' + token
+
+
+def _legacy_identity(symbol, position):
+    lineage = getattr(position, '_forensic_lineage', {}) or {}
+    opening = lineage.get('opening_order_id') or lineage.get('order_id')
+    from bot.financial_namespace import legacy_railway_values
+    token = hashlib.sha256(json.dumps(legacy_railway_values() + [symbol, str(opening), 'RR_DOUBLE']).encode()).hexdigest()
+    return 'rr_exit_v1:' + token, 'rr-' + token
+
+
+async def durable_identity(symbol, position, kind='rr'):
+    """(key, idem, raw) — the stable identity, or the previous release's
+    identity when ONLY a legacy record exists (an in-flight exit keeps its
+    exchange idempotency key across the namespace migration)."""
+    key, idem = identity(symbol, position)
+    legacy_key, legacy_idem = _legacy_identity(symbol, position)
+    if kind == 'partial':
+        key, idem = key.replace('rr_exit_v1:', 'partial_exit_v1:'), idem.replace('rr-', 'partial-', 1)
+        legacy_key = legacy_key.replace('rr_exit_v1:', 'partial_exit_v1:')
+        legacy_idem = legacy_idem.replace('rr-', 'partial-', 1)
+    raw = await db.load_key_value(key, strict=True)
+    if raw is None and legacy_key != key:
+        legacy_raw = await db.load_key_value(legacy_key, strict=True)
+        if legacy_raw is not None:
+            log.warning('[FINANCIAL_NAMESPACE] key_family=%s_exit source=LEGACY_SCOPE identity=LEGACY', kind)
+            return legacy_key, legacy_idem, legacy_raw
+    return key, idem, raw
 
 
 async def _persist(key, state):
@@ -32,13 +59,14 @@ async def check(engine):
         try:
             if symbol in getattr(engine, '_pending_partial_symbols', set()):
                 continue
+            if getattr(position, '_geometry_unproven', False) is True:
+                continue    # Q-01: no R exit from an invented geometry
             entry, stop, price = map(float, (position.entry, position.sl, position.current_price or position.entry))
             if not all(math.isfinite(v) and v > 0 for v in (entry, stop, price)):
                 continue
             if position.direction not in ('LONG', 'SHORT'):
                 raise ValueError('invalid RR direction')
-            key, idem = identity(symbol, position)
-            raw = await db.load_key_value(key, strict=True)
+            key, idem, raw = await durable_identity(symbol, position, 'rr')
             state = json.loads(raw) if raw is not None else None
             if state is not None and (not isinstance(state, dict) or state.get('idem') != idem or not state.get('client_oid')):
                 raise ValueError('invalid durable RR exit')

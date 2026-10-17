@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from bot import database as db
-from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+from bot.execution_model import estimated_round_trip_cost_pct
 
 # Backward-compatible public diagnostic used by older tests/telemetry. Runtime
 # evaluation below is symbol-aware and does not rely on this single reference.

@@ -1,12 +1,11 @@
 """Disambiguate exchange balance from PAPER and SHADOW read-only modes.
 
 Observability-only hardening. In PAPER or validation-held SHADOW mode the
-KuCoin available balance may be queried for connectivity/account visibility,
-but it must never be presented as an actively executable LIVE balance.
+exchange available balance may be queried for connectivity/account
+visibility, but it must never be presented as an actively executable LIVE
+balance.
 """
 from __future__ import annotations
-
-import math
 
 
 def exchange_metadata(balance, paper_trade: bool, shadow_readonly: bool = False) -> dict:
@@ -18,11 +17,17 @@ def exchange_metadata(balance, paper_trade: bool, shadow_readonly: bool = False)
         "available_usdt": (
             round(float(balance), 4) if balance is not None else None
         ),
-        "source": "KuCoin",
+        "source": _exchange_source(),
         "read_only": read_only,
         "mode": mode,
         "used_for_paper_sizing": False,
     }
+
+
+def _exchange_source() -> str:
+    from bot import exchange
+
+    return f"{exchange.EXCHANGE_NAME.capitalize()} {exchange.EXCHANGE_PRODUCT}"
 
 
 def paper_metadata(balance) -> dict:
@@ -35,39 +40,7 @@ def paper_metadata(balance) -> dict:
 
 def install(log) -> None:
     from bot.engine import TradingEngine
-    from bot.kucoin import KuCoinClient, PAPER_TRADE
-
-    if getattr(KuCoinClient, "_balance_observability_patched", False):
-        return
-
-    async def get_balance_with_clear_source(self) -> float:
-        data = await self._get(
-            "/api/v1/account-overview", {"currency": "USDT"}, auth=True
-        )
-        if not isinstance(data, dict) or "availableBalance" not in data:
-            raise RuntimeError("Futures availableBalance unavailable")
-        try:
-            balance = float(data["availableBalance"])
-            if not math.isfinite(balance):
-                raise ValueError("nonfinite balance")
-        except (ValueError, TypeError) as exc:
-            raise RuntimeError("Futures availableBalance invalid") from exc
-
-        self._last_exchange_balance = balance
-        shadow_readonly = bool(getattr(self, "_shadow_readonly_active", False))
-        if PAPER_TRADE:
-            mode = "PAPER_READ_ONLY"
-        elif shadow_readonly:
-            mode = "SHADOW_READ_ONLY"
-        else:
-            mode = "LIVE"
-        log.info(
-            "💰 [EXCHANGE_BALANCE] USDT=$%.4f source=KuCoin "
-            "mode=%s paper_sizing=FALSE",
-            balance,
-            mode,
-        )
-        return balance
+    from bot.exchange import PAPER_TRADE
 
     original_status = getattr(TradingEngine, "get_status", None)
     if original_status is not None and not getattr(
@@ -102,8 +75,6 @@ def install(log) -> None:
         TradingEngine.get_status = status_with_balance_sources
         TradingEngine._balance_observability_status_patched = True
 
-    KuCoinClient.get_balance = get_balance_with_clear_source
-    KuCoinClient._balance_observability_patched = True
     log.info(
         "[BALANCE_OBSERVABILITY] installed: exchange/PAPER/SHADOW balance modes "
         "are explicit; sizing/risk behavior unchanged"

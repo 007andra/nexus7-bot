@@ -1,9 +1,13 @@
 import unittest
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from bot.config import cfg
 from bot import final_sizing_invariants as final_sizing
 from bot import pilot_risk_cap_hardening as pilot_cap
+from bot.professional_risk import CapitalState, stop_risk_size
+from bot import binance_cross_portfolio_stress as cross_stress
 
 
 class _Log:
@@ -63,21 +67,25 @@ class FinalSizingInvariantTests(unittest.TestCase):
             pilot_cap._PILOT_SYMBOL.reset(token_symbol)
             pilot_cap._PILOT_ENGINE.reset(token_engine)
 
-    def test_operator_target_is_derived_from_50pct_margin_not_legacy_quantity(self):
-        module, engine = self._install(risk_size=lambda *a, **k: 0.25, legacy_qty=0.001)
+    # Contract change (2026-09-26 audit P0-1). Previously the operator margin
+    # target was returned even when RiskManagerV3 sized less (qty=5 vs 0.25),
+    # i.e. the stop-risk budget was not enforced. The executed contract is now
+    # final_qty = min(stop_risk_qty, operator_margin_cap_qty).
+    def test_cap_is_derived_from_50pct_margin_not_legacy_quantity(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0, legacy_qty=0.001)
         qty, stored = self._call(module, engine)
-        # available=20, margin=10, leverage=50 => notional=500; price=100 => qty=5.
+        # available=20, margin=10, leverage=50 => notional=500; price=100 => cap qty=5.
         self.assertAlmostEqual(qty, 5.0)
         self.assertAlmostEqual(stored, 5.0)
         self.assertAlmostEqual((qty * 100.0) / cfg.LEVERAGE, 10.0)
 
-    def test_risk_numeric_recommendation_does_not_shrink_valid_operator_target(self):
+    def test_stop_risk_quantity_binds_below_operator_cap(self):
         module, engine = self._install(risk_size=lambda *a, **k: 0.25)
         qty, stored = self._call(module, engine)
-        self.assertAlmostEqual(qty, 5.0)
-        self.assertAlmostEqual(stored, 5.0)
+        self.assertAlmostEqual(qty, 0.25)
+        self.assertAlmostEqual(stored, 0.25)
 
-    def test_operator_target_remains_authoritative_when_risk_allows_more(self):
+    def test_operator_cap_binds_when_risk_allows_more(self):
         module, engine = self._install(risk_size=lambda *a, **k: 10.0)
         qty, stored = self._call(module, engine)
         self.assertAlmostEqual(qty, 5.0)
@@ -89,6 +97,231 @@ class FinalSizingInvariantTests(unittest.TestCase):
         margin = qty * 2.0 / cfg.LEVERAGE
         self.assertLessEqual(margin, 19.37 * 0.50 + 1e-9)
         self.assertGreater(qty, 0.0)
+
+    def test_explicit_full_margin_cap_uses_at_most_available_collateral(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0, available=6.0)
+        with patch.dict("os.environ", {"LIVE_OPERATOR_MARGIN_FRACTION": "1"}):
+            qty, stored = self._call(module, engine, price=100.0)
+        self.assertEqual(qty, stored)
+        self.assertGreater(qty, 2.8)
+        self.assertLess(qty, 3.0)  # 6 USDT with opening-fee and price reserve
+        notional = qty * 100.0
+        self.assertLessEqual(
+            notional * (1 + final_sizing.ENTRY_PRICE_BUFFER)
+            * (1 / cfg.LEVERAGE + 0.0006), 6.0,
+        )
+        self.assertIn("100pct_available_initial_margin_cap", final_sizing.sizing_contract(1.0))
+
+    def test_full_margin_cap_keeps_stop_risk_as_binding_upper_bound(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 0.03, available=6.0)
+        with patch.dict("os.environ", {"LIVE_OPERATOR_MARGIN_FRACTION": "1"}):
+            qty, _ = self._call(module, engine)
+        self.assertAlmostEqual(qty, 0.03)
+
+
+    def test_controlled_one_shot_uses_absolute_budget_not_legacy_margin_ceiling(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 0.05, available=5.39561426)
+        evidence = {
+            "effective_risk_pct": 0.10 / 5.39561426,
+            "loss_budget_usdt": 0.10,
+        }
+        absolute = {
+            "projected_loss_usdt": 0.08,
+            "loss_budget_usdt": 0.10,
+            "headroom_usdt": 0.02,
+        }
+        with patch(
+            "bot.controlled_live_reentry_v1.readiness",
+            return_value=(True, "ready", evidence),
+        ), patch(
+            "bot.controlled_live_reentry_v1.projected_loss_allowed",
+            return_value=(True, "within_absolute_loss_budget", absolute),
+        ), patch(
+            "bot.final_loss_budget.diagnose",
+            return_value=("WARN", "projected_loss_exceeds_50pct_entry_margin", {"projected_loss": 0.08}),
+        ), patch(
+            "bot.final_loss_budget.emit_telemetry",
+            return_value=None,
+        ), patch(
+            "bot.execution_cost.stress_cost_fraction",
+            return_value=(0.002, "test"),
+        ):
+            qty, stored = self._call(module, engine)
+
+        self.assertAlmostEqual(qty, 0.05)
+        self.assertAlmostEqual(stored, 0.05)
+
+    def test_controlled_one_shot_absolute_budget_still_blocks_excess_loss(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 0.05, available=5.39561426)
+        evidence = {
+            "effective_risk_pct": 0.10 / 5.39561426,
+            "loss_budget_usdt": 0.10,
+        }
+        absolute = {
+            "projected_loss_usdt": 0.11,
+            "loss_budget_usdt": 0.10,
+            "headroom_usdt": -0.01,
+        }
+        with patch(
+            "bot.controlled_live_reentry_v1.readiness",
+            return_value=(True, "ready", evidence),
+        ), patch(
+            "bot.controlled_live_reentry_v1.projected_loss_allowed",
+            return_value=(False, "absolute_loss_budget_exceeded", absolute),
+        ), patch(
+            "bot.final_loss_budget.diagnose",
+            return_value=("WARN", "projected_loss_exceeds_50pct_entry_margin", {"projected_loss": 0.11}),
+        ), patch(
+            "bot.final_loss_budget.emit_telemetry",
+            return_value=None,
+        ), patch(
+            "bot.execution_cost.stress_cost_fraction",
+            return_value=(0.002, "test"),
+        ):
+            qty, stored = self._call(module, engine)
+
+        self.assertEqual(qty, 0.0)
+        self.assertEqual(stored, 0.0)
+
+
+    def test_controlled_absolute_budget_cap_floors_to_exchange_step(self):
+        info = {
+            "quantityUnit": "BASE_ASSET",
+            "qtyStep": "0.1",
+            "minQty": "0.1",
+            "minNotional": "5",
+        }
+        qty = final_sizing._controlled_absolute_budget_quantity(
+            info,
+            entry=0.20053,
+            stop=0.203079,
+            direction="SHORT",
+            cost_fraction=0.0032,
+            loss_budget_usdt=0.10,
+        )
+        self.assertAlmostEqual(qty, 31.3)
+        projected = qty * (abs(0.20053 - 0.203079) + 0.20053 * 0.0032)
+        self.assertLessEqual(projected, 0.10)
+        self.assertGreaterEqual(qty * 0.20053, 5.0)
+
+    def test_controlled_absolute_budget_cap_never_forces_minimum_order(self):
+        info = {
+            "quantityUnit": "BASE_ASSET",
+            "qtyStep": "0.1",
+            "minQty": "25",
+            "minNotional": "5",
+        }
+        qty = final_sizing._controlled_absolute_budget_quantity(
+            info,
+            entry=0.20053,
+            stop=0.203079,
+            direction="SHORT",
+            cost_fraction=0.0032,
+            loss_budget_usdt=0.01,
+        )
+        self.assertEqual(qty, 0.0)
+
+    def test_invalid_allocation_fails_closed(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0, available=6.0)
+        for value in ("0", "1.01", "nan", "bad"):
+            with self.subTest(value=value), patch.dict(
+                "os.environ", {"LIVE_OPERATOR_MARGIN_FRACTION": value}
+            ):
+                qty, stored = self._call(module, engine)
+                self.assertEqual((qty, stored), (0.0, 0.0))
+
+    def test_six_usdt_full_budget_still_limits_projected_loss(self):
+        result = stop_risk_size(
+            capital=CapitalState(equity=6.0, available_collateral=6.0),
+            entry=100.0, stop=98.0, risk_pct=1.0, leverage=50.0,
+            qty_step=0.001, min_qty=0.05, max_margin_pct=1.0,
+            fee_rate_per_side=0.0005, expected_slippage_pct=0.001,
+        )
+        self.assertGreater(result.qty, 0)
+        self.assertLessEqual(result.projected_stop_loss, 6.0)
+        self.assertLessEqual(result.required_margin, 6.0)
+
+    def test_full_budget_cannot_bypass_cross_stop_stress(self):
+        class Client:
+            async def get_account_state(self):
+                return {
+                    "crossWalletBalance": 6.0, "orderMargin": 0.0,
+                    "multiAssetsMargin": False, "canTrade": True,
+                }
+
+            async def get_positions(self):
+                return []
+
+            async def get_symbol_config(self, symbol):
+                # Valid CROSS candidate whose actual Binance leverage matches
+                # the configured contract (cfg.LEVERAGE = 50 in setUp).
+                return {"marginType": "CROSS", "leverage": 50}
+
+            async def get_leverage_brackets(self, symbol):
+                return {"brackets": [{
+                    "bracket": 1, "notionalFloor": 0, "notionalCap": 10000,
+                    "maintMarginRatio": 0.01, "initialLeverage": 50,
+                }]}
+
+        engine = SimpleNamespace(client=Client(), positions={}, paper_trade=False)
+        signal = SimpleNamespace(
+            symbol="TESTUSDT", direction="LONG", entry=100.0, sl=98.0,
+        )
+        result = asyncio.run(cross_stress.evaluate(engine, signal, 3.0))
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason, "nonpositive_stressed_margin")
+
+    def _stress_with_symbol_config(self, config_or_exc):
+        class Client:
+            async def get_account_state(self):
+                return {"crossWalletBalance": 6.0, "orderMargin": 0.0,
+                        "multiAssetsMargin": False, "canTrade": True}
+
+            async def get_positions(self):
+                return []
+
+            async def get_symbol_config(self, symbol):
+                if isinstance(config_or_exc, Exception):
+                    raise config_or_exc
+                return config_or_exc
+
+            async def get_leverage_brackets(self, symbol):
+                return {"brackets": [{
+                    "bracket": 1, "notionalFloor": 0, "notionalCap": 10000,
+                    "maintMarginRatio": 0.01, "initialLeverage": 50,
+                }]}
+
+        engine = SimpleNamespace(client=Client(), positions={}, paper_trade=False)
+        signal = SimpleNamespace(symbol="TESTUSDT", direction="LONG", entry=100.0, sl=98.0)
+        return asyncio.run(cross_stress.evaluate(engine, signal, 3.0))
+
+    def test_actual_leverage_equal_to_configured_continues_evaluation(self):
+        # Equality must not short-circuit to PASS: the stress math still runs
+        # and reaches the original stressed-margin verdict.
+        result = self._stress_with_symbol_config({"marginType": "CROSS", "leverage": 50})
+        self.assertEqual(result.reason, "nonpositive_stressed_margin")
+
+    def test_actual_leverage_mismatch_missing_invalid_or_unreadable_blocks(self):
+        cases = {
+            "lower": {"marginType": "CROSS", "leverage": 20},
+            "higher": {"marginType": "CROSS", "leverage": 75},
+            "missing": {"marginType": "CROSS"},
+            "none": {"marginType": "CROSS", "leverage": None},
+            "text": {"marginType": "CROSS", "leverage": "bad"},
+            "empty": {"marginType": "CROSS", "leverage": ""},
+            "bool": {"marginType": "CROSS", "leverage": True},
+        }
+        for name, config in cases.items():
+            result = self._stress_with_symbol_config(config)
+            self.assertFalse(result.allowed, name)
+            self.assertEqual(result.reason, "state_candidate_configured_leverage_unconfirmed", name)
+        result = self._stress_with_symbol_config(RuntimeError("symbol config read failed"))
+        self.assertFalse(result.allowed)
+        self.assertTrue(result.reason.startswith("state_"), result.reason)
+
+    def test_leverage_gate_never_rewrites_configured_leverage(self):
+        self._stress_with_symbol_config({"marginType": "CROSS", "leverage": 20})
+        self.assertEqual(cfg.LEVERAGE, 50)
 
     def test_risk_sizing_exception_fails_closed(self):
         def _raise(*args, **kwargs):

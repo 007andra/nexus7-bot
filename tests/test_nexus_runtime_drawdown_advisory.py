@@ -22,12 +22,25 @@ async def _exercise_runtime_drawdown_advisory():
     messages = []
     original_read = runtime.account_balance_semantics.read_account_state
     original_restore = runtime.restore_update_real_account_peak
+    original_reconcile = runtime.capital_flows.reconcile_external_capital_flows
+    original_repair = runtime.hwm_incident_repair.repair_if_needed
     original_notify = runtime.notify
 
     async def _read_account_state(_client):
         return {"equity": 20.0}
 
+    ordering = []
+
+    async def _reconcile(_client, _risk, _equity, strict=True):
+        ordering.append("cashflow")
+        return {"applied": 0, "blocked": False}
+
+    async def _repair(_risk, _equity, strict=True):
+        ordering.append("repair")
+        return {"status": "NOT_MATCHED"}
+
     async def _restore_peak(_risk, _equity, strict=True):
+        ordering.append("hwm")
         return None
 
     async def _notify(message):
@@ -35,6 +48,8 @@ async def _exercise_runtime_drawdown_advisory():
 
     runtime.account_balance_semantics.read_account_state = _read_account_state
     runtime.restore_update_real_account_peak = _restore_peak
+    runtime.capital_flows.reconcile_external_capital_flows = _reconcile
+    runtime.hwm_incident_repair.repair_if_needed = _repair
     runtime.notify = _notify
     try:
         engine = object.__new__(runtime.TradingEngine)
@@ -48,6 +63,7 @@ async def _exercise_runtime_drawdown_advisory():
         await engine._update_balance()
         assert engine.active is True
         assert engine._dd_alerted is True
+        assert ordering[:3] == ["cashflow", "repair", "hwm"]
         assert len(messages) == 1
         assert "ADVISORY" in messages[0]
         assert "Novas entradas bloqueadas: False" in messages[0]
@@ -65,6 +81,8 @@ async def _exercise_runtime_drawdown_advisory():
     finally:
         runtime.account_balance_semantics.read_account_state = original_read
         runtime.restore_update_real_account_peak = original_restore
+        runtime.capital_flows.reconcile_external_capital_flows = original_reconcile
+        runtime.hwm_incident_repair.repair_if_needed = original_repair
         runtime.notify = original_notify
 
 

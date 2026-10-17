@@ -13,7 +13,7 @@ from bot.logger import log
 from bot import score as scoring
 from bot import liquidation as liq
 from bot import shadow_balance_semantics as balance_semantics
-from bot.kucoin import TAKER_FEE
+from bot.exchange import TAKER_FEE
 from bot.quantity import validate_base_quantity
 from bot.nexus_types import decision_validation_error
 from bot.account_capital_reader import read_account_capital

@@ -420,34 +420,12 @@ async def _cancel_order(client, order_id: str) -> bool:
     endpoint = f"/api/v1/orders/{quote(str(order_id), safe='')}"
     assert_exchange_mutation_allowed("DELETE", endpoint)
 
+    # Only a client-provided narrow cancel is used; there is no raw-REST
+    # fallback (the former one targeted the removed KuCoin adapter).
     narrow = getattr(client, "cancel_order_by_id", None)
     if callable(narrow):
         return bool(await narrow(str(order_id)))
-
-    ensure = getattr(client, "_ensure_session", None)
-    auth = getattr(client, "_auth_headers", None)
-    session = getattr(client, "_session", None)
-    if not callable(ensure) or not callable(auth):
-        return False
-    await ensure()
-    session = getattr(client, "_session", session)
-    if session is None:
-        return False
-    from bot.kucoin import REST_BASE
-    headers = auth("DELETE", endpoint)
-    try:
-        async with session.delete(
-            REST_BASE + endpoint, headers=headers
-        ) as response:
-            data = await response.json()
-            return isinstance(data, dict) and data.get("code") == "200000"
-    except Exception as exc:
-        log.warning(
-            "[PROTECTION_GC] cancel_unconfirmed order_id=%s error=%s",
-            order_id,
-            type(exc).__name__,
-        )
-        return False
+    return False
 
 
 def inventory(
@@ -573,6 +551,17 @@ async def cleanup_flat_symbol(
     client = getattr(engine, "client", None)
     if client is None or not await _validate_owner(client):
         return False
+
+    if callable(getattr(client, "cancel_algo_order", None)):
+        # P1-OPEN-1: Binance algo protection (bgx7-) is owned only through the
+        # durable opening-lineage record; never by prefix, never via KuCoin.
+        from bot.binance_stale_protection import VERIFIED, reconcile_symbol
+        try:
+            return await reconcile_symbol(client, symbol, flat_proven=True) == VERIFIED
+        except Exception as exc:
+            log.error("[FLAT_PROTECTION_CLEANUP] symbol=%s status=FAILED error=%s",
+                      symbol, type(exc).__name__)
+            return False
 
     from bot.conditional_stop_protection import read_stop_orders
     before = await read_stop_orders(client, symbol)

@@ -1,4 +1,4 @@
-"""Read-only KuCoin account balance semantics shared by SHADOW and future LIVE paths.
+"""Read-only exchange account balance semantics shared by SHADOW and LIVE paths.
 
 Capital health is based on accountEquity. New-order affordability prefers
 availableMargin when KuCoin exposes it (the current cross-margin buying-power
@@ -29,22 +29,25 @@ def _finite_number(value, name):
 
 
 async def read_account_state(client):
-    """Return validated equity/collateral state from KuCoin, read-only.
-
-    ``accountEquity`` remains the capital/drawdown basis. For collateral,
-    KuCoin's current Futures API uses ``availableMargin`` for cross-margin
-    buying power. ``availableBalance`` is retained as a compatibility fallback
-    for legacy/isolated responses where ``availableMargin`` is absent.
-    """
-    data = await client._get(
-        "/api/v1/account-overview", {"currency": "USDT"}, auth=True
-    )
+    """Return validated read-only equity/collateral from the active exchange."""
+    venue_reader = getattr(client, "get_account_state", None)
+    if callable(venue_reader):
+        data = await venue_reader()
+    else:
+        # KuCoin compatibility path for the existing production adapter.
+        data = await client._get(
+            "/api/v1/account-overview", {"currency": "USDT"}, auth=True
+        )
     if not isinstance(data, dict):
         raise RuntimeError("account overview unavailable")
 
-    equity = _finite_number(data.get("accountEquity"), "accountEquity")
+    raw_equity = data.get("equity", data.get("accountEquity"))
+    equity = _finite_number(raw_equity, "equity")
 
-    if data.get("availableMargin") not in (None, ""):
+    if data.get("available") not in (None, ""):
+        available = _finite_number(data.get("available"), "available")
+        available_source = data.get("available_source") or "available"
+    elif data.get("availableMargin") not in (None, ""):
         available = _finite_number(data.get("availableMargin"), "availableMargin")
         available_source = "availableMargin"
     else:

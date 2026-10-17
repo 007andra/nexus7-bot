@@ -1,0 +1,47 @@
+name: B2 prospective study (B2_PROSPECTIVE_V1)
+
+# Research only: re-runs the frozen B2 rule on months published after the
+# pre-registration (2026-10-16). Quarterly runs are requested by a push to
+# research/b2-prospective-runs (scheduled workflows only fire on the default
+# branch). No credentials, no database, no orders.
+on:
+  pull_request:
+    branches: [main, migration/binance-usdm]
+    paths:
+      - "bot/b2_prospective_v1.py"
+      - "docs/research/b2_prospective_v1_prereg.md"
+      - ".github/workflows/b2_prospective_study.yml"
+  push:
+    branches: [research/b2-prospective-runs]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  study:
+    name: Prospective verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Study mechanics tests
+        run: python -m unittest tests.test_b2_prospective_v1 tests.test_trend_breakout_study_v1 -v
+      - name: Run on every published month
+        run: python -m bot.b2_prospective_v1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b2-prospective-report
+          path: artifacts/b2_prospective_v1/report.json
+          retention-days: 90

@@ -35,6 +35,40 @@ class DailyPnlExchangeReconciliationTests(unittest.TestCase):
         again = pnl._confirmed_adjustment(rows, row)
         self.assertEqual(result, again)
 
+    def test_binance_confirmed_pnl_uses_exchange_specific_adjustment_source(self):
+        rows = {
+            "a" * 64: {
+                "pnl": -3.417347,
+                "source": "ESTIMATED_LOCAL_MARK_AND_FEE_RATE",
+                "closed_at": "2026-10-01T07:25:53+00:00",
+                "symbol": "AAVEUSDT",
+                "opening_order_id": "27098648014",
+            }
+        }
+        row = {
+            "closeId": "BINANCE:27098648014:27098929423,27100972276",
+            "symbol": "AAVEUSDT",
+            "closeTime": int(
+                datetime(2026, 10, 1, 7, 25, 55, tzinfo=timezone.utc).timestamp()
+                * 1000
+            ),
+            "pnl": "0.809514",
+        }
+        receipt = {
+            "opening_order_ids": ["27098648014"],
+            "exchange": "BINANCE",
+        }
+        result = pnl._confirmed_adjustment(rows, row, receipt)
+        self.assertIsNotNone(result)
+        _, value = result
+        self.assertEqual(value["source"], "BINANCE_RECONCILIATION_ADJUSTMENT")
+        self.assertEqual(value["opening_order_id"], "27098648014")
+        self.assertAlmostEqual(value["pnl"], 4.226861)
+        self.assertAlmostEqual(
+            rows["a" * 64]["pnl"] + value["pnl"],
+            0.809514,
+        )
+
     def test_opening_order_lineage_disambiguates_same_symbol_estimates(self):
         rows = {
             "a" * 64: {

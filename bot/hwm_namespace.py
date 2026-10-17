@@ -6,7 +6,8 @@ import os
 
 from bot.state_authority_observability import database_authority_fingerprint
 
-HWM_NAMESPACE_VERSION = "v2"
+HWM_NAMESPACE_VERSION = "v3"
+LEGACY_HWM_NAMESPACE_VERSION = "v2"
 
 
 def _clean(value: str | None, fallback: str) -> str:
@@ -22,11 +23,21 @@ def account_fingerprint() -> str:
     return hashlib.sha256(("kucoin|" + api_key).encode("utf-8")).hexdigest()[:16]
 
 
-def hwm_namespace() -> str:
+def legacy_hwm_namespace() -> str:
+    """Namespace written by the previous release (Railway environment name,
+    hard-coded KuCoin account binding). Read-only migration source."""
     env = _clean(os.environ.get("RAILWAY_ENVIRONMENT_NAME") or os.environ.get("RAILWAY_ENVIRONMENT"), "unknown")
     account = account_fingerprint()
     authority = database_authority_fingerprint()
-    return f"{HWM_NAMESPACE_VERSION}:environment={env}:exchange=kucoin:account={account}:db={authority}"
+    return f"{LEGACY_HWM_NAMESPACE_VERSION}:environment={env}:exchange=kucoin:account={account}:db={authority}"
+
+
+def hwm_namespace() -> str:
+    """NOVO-03: stable across Railway project/environment/service changes and
+    bound to the ACTIVE venue account (exchange + key fingerprint + database)."""
+    from bot import financial_namespace as fn
+    return (f"{HWM_NAMESPACE_VERSION}:exchange={fn.exchange()}:account={fn.account_fingerprint()}"
+            f":db={database_authority_fingerprint()}")
 
 
 def equity_peak_key() -> str:

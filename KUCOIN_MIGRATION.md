@@ -1,3 +1,5 @@
+> **HISTORICAL** — kept as a record. It does not describe the current Binance USD-M runtime; see `README.md` and `docs/audit/`.
+
 # BGX Capital — Guia de Migração Bybit → KuCoin
 
 ## 1. Arquivos alterados

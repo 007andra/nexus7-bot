@@ -15,7 +15,7 @@ import os
 from typing import Any
 
 from bot.config import cfg
-from bot.kucoin import TAKER_FEE
+from bot import execution_cost
 from bot.logger import log
 from bot.professional_risk import CapitalState
 from bot.risk_manager_v3 import RiskManagerV3
@@ -26,6 +26,10 @@ class PlannedRisk:
     entry: float
     stop: float
     risk_pct: float
+    # From the candidate's execution_cost snapshot when available.
+    taker_fee: float | None = None
+    slippage_allowance: float | None = None
+    cost_snapshot_id: str = "none"
 
     def validate(self) -> "PlannedRisk":
         values = (self.entry, self.stop, self.risk_pct)
@@ -35,7 +39,19 @@ class PlannedRisk:
             raise ValueError("planned entry/stop geometry is invalid")
         if not 0 < self.risk_pct <= 1:
             raise ValueError("planned risk_pct must be in (0,1]")
+        for cost in (self.taker_fee, self.slippage_allowance):
+            if cost is not None and (not math.isfinite(float(cost)) or not 0 <= cost < 0.05):
+                raise ValueError("planned cost outside [0,0.05)")
         return self
+
+    def fee_rate(self) -> float:
+        """Snapshot fee, else the conservative exchange-aware fallback."""
+        return float(self.taker_fee) if self.taker_fee is not None else execution_cost.fallback_taker_fee()
+
+    def slippage(self) -> float:
+        """Never below the configured stress allowance NEXUS_EXPECTED_SLIPPAGE_PCT."""
+        configured = float(os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001"))
+        return max(configured, float(self.slippage_allowance or 0.0))
 
 
 class ProfessionalRiskAdapter:
@@ -47,7 +63,7 @@ class ProfessionalRiskAdapter:
     ``RiskManagerV3`` remains side-effect-free and uses a full ``CapitalState``.
     """
 
-    __slots__ = ("_legacy", "_v3", "_plans")
+    __slots__ = ("_legacy", "_v3", "_plans", "_last_sizing")
 
     def __init__(self, legacy: Any) -> None:
         # Keep ordinary self assignments so the repository's static startup
@@ -55,6 +71,7 @@ class ProfessionalRiskAdapter:
         self._legacy = legacy
         self._v3 = RiskManagerV3()
         self._plans = {}
+        self._last_sizing = {}
 
     def __getattr__(self, name: str):
         return getattr(self._legacy, name)
@@ -92,12 +109,25 @@ class ProfessionalRiskAdapter:
     def professional_snapshot(self):
         return self._v3.snapshot()
 
-    def set_plan(self, *, symbol: str, entry: float, stop: float, risk_pct: float) -> PlannedRisk:
+    def set_plan(self, *, symbol: str, entry: float, stop: float, risk_pct: float,
+                 cost_snapshot=None) -> PlannedRisk:
         key = str(symbol)
         if not key:
             raise ValueError("symbol is required")
-        plan = PlannedRisk(float(entry), float(stop), float(risk_pct)).validate()
+        if cost_snapshot is not None and getattr(cost_snapshot, "symbol", key) != key:
+            raise ValueError("cost snapshot symbol mismatch")
+        plan = PlannedRisk(
+            float(entry), float(stop), float(risk_pct),
+            taker_fee=None if cost_snapshot is None else float(cost_snapshot.taker_fee),
+            slippage_allowance=(
+                None if cost_snapshot is None else float(cost_snapshot.slippage_allowance)
+            ),
+            cost_snapshot_id=(
+                "none" if cost_snapshot is None else str(cost_snapshot.snapshot_id)
+            ),
+        ).validate()
         self._plans[key] = plan
+        self._last_sizing.pop(key, None)
         return plan
 
     def update_capital(self, capital: CapitalState):
@@ -134,6 +164,85 @@ class ProfessionalRiskAdapter:
             order_margin=current.order_margin,
             unrealized_pnl=current.unrealized_pnl,
         ))
+
+    def _log_sizing_decomposition(self, symbol, entry, stop, instruments, risk_pct,
+                                  fee_rate, slippage) -> None:
+        """Explain a zero stop-risk quantity. Observability only: any failure
+        here is swallowed and can never change the sizing result."""
+        try:
+            from bot.sizing_decomposition import decompose, format_log
+
+            capital = self._v3.capital
+            detail = decompose(
+                info=instruments.get(symbol) or {},
+                equity=capital.equity,
+                available=capital.available_collateral,
+                entry=entry,
+                stop=stop,
+                risk_pct=risk_pct,
+                leverage=float(cfg.LEVERAGE),
+                max_margin_pct=float(getattr(cfg, "MAX_MARGIN_PCT", 0.80)),
+                fee_rate_per_side=fee_rate,
+                slippage_pct=slippage,
+            )
+            log.warning(format_log(symbol, detail))
+        except Exception as exc:  # noqa: BLE001 - telemetry must never affect sizing
+            log.warning(
+                "[SIZING_DECOMPOSITION] symbol=%s result=UNAVAILABLE error=%s decision_effect=NONE",
+                symbol, type(exc).__name__,
+            )
+
+    def validate_fresh_executable_risk(
+        self, symbol: str, executable_entry: float, qty: float
+    ) -> tuple[bool, dict]:
+        """Recheck the last V3 risk budget at a fresh executable price.
+
+        The monetary budget is the exact budget produced by the most recent
+        RiskManagerV3 sizing call, so leverage never scales the allowed loss.
+        Price drift may increase stop distance and fee/slippage dollars; if the
+        already-quantized final quantity would now exceed that budget, the
+        caller must fail closed before dispatch.
+        """
+        key = str(symbol)
+        state = self._last_sizing.get(key)
+        plan = self._plans.get(key)
+        if not isinstance(state, dict) or plan is None:
+            raise RuntimeError("fresh executable risk has no sizing authority")
+
+        entry = float(executable_entry)
+        quantity = float(qty)
+        budget = float(state.get("risk_budget", float("nan")))
+        stop = float(plan.stop)
+        fee_rate = float(state.get("fee_rate_per_side", float("nan")))
+        slippage = float(state.get("slippage_pct", float("nan")))
+        values = (entry, quantity, budget, stop, fee_rate, slippage)
+        if any(not math.isfinite(v) for v in values):
+            raise ValueError("fresh executable risk contains non-finite value")
+        if entry <= 0 or quantity <= 0 or budget <= 0 or stop <= 0:
+            raise ValueError("fresh executable risk contains non-positive value")
+        if fee_rate < 0 or slippage < 0:
+            raise ValueError("fresh executable risk contains negative costs")
+
+        loss_per_unit = (
+            abs(entry - stop)
+            + entry * fee_rate * 2.0
+            + entry * slippage
+        )
+        projected = quantity * loss_per_unit
+        tolerance = max(1e-12, budget * 1e-6)
+        allowed = projected <= budget + tolerance
+        return allowed, {
+            "risk_budget": budget,
+            "projected_loss": projected,
+            "headroom_usdt": budget - projected,
+            "qty": quantity,
+            "executable_entry": entry,
+            "stop": stop,
+            "fee_rate_per_side": fee_rate,
+            "slippage_pct": slippage,
+            "effective_risk_pct": float(state.get("effective_risk_pct", float("nan"))),
+            "cost_snapshot_id": str(state.get("cost_snapshot_id", "none")),
+        }
 
     def size(self, symbol: str, entry: float, instruments: dict,
              size_mult: float = 1.0, open_positions: dict | None = None) -> float:
@@ -172,9 +281,8 @@ class ProfessionalRiskAdapter:
             if not self._v3.confirmed:
                 raise RuntimeError("capital state invalidated during reconciliation")
 
-            expected_slippage = float(
-                os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001")
-            )
+            expected_slippage = plan.slippage()
+            fee_rate = plan.fee_rate()
             sizing = self._v3.size_for_stop(
                 symbol=key,
                 entry=float(entry),
@@ -182,17 +290,34 @@ class ProfessionalRiskAdapter:
                 instruments=instruments,
                 risk_pct=effective_risk_pct,
                 leverage=float(cfg.LEVERAGE),
-                fee_rate_per_side=float(TAKER_FEE),
+                fee_rate_per_side=fee_rate,
                 expected_slippage_pct=expected_slippage,
             )
+            self._last_sizing[key] = {
+                "risk_budget": float(sizing.risk_budget),
+                "sized_qty": float(sizing.qty),
+                "sized_entry": float(entry),
+                "stop": float(plan.stop),
+                "fee_rate_per_side": float(fee_rate),
+                "slippage_pct": float(expected_slippage),
+                "effective_risk_pct": float(effective_risk_pct),
+                "cost_snapshot_id": str(plan.cost_snapshot_id),
+            }
             log.info(
                 "[RISK_V3_CORE] symbol=%s qty=%.12g risk_budget=%.6f "
                 "projected_stop_loss=%.6f stop_distance_pct=%.6f "
-                "required_margin=%.6f binding=%s decision_effect=NONE",
+                "required_margin=%.6f binding=%s taker_bps=%.3f slippage_allowance_bps=%.3f "
+                "cost_snapshot_id=%s cost_purpose=RISK_BUDGET_STRESS decision_effect=NONE",
                 key, sizing.qty, sizing.risk_budget,
                 sizing.projected_stop_loss, sizing.stop_distance_pct,
                 sizing.required_margin, sizing.binding_constraint,
+                fee_rate * 1e4, expected_slippage * 1e4, plan.cost_snapshot_id,
             )
+            if float(sizing.qty) <= 0:
+                self._log_sizing_decomposition(
+                    key, float(entry), plan.stop, instruments, effective_risk_pct,
+                    fee_rate, expected_slippage,
+                )
             return float(sizing.qty)
         except Exception as exc:
             log.critical(

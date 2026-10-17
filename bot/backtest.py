@@ -22,14 +22,16 @@ from typing import Dict, List
 import numpy as np
 
 from bot.config import cfg
-from bot.kucoin_execution_model import (
+from bot.execution_model import (
     adverse_fill,
     configured_taker_fee,
     fee_return_fraction,
-    fetch_actual_taker_fee,
-    fetch_public_funding_history,
     funding_return_fraction,
     slippage_rate_for_symbol,
+)
+from bot.kucoin_execution_model import (
+    fetch_actual_taker_fee,
+    fetch_public_funding_history,
 )
 from bot.logger import log
 
@@ -111,7 +113,7 @@ def _historical_integrity(candles: list, interval: str) -> dict:
 
 
 async def _kucoin_page(client, symbol: str, interval: str, start_ms: int, end_ms: int) -> list:
-    from bot.kucoin import to_kucoin
+    from bot.kucoin_execution_model import to_kucoin
 
     data = await client._get(
         "/api/v1/kline/query",

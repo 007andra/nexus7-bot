@@ -18,9 +18,17 @@ def _value(name: str) -> str:
     return os.environ.get(name, "").strip()
 
 
+def _exchange_migration_ready() -> bool:
+    exchange = _value("EXCHANGE").lower().replace("-", "_")
+    if exchange in {"binance", "binance_usdm", "binance_futures", "usdm"}:
+        return _value("BINANCE_LIVE_MIGRATION_READY").lower() == "true"
+    return True
+
+
 def release_checks() -> dict[str, bool]:
     """Return each independent prerequisite without granting execution."""
     return {
+        "exchange_migration_ready": _exchange_migration_ready(),
         "paper_disabled": _value("PAPER_TRADE").lower() == "false",
         "live_trading_confirmed": _value("LIVE_TRADING_CONFIRMED") == LIVE_TRADING_TOKEN,
         "pilot_enabled": _value("REAL_TRADING_PILOT").lower() == "true",
