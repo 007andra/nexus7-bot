@@ -16,7 +16,9 @@ import zipfile
 from pathlib import Path
 
 BASE_URL = "https://data.binance.vision/data/futures/um/monthly"
-INTERVAL_MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
+SPOT_BASE_URL = "https://data.binance.vision/data/spot/monthly"
+SPOT_PREFIX = "spot/"  # cache namespace for spot archives
+INTERVAL_MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 USER_AGENT = "nexus7-research/1.0"
 
 
@@ -43,6 +45,17 @@ def kline_archive(symbol: str, interval: str, month: str) -> str:
     return f"klines/{symbol}/{interval}/{symbol}-{interval}-{month}.zip"
 
 
+def spot_kline_archive(symbol: str, interval: str, month: str) -> str:
+    """Spot archive; cached under ``spot/`` so it never collides with futures."""
+    return SPOT_PREFIX + kline_archive(symbol, interval, month)
+
+
+def _url_for(archive: str) -> str:
+    if archive.startswith(SPOT_PREFIX):
+        return f"{SPOT_BASE_URL}/{archive[len(SPOT_PREFIX):]}"
+    return f"{BASE_URL}/{archive}"
+
+
 def funding_archive(symbol: str, month: str) -> str:
     return f"fundingRate/{symbol}/{symbol}-fundingRate-{month}.zip"
 
@@ -59,12 +72,12 @@ def ensure_archive(cache_dir: Path, archive: str, *, fetch=_fetch) -> Path:
     checksum_path = path.with_name(path.name + ".CHECKSUM")
     if not checksum_path.exists():
         checksum_path.parent.mkdir(parents=True, exist_ok=True)
-        checksum_path.write_bytes(fetch(f"{BASE_URL}/{archive}.CHECKSUM"))
+        checksum_path.write_bytes(fetch(f"{_url_for(archive)}.CHECKSUM"))
     expected = checksum_path.read_text(encoding="ascii").split()[0].strip().lower()
     if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
         raise HistoryIntegrityError(f"malformed checksum for {archive}")
     if not path.exists():
-        data = fetch(f"{BASE_URL}/{archive}")
+        data = fetch(_url_for(archive))
         if hashlib.sha256(data).hexdigest() != expected:
             raise HistoryIntegrityError(f"checksum mismatch for {archive}")
         tmp = path.with_name(path.name + ".part")
